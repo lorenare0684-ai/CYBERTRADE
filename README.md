@@ -99,6 +99,26 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 24 — fill realism (storms widen entries; the slip limit is real)
+
+Fills were never the price you saw in a crisis. `risk.slippage` estimates
+**expected adverse entry slip once per candidate trade** — stress ×
+session liquidity × armed drill — and the value flows two ways:
+
+- **the survivor vetoes** entries whose expected slip exceeds
+  `RiskConfig.max_slippage_bps` (8.0) — a limit that was previously
+  *declared but never enforced*, now a real governor: default config
+  refuses to trade where fills would be worse than 8bps
+- **the paper broker applies** the surviving value as an adverse strike
+  offset (`max(order.meta.slippage_bps, broker default)`), so storm wins
+  must clear the handicap; the fill records the actual slip
+
+Heuristics (documented, venue-independent): calm thick tape stays at the
+configured base (zero drift outside adverse conditions); stress scales to
+~40bps at the crisis ceiling; thin session +6; drill floor 10; hard cap 75.
+
+Suite at **436 green** (`tests/test_phase24.py` 8 tests).
+
 ## Phase 23 — the score bay (backtests & gauntlets from the cockpit)
 
 `RUN BACKTEST` and `RUN GAUNTLET` buttons in the terminal launch **score

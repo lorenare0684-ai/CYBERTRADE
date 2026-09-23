@@ -22,6 +22,7 @@ from ..execution.paper import PaperBroker
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
 from ..risk.sessions import session_for, session_report as sessions_snapshot
+from ..risk.slippage import expected_slippage_bps
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
 from ..strategies.registry import build_all_weather
@@ -527,6 +528,13 @@ class TradingEngine:
             spread_mult = self.quotes.spread(signal.asset) / avg
 
         family = "ensemble"
+        # Phase-24: one slip estimate, two consumers — survivor veto + fill.
+        slip_bps = expected_slippage_bps(
+            stress=reading.stress,
+            session_liquidity=session_for(signal.asset, signal.ts).liquidity,
+            drill=bool(self.drill.active()),
+            base=self.config.broker.slippage_bps,
+        )
         decision = self.survivor.evaluate(
             signal,
             reading,
@@ -536,6 +544,7 @@ class TradingEngine:
             is_otc=is_otc,
             now=now,
             strategy_family=family,
+            expected_slippage_bps=slip_bps,
         )
         if not decision.allow:
             self.vetoes += 1
@@ -634,6 +643,7 @@ class TradingEngine:
             tag=f"{decision.posture}:{signal.reason}",
             cluster=self.corr.cluster_of(signal.asset),
             regime=reading.regime.value,
+            slippage_bps=decision.slippage_bps,
             votes=tuple(signal.meta.get("votes") or ()),
         )
         return order is not None

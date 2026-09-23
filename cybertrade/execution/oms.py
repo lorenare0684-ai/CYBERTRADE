@@ -69,6 +69,7 @@ class OrderManager:
         tag: str = "",
         cluster: str = "",
         regime: str = "",
+        slippage_bps: float = 0.0,
         votes: tuple = (),
     ) -> Optional[Order]:
         """Authorize + route one binary order. Returns None when risk vetoes."""
@@ -84,7 +85,8 @@ class OrderManager:
             strategy=strategy,
             tag=tag,
             meta={"cluster": cluster or asset, "regime": regime,
-                  "confidence": confidence, "votes": list(votes)},
+                  "confidence": confidence, "votes": list(votes),
+                  "slippage_bps": round(float(slippage_bps), 2)},
         )
         try:
             self.risk.authorize(

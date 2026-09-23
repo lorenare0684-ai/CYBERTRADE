@@ -115,7 +115,9 @@ class PaperBroker(Broker):
         if latency > 0:
             time.sleep(min(latency, 0.25))
 
-        slip = tick.price * self.slippage_bps / 10_000.0
+        # Phase-24: a per-order storm estimate wins over the calm default.
+        bps = max(float(order.meta.get("slippage_bps") or 0.0), self.slippage_bps)
+        slip = tick.price * bps / 10_000.0
         slip *= 1.0 + self._rng.uniform(-0.25, 0.25)
         strike = tick.price + (slip if order.side is Side.CALL else -slip)
         payout = order.payout if 0 < order.payout < 1 else self.payout_for(

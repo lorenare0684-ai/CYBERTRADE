@@ -55,6 +55,7 @@ class SurvivorDecision:
     min_confidence: float = 0.55
     reasons: List[str] = field(default_factory=list)
     forbidden_families: Set[str] = field(default_factory=set)
+    slippage_bps: float = 0.0      # expected adverse entry slip (P24)
 
     @property
     def veto_reason(self) -> str:
@@ -69,6 +70,7 @@ class SurvivorDecision:
             "min_confidence": round(self.min_confidence, 3),
             "reasons": self.reasons,
             "forbidden_families": sorted(self.forbidden_families),
+            "slippage_bps": round(self.slippage_bps, 2),
         }
 
 
@@ -171,6 +173,7 @@ class Survivor:
         is_otc: bool = True,
         now: Optional[float] = None,
         strategy_family: str = "",
+        expected_slippage_bps: float = 0.0,
     ) -> SurvivorDecision:
         now = now if now is not None else time.time()
         posture = self.posture_for(regime, now=now, is_otc=is_otc)
@@ -187,6 +190,11 @@ class Survivor:
             reasons.append(f"liquidity {liquidity:.2f} below floor {self.liquidity_floor:.2f}")
         if spread_mult > self.spread_limit_mult:
             reasons.append(f"spread x{spread_mult:.1f} above limit x{self.spread_limit_mult:.1f}")
+        if expected_slippage_bps > self.max_slippage_bps:
+            reasons.append(
+                f"expected slippage {expected_slippage_bps:.1f}bps above limit "
+                f"{self.max_slippage_bps:.1f}bps"
+            )
         if signal.expiry_seconds > table["max_expiry"]:
             reasons.append(
                 f"expiry {signal.expiry_seconds}s exceeds posture cap {table['max_expiry']}s"
@@ -219,6 +227,7 @@ class Survivor:
             min_confidence=table["min_confidence"],
             reasons=reasons or [f"{posture} clearance"],
             forbidden_families=forbidden,
+            slippage_bps=expected_slippage_bps,
         )
         self._log_transition(posture)
         return decision
