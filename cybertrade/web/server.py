@@ -153,6 +153,18 @@ class EngineHub:
 
         trades = self.engine.oms.ledger.trades
         starting = self.engine.config.risk.starting_balance
+        source_hint = "trades"
+        if not trades:
+            # Phase-13: the in-memory list forgets on restart; the journal does not.
+            j = getattr(self.engine, "journal", None)
+            if j is not None:
+                try:
+                    rows = j.trades(limit=5000)
+                except Exception:  # noqa: BLE001
+                    rows = []
+                if rows:
+                    trades = rows
+                    source_hint = "journal"
         if mode == "posterior":
             from ..risk.montecarlo import simulate_posterior
 
@@ -167,7 +179,7 @@ class EngineHub:
             report = simulate_from_records(
                 trades, starting_balance=starting, runs=runs, horizon=horizon
             )
-            source = "trades"
+            source = source_hint
         else:
             from ..risk.montecarlo import simulate
 

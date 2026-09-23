@@ -140,6 +140,7 @@ class TestEnginePersistence(unittest.TestCase):
 
             cfg = AppConfig()
             cfg.calibration_path = path
+            cfg.journal_path = os.path.join(tmp, "journal.db")
             eng = TradingEngine(
                 cfg, feed=SyntheticFeed(tick_interval=60.0), broker=PaperBroker()
             )

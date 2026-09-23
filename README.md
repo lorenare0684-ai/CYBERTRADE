@@ -99,6 +99,24 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 13 — wire the journal (the record survives)
+
+The sqlite journal store (`data/journal.db`, `TradeJournal`) existed since
+Phase 3 and **nothing ever wrote to it** — `journal` analytics read an empty
+book while every settlement evaporated with the process. Now the engine feeds
+it: every settle lands via `record_trade` (INSERT OR REPLACE, idempotent by
+settlement id), sessions are bookended (`start_session` at boot with broker
+mode + starting balance, `end_session` at shutdown with the final balance),
+and a locked or corrupt journal degrades gracefully instead of bricking boot.
+
+The MC lab keeps its sample across restarts: `hub.montecarlo` falls back to
+the journal when the in-memory trade list is empty (`source: "journal"`) —
+`simulate_from_records` already ate dicts with a `pnl` key, so the sqlite rows
+plug in verbatim. `python3 -m cybertrade journal` now reports on real history
+(streaks, decay check, per-strategy/asset/regime breakdowns, equity curve).
+
+Suite at **354 green** (`tests/test_phase13.py` 7 tests).
+
 ## Phase 12 — bet against the liar (posterior-pessimistic sizing)
 
 Kelly on a lucky thin record is how accounts die politely. Since Phase 6 the

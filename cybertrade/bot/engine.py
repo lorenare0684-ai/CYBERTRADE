@@ -33,6 +33,7 @@ from .alerts import AlertCenter
 from .calendar import EconomicCalendar, calendar_for_asset
 from ..risk.correlation import CorrelationMonitor
 from ..strategies.plugins import PluginRegistry
+from ..journal import TradeJournal
 from ..quant.calibration import CalibrationTracker
 from ..quant.binary import breakeven_winrate, edge_of
 from ..indicators.orderflow import TickFlow
@@ -112,6 +113,12 @@ class TradingEngine:
         self.calibrator = CalibrationTracker()
         self.flow: Dict[str, TickFlow] = {a: TickFlow() for a in self.feed.assets}
         self.tape = TapeRecorder(self.config.tape_dir, enabled=self.config.tape_enabled)
+        try:
+            self.journal: Optional[TradeJournal] = TradeJournal(self.config.journal_path)
+        except Exception:  # noqa: BLE001 — a locked journal must not stop boot
+            log.exception("journal open failed — trade history will be in-memory only")
+            self.journal = None
+        self._journal_session = 0
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -158,6 +165,13 @@ class TradingEngine:
         """Connect everything but keep trading disarmed."""
         self.state = EngineState.BOOT
         self._restore_calibration()
+        if self.journal is not None:
+            try:
+                self._journal_session = self.journal.start_session(
+                    self.config.broker.mode, self.config.risk.starting_balance
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("journal session start failed")
         if hasattr(self.feed, "warmup"):
             self.feed.warmup()
         self.broker.connect()
@@ -226,6 +240,11 @@ class TradingEngine:
         self.broker.disconnect()
         self.tape.detach()
         self._persist_calibration()
+        if self.journal is not None:
+            try:
+                self.journal.end_session(self._journal_session, self.oms.ledger.balance)
+            except Exception:  # noqa: BLE001
+                log.exception("journal session end failed")
         self.state = EngineState.SHUTDOWN
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         log.info("engine shutdown complete")
@@ -534,6 +553,12 @@ class TradingEngine:
         self.calibrator.observe_votes(
             order.meta.get("votes") if order else None, won, regime=record.regime
         )
+        # Phase-13: the record survives — feed the durable journal.
+        if self.journal is not None:
+            try:
+                self.journal.record_trade(record)
+            except Exception:  # noqa: BLE001 — a journal hiccup must not break the trade path
+                log.exception("journal write failed")
         for vote in meta_votes:
             name = vote.get("strategy")
             if name:
