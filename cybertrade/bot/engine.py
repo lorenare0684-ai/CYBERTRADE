@@ -121,6 +121,7 @@ class TradingEngine:
             self.journal = None
         self._journal_session = 0
         self.supervisor: Optional[ReconnectSupervisor] = None
+        self._decay_alerted: set = set()
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -142,6 +143,28 @@ class TradingEngine:
         self.health.note_message(f"venue {kind}: {payload}")
         default_bus.publish(Topic.CONNECTION, {"event": kind, **payload},
                             source="network")
+
+    def _check_decay(self) -> None:
+        """Stale-edge detector — fire once per strategy per decay spell."""
+        if self.journal is None:
+            return
+        try:
+            from ..journal import strategy_decay
+
+            for row in strategy_decay(self.journal):
+                name = row["strategy"]
+                if row["decaying"] and name not in self._decay_alerted:
+                    self._decay_alerted.add(name)
+                    self.health.note_message(
+                        f"decay alert {name}: wr {row['prior_win_rate']:.0%} → "
+                        f"{row['recent_win_rate']:.0%} ({row['delta']:+.2f})"
+                    )
+                    default_bus.publish(Topic.ALERT, {"kind": "decay", **row},
+                                        source="decay-watch")
+                elif not row["decaying"] and name in self._decay_alerted:
+                    self._decay_alerted.discard(name)  # recovered — arm again
+        except Exception:  # noqa: BLE001
+            log.exception("decay check failed")
 
     def _restore_calibration(self) -> None:
         """Reload the honesty ledger so learning survives process death."""
@@ -594,6 +617,7 @@ class TradingEngine:
                 self.journal.record_trade(record)
             except Exception:  # noqa: BLE001 — a journal hiccup must not break the trade path
                 log.exception("journal write failed")
+        self._check_decay()
         for vote in meta_votes:
             name = vote.get("strategy")
             if name:

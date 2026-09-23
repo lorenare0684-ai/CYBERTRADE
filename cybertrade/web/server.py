@@ -135,6 +135,7 @@ class EngineHub:
                 "gate": self.engine.config.risk.edge_gate,
                 "rejects": self.engine.edge_rejects,
                 "calibration": self.engine.calibrator.summary(self.worst_payout()),
+                "journal": self._journal_block(),
             },
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
@@ -144,6 +145,24 @@ class EngineHub:
         """The binding hurdle: the lowest venue quote across the universe."""
         qs = [self.engine.broker.payout_for(a, 60) for a in self.engine.feed.assets]
         return min(qs) if qs else self.engine.config.broker.payout_default
+
+    def _journal_block(self) -> Dict[str, Any]:
+        j = getattr(self.engine, "journal", None)
+        if j is None:
+            return {"available": False}
+        try:
+            from ..journal import strategy_decay
+
+            rows = strategy_decay(j, window=8)
+            decaying = [r for r in rows if r["decaying"]]
+            return {
+                "available": True,
+                "trades": j.count(),
+                "decaying": decaying[:5],
+                "watched": len(rows),
+            }
+        except Exception:  # noqa: BLE001
+            return {"available": False}
 
     def montecarlo(self, runs: int = 400, horizon: int = 200,
                    mode: str = "bootstrap") -> Dict[str, Any]:

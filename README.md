@@ -99,6 +99,24 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 18 — the decay watch (stale edges, flagged live)
+
+`decay_check` averages everyone together — one strategy bleeding out hides
+behind another's hot streak. `strategy_decay` watches **each record
+separately** (recent-vs-prior win rate over sliding windows, −12pt
+threshold, worst-first) and the engine turns it into a live watch: on every
+settle the watch evaluates, fires **once per decay spell**
+(`Topic.ALERT` + health feed), and **re-arms after recovery** so a second
+spell alerts again.
+
+| Surface | Shows |
+|---|---|
+| HUD decay strip | `⚠ DECAY: bollinger_fade, rsi_fade` or `128 journaled · edge stable` |
+| `GET /api/state` → `edge.journal` | `{trades, decaying[], watched}` |
+| `python3 -m cybertrade journal` | pooled `decay` + full breakdowns (already wired) |
+
+Suite at **388 green** (`tests/test_phase18.py` 6 tests).
+
 ## Phase 17 — the report card (gauntlet × posterior)
 
 A stress run is not a track record — pooled WR ≈ 50% everywhere in the

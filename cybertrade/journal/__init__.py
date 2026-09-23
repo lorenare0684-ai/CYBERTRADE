@@ -8,6 +8,7 @@ from .analytics import (
     journal_report,
     regime_breakdown,
     streaks,
+    strategy_decay,
 )
 from .store import TradeJournal
 
@@ -17,5 +18,6 @@ __all__ = [
     "asset_breakdown",
     "streaks",
     "decay_check",
+    "strategy_decay",
     "journal_report",
 ]

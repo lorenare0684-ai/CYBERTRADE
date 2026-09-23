@@ -110,10 +110,45 @@ def journal_report(journal: TradeJournal) -> Dict[str, Any]:
     }
 
 
+def strategy_decay(journal: TradeJournal, window: int = 10) -> List[Dict[str, Any]]:
+    """Per-strategy recent-vs-prior win rate — the stale-edge detector.
+
+    A strategy that WAS working and is now fading deserves a flag before the
+    pooled record notices (``decay_check`` averages everyone together).
+    Rows need ``window`` recent + ``window`` prior trades to speak; worst
+    deltas first.
+    """
+    rows = journal.trades(limit=400)  # newest first
+    by: Dict[str, List[bool]] = defaultdict(list)
+    for r in rows:
+        by[str(r.get("strategy") or "unknown")].append(bool(r["won"]))
+    out: List[Dict[str, Any]] = []
+    for name, outcomes in by.items():
+        recent = outcomes[:window]
+        prior = outcomes[window: window * 2]
+        if len(recent) < window or len(prior) < window:
+            continue
+        recent_wr = sum(recent) / len(recent)
+        prior_wr = sum(prior) / len(prior)
+        delta = recent_wr - prior_wr
+        out.append({
+            "strategy": name,
+            "recent_win_rate": round(recent_wr, 4),
+            "prior_win_rate": round(prior_wr, 4),
+            "delta": round(delta, 4),
+            "decaying": delta < -0.12,
+            "n_recent": len(recent),
+            "n_prior": len(prior),
+        })
+    out.sort(key=lambda r: r["delta"])
+    return out
+
+
 __all__ = [
     "regime_breakdown",
     "asset_breakdown",
     "streaks",
     "decay_check",
+    "strategy_decay",
     "journal_report",
 ]
