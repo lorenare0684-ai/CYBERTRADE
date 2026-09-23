@@ -134,7 +134,7 @@ class EngineHub:
                 "min_edge": self.engine.config.risk.min_edge,
                 "gate": self.engine.config.risk.edge_gate,
                 "rejects": self.engine.edge_rejects,
-                "calibration": self.engine.calibrator.summary(),
+                "calibration": self.engine.calibrator.summary(self.worst_payout()),
             },
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),

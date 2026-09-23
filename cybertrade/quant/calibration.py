@@ -175,6 +175,136 @@ class CalibrationTracker:
             total += b.total
         return wins, total - wins
 
+    # -- persistence -------------------------------------------------------
+    def to_dict(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "version": 1,
+                "observed": self._observed,
+                "global": [{"wins": b.wins, "total": b.total} for b in self._global],
+                "by_strategy": {
+                    k: [{"wins": b.wins, "total": b.total} for b in t]
+                    for k, t in self._by_strategy.items()
+                },
+                "by_regime": {
+                    k: [{"wins": b.wins, "total": b.total} for b in t]
+                    for k, t in self._by_regime.items()
+                },
+            }
+
+    def update_from(self, data: Dict[str, Any]) -> None:
+        """Replace tracker state from a :meth:`to_dict` payload."""
+
+        def _buckets(rows) -> List[ReliabilityBucket]:
+            out: List[ReliabilityBucket] = []
+            for r in rows or []:
+                try:
+                    out.append(ReliabilityBucket(
+                        wins=max(0, int(r.get("wins", 0))),
+                        total=max(0, int(r.get("total", 0))),
+                    ))
+                except (TypeError, ValueError, AttributeError):
+                    out.append(ReliabilityBucket())
+            need = len(BUCKET_EDGES) - 1
+            out = out[:need] + [ReliabilityBucket() for _ in range(max(0, need - len(out)))]
+            return out
+
+        with self._lock:
+            self._global = _buckets(data.get("global"))
+            self._by_strategy = {
+                str(k): _buckets(v)
+                for k, v in (data.get("by_strategy") or {}).items()
+            }
+            self._by_regime = {
+                str(k): _buckets(v)
+                for k, v in (data.get("by_regime") or {}).items()
+            }
+            self._observed = int(data.get("observed", 0)) or sum(
+                b.total for b in self._global
+            )
+
+    def save(self, path: str) -> bool:
+        """Persist the ledger atomically.  Refuses to clobber real data with
+        an empty session (a crashed boot must not erase the lessons)."""
+        import json
+        import os
+
+        with self._lock:
+            empty = self._observed == 0
+        if empty and os.path.exists(path):
+            return False
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(self.to_dict(), fh, indent=1, sort_keys=True)
+        os.replace(tmp, path)
+        return True
+
+    def load(self, path: str) -> bool:
+        """Replace state from a saved ledger.  ``False`` = file unreadable."""
+        import json
+
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(data, dict):
+            return False
+        self.update_from(data)
+        return True
+
+    # -- honesty ledger ----------------------------------------------------
+    def honesty(self, payout: float = 0.85, runs: int = 800, seed: int = 1337):
+        """Per-strategy liar detection: posterior mass below breakeven.
+
+        Each row samples ``P(win) ~ Beta(wins+2, losses+2)`` and measures how
+        much of that mass sits under ``1/(1+payout)``.  ``liar`` fires past
+        50% — the record is more likely a losing strategy in a winner's
+        clothes.  Rows sort worst-first; zero-evidence rows share one draw.
+        """
+        import random as _random
+
+        breakeven = 1.0 / (1.0 + payout) if payout > -1.0 else 1.0
+        with self._lock:
+            items = list(self._by_strategy.items())
+        n_draw = max(50, int(runs))
+
+        def _p_edge(wins: int, losses: int, label: str) -> float:
+            rng = _random.Random(f"{seed}:{label}:{wins}:{losses}:{payout}")
+            hits = 0
+            for _ in range(n_draw):
+                if rng.betavariate(wins + 2.0, losses + 2.0) < breakeven:
+                    hits += 1
+            return hits / n_draw
+
+        rows: List[Dict[str, Any]] = []
+        prior_p: Dict[tuple, float] = {}
+        for name, table in items:
+            wins = sum(b.wins for b in table)
+            total = sum(b.total for b in table)
+            losses = total - wins
+            if total == 0:
+                key = (0, 0)
+                if key not in prior_p:
+                    prior_p[key] = _p_edge(0, 0, "prior")
+                p_edge = prior_p[key]
+            else:
+                p_edge = _p_edge(wins, losses, name)
+            rows.append({
+                "strategy": name,
+                "wins": wins,
+                "losses": losses,
+                "n": total,
+                "hit_rate": round(wins / total, 4) if total else 0.0,
+                "p_edge_negative": round(p_edge, 4),
+                "liar": p_edge > 0.5,
+            })
+        rows.sort(key=lambda r: (-r["p_edge_negative"], -r["n"]))
+        return rows
+
     def p_win_for(
         self, strategy: str, confidence: float, votes=None, regime: str = ""
     ) -> float:
@@ -222,7 +352,7 @@ class CalibrationTracker:
         return sum(gaps) / len(gaps) if gaps else 0.0
 
     # -- introspection -----------------------------------------------------
-    def summary(self) -> Dict[str, Any]:
+    def summary(self, payout: float = 0.85) -> Dict[str, Any]:
         with self._lock:
             rows = []
             for name, table in sorted(self._by_strategy.items()):
@@ -236,9 +366,13 @@ class CalibrationTracker:
                         (b.posterior() for b in table if b.total), default=0.5
                     ),
                 })
+            g_wins = sum(b.wins for b in self._global)
+            g_total = sum(b.total for b in self._global)
             return {
                 "observed": self._observed,
                 "calibration_gap": round(self.calibration_gap(), 4),
+                "evidence": [g_wins, g_total - g_wins],
+                "honesty": self.honesty(payout),
                 "strategies": rows,
             }
 

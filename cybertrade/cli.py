@@ -170,6 +170,35 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_calibrate(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    from .quant.calibration import CalibrationTracker
+
+    path = args.path or cfg.calibration_path
+    tracker = CalibrationTracker()
+    if not tracker.load(path):
+        print(f"  no calibration ledger at {path!r} — run the engine "
+              f"(it saves on shutdown)")
+        return 1
+    w, l = tracker.evidence()
+    n = max(1, w + l)
+    payout = float(args.payout)
+    rows = tracker.honesty(payout, runs=2000)
+    liars = sum(1 for r in rows if r["liar"])
+    print(f"  ledger {path}")
+    print(f"  evidence: {w}W/{l}L ({w / n * 100:.1f}%) | observations {tracker.observations}"
+          f" | gap {tracker.calibration_gap():.4f} | payout {payout:.2f}"
+          f" hurdle {1 / (1 + payout):.4f}")
+    print(f"  {'strategy':<28} {'W':>4} {'L':>4} {'hit%':>6} {'P(edge<0)':>9}  flag")
+    for r in rows[:40]:
+        flag = "LIAR" if r["liar"] else ""
+        print(f"  {r['strategy']:<28} {r['wins']:>4} {r['losses']:>4} "
+              f"{r['hit_rate'] * 100:>5.1f}% {r['p_edge_negative'] * 100:>8.1f}%  {flag}")
+    print(f"  {len(rows)} strategies · {liars} flagged · liar = "
+          f"P(true edge < breakeven) > 50%")
+    return 0
+
+
 def cmd_backtest(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     from .backtest import Backtester, matrix_table
@@ -506,6 +535,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="posterior mode: settled wins in the record")
     mc.add_argument("--losses", type=int, default=None,
                     help="posterior mode: settled losses in the record")
+    clb = sub.add_parser("calibrate", help="calibration honesty ledger (persisted)")
+    clb.add_argument("--path", default="",
+                     help="ledger path (default: config calibration_path)")
+    clb.add_argument("--payout", type=float, default=0.85,
+                     help="payout hurdle for liar flags")
+    clb.set_defaults(func=cmd_calibrate)
 
     cal = sub.add_parser("calendar", help="economic calendar / news blackouts")
     cal.add_argument("--days", type=float, default=7.0, help="horizon in days")

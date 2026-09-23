@@ -256,6 +256,7 @@ class AppConfig:
     calendar_path: str = os.path.join("~", ".cybertrade", "calendar.json")
     tape_dir: str = os.path.join("data", "tapes")
     tape_enabled: bool = True
+    calibration_path: str = os.path.join("data", "calibration.json")
     log_path: str = os.path.join("data", "cybertrade.log")
     config_path: str = DEFAULT_CONFIG_PATH
 

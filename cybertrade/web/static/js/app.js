@@ -67,6 +67,16 @@ function render(state) {
   if (snap.edge) {
     $("edge-ev").textContent = (snap.edge.breakeven * 100).toFixed(1) + "%";
     $("cal-gap").textContent = fmt(snap.edge.calibration ? snap.edge.calibration.calibration_gap : 0);
+    const hon = (snap.edge.calibration && snap.edge.calibration.honesty) || [];
+    const he = $("honesty");
+    if (he) {
+      const liars = hon.filter((r) => r.liar);
+      he.textContent = hon.length
+        ? `${hon.length} strategies · ${liars.length} LIAR${liars.length === 1 ? "" : "S"}`
+          + (liars.length ? ` · worst ${liars[0].strategy} ${Math.round(liars[0].p_edge_negative * 100)}%` : "")
+        : "no ledger yet";
+      he.className = liars.length ? "mini bad" : "mini";
+    }
   }
 
   // meters

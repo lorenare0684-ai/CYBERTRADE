@@ -99,6 +99,29 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 11 — the calibrator that survives its process (honesty ledger)
+
+Learning that evaporates on restart is a demo, not a survivor. The calibration
+ledger now **persists** (`data/calibration.json`, atomic write via
+`CalibrationTracker.save()/load()`), reloads on `engine.boot()`, and saves on
+`engine.shutdown()` — with one rule: **an empty session never clobbers real
+data** (a crashed boot cannot erase what the market taught). Backtests keep
+their own fresh trackers and never pollute the live ledger.
+
+Every strategy record also gets the P10 question asked individually:
+**`honesty(payout)`** samples `P(win) ~ Beta(wins+2, losses+2)` per strategy
+and reports `p_edge_negative` — posterior mass below breakeven — flagging
+**LIAR** past 50%. Rows sort worst-first.
+
+| Surface | What it shows |
+|---|---|
+| `python3 -m cybertrade calibrate --payout 0.85` | full ledger table, W/L, hit%, P(edge<0), LIAR flags |
+| `GET /api/state` → `edge.calibration.honesty[]` | per-strategy rows + `evidence` |
+| HUD honesty strip | `42 strategies · 3 LIARS · worst strat 97%` |
+
+Suite at **335 green** (`tests/test_phase11.py` 12 tests: roundtrip, no-clobber,
+boot→shutdown persistence, liar flags, worst-first order, CLI).
+
 ## Phase 10 — is the record lying? (Beta-posterior Monte Carlo)
 
 Bootstrapped Monte Carlo **cannot see parameter uncertainty** — resample a

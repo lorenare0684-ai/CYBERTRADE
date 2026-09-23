@@ -129,9 +129,35 @@ class TradingEngine:
         default_bus.subscribe(Topic.KILL, lambda e: self._enter_kill(str(e.payload)))
 
     # -- lifecycle ---------------------------------------------------------
+    def _restore_calibration(self) -> None:
+        """Reload the honesty ledger so learning survives process death."""
+        path = self.config.calibration_path
+        if not path:
+            return
+        try:
+            if self.calibrator.load(path):
+                w, l = self.calibrator.evidence()
+                self.health.note_message(f"calibrator restored: {w}W/{l}L")
+                log.info("calibrator restored %dW/%dL (%d obs) from %s",
+                         w, l, self.calibrator.observations, path)
+        except Exception:  # noqa: BLE001 — a bad ledger must not stop boot
+            log.exception("calibration ledger load failed — starting cold")
+
+    def _persist_calibration(self) -> None:
+        path = self.config.calibration_path
+        if not path:
+            return
+        try:
+            if self.calibrator.save(path):
+                log.info("calibration ledger saved: %s (%d obs)",
+                         path, self.calibrator.observations)
+        except Exception:  # noqa: BLE001
+            log.exception("calibration ledger save failed")
+
     def boot(self) -> None:
         """Connect everything but keep trading disarmed."""
         self.state = EngineState.BOOT
+        self._restore_calibration()
         if hasattr(self.feed, "warmup"):
             self.feed.warmup()
         self.broker.connect()
@@ -199,6 +225,7 @@ class TradingEngine:
             self._thread.join(timeout=3.0)
         self.broker.disconnect()
         self.tape.detach()
+        self._persist_calibration()
         self.state = EngineState.SHUTDOWN
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         log.info("engine shutdown complete")
