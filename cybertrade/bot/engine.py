@@ -432,11 +432,27 @@ class TradingEngine:
             scale = clamp(edge / max(self.config.risk.min_edge, 1e-6), 0.25, 1.0)
             stake = max(self.config.risk.min_stake, stake * scale)
 
+        expiry = signal.expiry_seconds
+        if cfg.risk.expiry_select == "adaptive":
+            hist = self._candles_for(signal.asset, 80)
+            if len(hist) >= 3:
+                from ..quant.expiry import choose_expiry
+
+                expiry = choose_expiry(
+                    "call" if signal.side is Side.CALL else "put",
+                    hist[-1].close,
+                    payout,
+                    [c.close for c in hist],
+                    cfg.risk.expiry_candidates,
+                    signal.confidence,
+                    default=signal.expiry_seconds,
+                )
+
         order = self.oms.submit(
             asset=signal.asset,
             side=signal.side,
             stake=stake,
-            expiry_seconds=min(signal.expiry_seconds, decision.max_expiry_seconds),
+            expiry_seconds=min(int(expiry), decision.max_expiry_seconds),
             payout=payout,
             confidence=signal.confidence,
             strategy=signal.strategy,

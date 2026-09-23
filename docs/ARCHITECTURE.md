@@ -79,6 +79,10 @@ strategy that overstates confidence gradually loses its own gate. Order-flow
 snapshots (`TickFlow`) ride in `StrategyContext.extra["flow"]`; the
 `TapeRecorder` taps the event bus at boot for bounded JSONL forensics.
 
+The backtester wires the identical gate (`backtest/engine.py`) with a fresh
+calibrator per run, and `RiskConfig.expiry_select="adaptive"` swaps the
+signal's horizon for the best modeled candidate (`quant/expiry.py`).
+
 ## Testing strategy
 
 1. **Known-value math** — moving averages on constants, RSI of monotone

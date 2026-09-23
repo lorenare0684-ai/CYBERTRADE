@@ -143,7 +143,7 @@ class PluginRegistry:
 
     def infos(self) -> List[PluginInfo]:
         with self._lock:
-            return [PluginInfo(**i.to_dict_dict()) if False else i for i in self._infos]  # noqa
+            return list(self._infos)
 
     def to_list(self) -> List[Dict[str, Any]]:
         with self._lock:

@@ -18,6 +18,9 @@ from ..data.models import Candle, Signal, TradeRecord
 from ..data.synthetic import generate_candles
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
+from ..indicators.orderflow import TickFlow
+from ..quant.binary import edge_of
+from ..quant.calibration import CalibrationTracker
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
 from ..strategies.registry import build_all_weather
@@ -55,6 +58,7 @@ class BacktestResult:
     equity_curve: List[float] = field(default_factory=list)
     regime_path: List[str] = field(default_factory=list)
     events: List[str] = field(default_factory=list)
+    edge_rejects: int = 0
     config_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -67,6 +71,7 @@ class BacktestResult:
             "scenario": self.scenario,
             "seed": self.seed,
             "survived": self.survived,
+            "edge_rejects": self.edge_rejects,
             **self.report.to_dict(),
         }
 
@@ -87,6 +92,7 @@ class Backtester:
         self.config = config or AppConfig()
         self.ensemble = ensemble
         self.survivor_enabled = self.config.survivor.enabled
+        self.calibrator = CalibrationTracker()
 
     def run_scenario(
         self,
@@ -122,6 +128,9 @@ class Backtester:
             ts=(candles[0].close_ts if candles else None),
         )
         detector = RegimeDetector()
+        flow = TickFlow()
+        self.calibrator = CalibrationTracker()  # fresh evidence per run — cold start is honest
+        edge_rejects = 0
 
         balance = bt.starting_balance
         peak = balance
@@ -135,6 +144,7 @@ class Backtester:
         bars_per_day = max(1, 86400 // max(1, candles[0].timeframe_seconds)) if candles else 240
 
         for i in range(len(candles)):
+            flow.on_tick(candles[i].close, size=candles[i].volume or 1.0)
             window = list(candles[max(0, i - 150) : i + 1])
             if len(window) < warmup:
                 equity_curve.append(balance)
@@ -184,6 +194,9 @@ class Backtester:
                         now=candles[i].close_ts,
                     )
                     ensemble.record_result(won and not refunded, pnl)
+                    self.calibrator.observe(
+                        trade.strategy, trade.confidence, won and not refunded
+                    )
                 else:
                     still_open.append(trade)
             open_trades = still_open
@@ -209,6 +222,7 @@ class Backtester:
                 expiry_seconds=cfg.strategy.expiry_seconds,
                 payout=bt.payout,
                 ts=window[-1].close_ts,
+                extra={"flow": flow},
             )
             signal = ensemble.generate(ctx)
             if signal is None:
@@ -268,9 +282,42 @@ class Backtester:
                 regime_scale=stake_scale,
             )
             stake = clamp(sizing.stake, 0.0, balance * 0.5)
+
+            # ---- Phase-5: calibrated edge gate (mirrors the live engine) ----
+            p_win = self.calibrator.p_for(signal.strategy, signal.confidence)
+            edge = edge_of(p_win, bt.payout)
+            if edge < 0:  # negative EV never passes — even with the gate off
+                edge_rejects += 1
+                vetoes += 1
+                equity_curve.append(balance)
+                continue
+            if cfg.risk.edge_gate != "off" and edge < cfg.risk.min_edge:
+                if cfg.risk.edge_gate == "hard":
+                    edge_rejects += 1
+                    vetoes += 1
+                    equity_curve.append(balance)
+                    continue
+                scale = clamp(edge / max(cfg.risk.min_edge, 1e-6), 0.25, 1.0)
+                stake = max(cfg.risk.min_stake, stake * scale)
+
             if stake < cfg.risk.min_stake * 0.5 or len(open_trades) >= cfg.risk.max_concurrent:
                 equity_curve.append(balance)
                 continue
+
+            # ---- Phase-5: adaptive expiry ----------------------------------
+            expiry_seconds = signal.expiry_seconds
+            if cfg.risk.expiry_select == "adaptive":
+                from ..quant.expiry import choose_expiry
+
+                expiry_seconds = choose_expiry(
+                    "call" if signal.side is Side.CALL else "put",
+                    candles[i].close,
+                    bt.payout,
+                    [c.close for c in window],
+                    cfg.risk.expiry_candidates,
+                    signal.confidence,
+                    default=signal.expiry_seconds,
+                )
 
             # fill at next bar's open + slippage (binary reality: you always
             # pay something to get filled)
@@ -278,7 +325,7 @@ class Backtester:
             fill_price = candles[min(i + 1, len(candles) - 1)].open
             slip = fill_price * bt.spread_bps / 10_000.0
             strike = fill_price + (slip if signal.side is Side.CALL else -slip)
-            expiry_bars = max(1, signal.expiry_seconds // max(1, window[-1].timeframe_seconds))
+            expiry_bars = max(1, int(expiry_seconds) // max(1, window[-1].timeframe_seconds))
             trade = SimTrade(
                 asset=asset,
                 side=signal.side,
@@ -321,6 +368,7 @@ class Backtester:
             equity_curve=equity_curve,
             regime_path=regime_path,
             events=events,
+            edge_rejects=edge_rejects,
         )
 
     def run_matrix(

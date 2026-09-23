@@ -261,6 +261,7 @@ class TestTape(unittest.TestCase):
             self.assertEqual(rows[0]["kind"], "tick")
             only = list(replay(path, kinds=["candle"]))
             self.assertEqual(len(only), 1)
+            r.close()
 
     def test_attach_records_bus_events(self):
         with tempfile.TemporaryDirectory() as tmp:

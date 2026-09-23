@@ -99,6 +99,26 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 5 — the gate under fire (gauntlet parity)
+
+The backtester now runs the **same calibrated edge gate** as the live engine,
+so the GAUNTLET measures what the quant layer buys instead of assuming it:
+fresh `CalibrationTracker` per run, `TickFlow` fed bar-by-bar (orderflow
+strategies vote in backtest too), negative-EV veto + `edge_gate` band,
+settlements teach the calibrator. Plus **adaptive expiry** —
+`RiskConfig.expiry_select="adaptive"` picks the candidate horizon with the
+best modeled edge (`quant/expiry.py`, drift from conviction, vol from
+recent closes); default stays `"signal"`.
+
+Controlled gauntlet result (30 scenario-seed runs per arm, same code):
+the **negative-EV veto is the workhorse** (~138 rejections/run, mean trades
+47.6 vs 47.5, survival 0.691 vs 0.689). The `scale` band barely engages:
+cold-start `p_for` moves in coarse steps, so the `edge ∈ [0, min_edge)`
+band is a thin confidence sliver. Taken trades still clear the 54.05%
+breakeven hurdle only ~half the time — calibration granularity (per
+*strategy*, not per ensemble) is the next frontier. `tests/test_phase5.py`
+(12 tests); suite at **279 green**.
+
 ## Phase 4 — quant edge layer
 
 Phase 3 left the honest wound open: mean win rate 49.3% against a **54.05%
