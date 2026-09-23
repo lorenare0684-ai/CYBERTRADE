@@ -3,6 +3,7 @@
     python -m cybertrade gui             desktop terminal
     python -m cybertrade web             browser terminal (live preview)
     python -m cybertrade run             paper-trade headless
+    python -m cybertrade supervise       bounded paper-engine restarts
     python -m cybertrade backtest        run the all-weather gauntlet
     python -m cybertrade edge            binary-options edge calculator
     python -m cybertrade optimize        walk-forward parameter search
@@ -243,7 +244,7 @@ def _live_api(cfg: AppConfig, api_factory=None):
     return api
 
 
-def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None):
+def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None, *, durable=False):
     from .bot.engine import TradingEngine
 
     # Phase-29: live modes wire REAL venue candles only — synthetic is
@@ -283,7 +284,7 @@ def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None):
                 latency_ms=cfg.broker.latency_ms,
                 slippage_bps=cfg.broker.slippage_bps,
             )
-        engine = TradingEngine(cfg, feed=feed, broker=broker)
+        engine = TradingEngine(cfg, feed=feed, broker=broker, durable=durable)
         engine.boot()
         return engine
 
@@ -302,13 +303,14 @@ def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None):
         warmup_bars=400,
     )
     broker = None  # paper path — TradingEngine builds the default PaperBroker
-    engine = TradingEngine(cfg, feed=feed, broker=broker)
+    engine = TradingEngine(cfg, feed=feed, broker=broker, durable=durable)
     engine.boot()
     return engine
 
 
 def cmd_gui(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    cfg.risk.allow_live = False  # a saved permission never arms a new process
     from .gui import GUI_AVAILABLE, run_app
 
     if not GUI_AVAILABLE:
@@ -316,7 +318,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
               file=sys.stderr)
         return 2
     print(BANNER)
-    engine = _build_engine(cfg, getattr(args, "scenario", ""))
+    engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
     try:
         run_app(engine, cfg)
     finally:
@@ -326,10 +328,11 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 def cmd_web(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    cfg.risk.allow_live = False
     print(BANNER)
     host = args.host or cfg.display.web_host
     port = args.port or cfg.display.web_port
-    engine = _build_engine(cfg, getattr(args, "scenario", ""))
+    engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
     from .web.server import EngineHub, WebTerminal
 
     hub = EngineHub(engine, cfg)
@@ -356,34 +359,91 @@ def cmd_web(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    if getattr(args, "dry_run", False):
-        cfg.broker.mode = "dryrun"
-        print("  DRY RUN — venue quotes (if configured), paper fills, live orders disabled.")
-    print(BANNER)
-    if not _confirm_live(args, cfg):
-        return 1
-    engine = _build_engine(cfg, getattr(args, "scenario", ""))
-    live = bool(args.live)
-    engine.arm(live=live)
-    print(f"  engine ARMED ({'LIVE' if live else 'PAPER'}) — ctrl+c to stop\n")
-    try:
-        while True:
-            time.sleep(5.0)
-            snap = engine.snapshot()
-            h = snap["health"]
-            a = snap["account"]
-            print(
-                f"  [{h['engine_state']:^8}] posture {h['posture']:<8} "
-                f"bal {a['balance']:>8.2f} wr {h['win_rate'] * 100:4.1f}% "
-                f"trades {h['trades_total']} open {a['open_positions']} "
-                f"dd {a['drawdown'] * 100:.1f}%"
-            )
-    except KeyboardInterrupt:
-        print("\n  disarming…")
-    finally:
-        engine.shutdown()
+    from .constants import EngineState
+    from .exceptions import ConfigError, KillSwitchEngaged
+    from .statestore import StateError
+    from .watchdog import SAFETY_HOLD_EXIT, stop_on_sigterm
+
+    engine = None
+    with stop_on_sigterm():
+        try:
+            cfg = _load_config(args)
+            live = bool(getattr(args, "live", False))
+            supervised = bool(getattr(args, "supervised", False))
+            if supervised and (live or getattr(args, "dry_run", False)
+                               or cfg.broker.mode != "paper"):
+                raise ConfigError("supervised children are PAPER ONLY; live restart is manual")
+            if not live:
+                cfg.risk.allow_live = False
+            if getattr(args, "dry_run", False):
+                cfg.broker.mode = "dryrun"
+                print("  DRY RUN — venue quotes, paper fills; live orders disabled.")
+            if supervised and (not cfg.continuity_path or not cfg.heartbeat_path):
+                raise ConfigError("supervision requires continuity and heartbeat paths")
+            print(BANNER)
+            if not _confirm_live(args, cfg):
+                return 1
+            engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
+            engine.arm(live=live)
+            print(f"  engine ARMED ({'LIVE' if live else 'PAPER'}) — ctrl+c to stop\n")
+            while True:
+                time.sleep(5.0)
+                if engine.state is EngineState.KILL or not engine._running:
+                    print("  SAFETY HOLD — " + (engine.risk.state.kill_reason or engine.last_error))
+                    return SAFETY_HOLD_EXIT
+                snap = engine.snapshot()
+                h, a = snap["health"], snap["account"]
+                print(
+                    f"  [{h['engine_state']:^8}] posture {h['posture']:<8} "
+                    f"bal {a['balance']:>8.2f} wr {h['win_rate'] * 100:4.1f}% "
+                    f"trades {h['trades_total']} open {a['open_positions']} "
+                    f"dd {a['drawdown'] * 100:.1f}%"
+                )
+        except (ConfigError, KillSwitchEngaged, StateError) as exc:
+            print(f"  SAFETY HOLD — {exc}", file=sys.stderr)
+            return SAFETY_HOLD_EXIT
+        except KeyboardInterrupt:
+            print("\n  disarming…")
+        finally:
+            if engine is not None:
+                engine.shutdown()
     return 0
+
+
+def cmd_supervise(args: argparse.Namespace) -> int:
+    """An intentionally narrow launcher: never supervises live executions."""
+    import os
+    from .watchdog import RestartBudget, Supervisor
+
+    cfg = _load_config(args)
+    if cfg.broker.mode != "paper":
+        print("  supervise is PAPER ONLY — live/dry-run restarts stay manual", file=sys.stderr)
+        return 2
+    if not cfg.continuity_path or not cfg.heartbeat_path:
+        print("  supervision requires continuity_path and heartbeat_path", file=sys.stderr)
+        return 2
+    cmd = [sys.executable, "-u", "-m", "cybertrade"]
+    if args.config:
+        cmd += ["--config", os.path.abspath(os.path.expanduser(args.config))]
+    cmd += ["run", "--supervised"]
+    if args.scenario:
+        cmd += ["--scenario", args.scenario]
+    interval = max(0.25, cfg.timeframe().seconds / 6.0)
+    stale = args.stale_seconds if args.stale_seconds is not None else max(45.0, interval * 2 + 15)
+    try:
+        if stale <= interval:
+            raise ValueError("stale-seconds must exceed the configured decision interval")
+        supervisor = Supervisor(
+            cmd, heartbeat_path=os.path.abspath(os.path.expanduser(cfg.heartbeat_path)),
+            crash_dir=args.crash_dir, max_stale=stale, startup_grace=args.startup_grace,
+            budget=RestartBudget(args.max_restarts, args.restart_window),
+        )
+    except ValueError as exc:
+        print(f"  invalid supervision settings: {exc}", file=sys.stderr)
+        return 2
+    print(f"  PAPER supervisor — at most {args.max_restarts} restarts / "
+          f"{args.restart_window:g}s; stale {stale:g}s; ctrl+c to stop")
+    return supervisor.run()
 
 
 def cmd_calibrate(args: argparse.Namespace) -> int:
@@ -751,8 +811,19 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--live", action="store_true", help="DANGER: real order flow")
     r.add_argument("-y", "--yes", action="store_true", help="skip live confirmation")
     r.set_defaults(func=cmd_run)
+    r.add_argument("--supervised", action="store_true", help=argparse.SUPPRESS)
     r.add_argument("--dry-run", action="store_true",
                    help="live venue quotes + paper fills; orders never reach the venue")
+
+    sup = sub.add_parser("supervise", help="bounded PAPER-engine crash/hang restarts")
+    sup.add_argument("--scenario", default="")
+    sup.add_argument("--max-restarts", type=int, default=5)
+    sup.add_argument("--restart-window", type=float, default=600.0, help="budget window, seconds")
+    sup.add_argument("--stale-seconds", type=float, default=None,
+                     help="no-progress timeout; default adapts to the timeframe")
+    sup.add_argument("--startup-grace", type=float, default=120.0)
+    sup.add_argument("--crash-dir", default="data/crashes")
+    sup.set_defaults(func=cmd_supervise)
 
     b = sub.add_parser("backtest", help="run stress gauntlet")
     b.add_argument("--scenario", default="")

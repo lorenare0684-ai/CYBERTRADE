@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..config import RiskConfig
@@ -19,6 +19,7 @@ from ..constants import Side
 from ..data.models import AccountSnapshot, Order, TradeRecord
 from ..events import Topic, default_bus
 from ..exceptions import RiskRejection
+from ..statestore import StateError, finite, integer, text
 from ..utils import timex
 from ..utils.mathx import clamp
 from .limits import ExposureCaps, LimitBook, LimitCheck
@@ -107,6 +108,66 @@ class RiskManager:
             self.state.hour_start_ts = ts
             self.state.locked_until = 0.0
         log.info("risk day reset balance=%.2f", balance)
+
+    def export_state(self) -> Dict[str, Any]:
+        """Full-precision governor checkpoint, not the rounded HUD snapshot."""
+        with self._lock:
+            return {"state": asdict(self.state),
+                    "strategy_wr": {k: dict(v) for k, v in self._strategy_wr.items()}}
+
+    @staticmethod
+    def decode_state(data: Dict[str, Any]):
+        """Validate all fields before mutating anything (no forgiving defaults)."""
+        try:
+            raw = data["state"]
+            if not isinstance(raw, dict) or set(raw) != {f.name for f in fields(RiskState)}:
+                raise StateError("incomplete risk state")
+            candidate = RiskState(**raw)
+            ints = ("trades_today", "trades_this_hour", "consecutive_losses",
+                    "consecutive_wins", "open_count")
+            numbers = ("day_start_balance", "current_balance", "day_start_ts",
+                       "peak_balance", "hour_start_ts", "cooldown_until",
+                       "locked_until", "open_stake_sum", "realized_vol")
+            for key in ints:
+                integer(getattr(candidate, key), key)
+            for key in numbers:
+                finite(getattr(candidate, key), key)
+            if type(candidate.kill) is not bool:
+                raise StateError("invalid kill flag")
+            text(candidate.kill_reason, "kill_reason")
+            if candidate.peak_balance < candidate.current_balance or candidate.realized_vol <= 0:
+                raise StateError("invalid risk anchors")
+            for key in ("open_assets", "open_clusters"):
+                values = getattr(candidate, key)
+                if not isinstance(values, dict):
+                    raise StateError(f"invalid {key}")
+                for name, count in values.items():
+                    text(name, key, True)
+                    integer(count, key)
+                setattr(candidate, key, dict(values))
+            results = candidate.last_results
+            if not isinstance(results, list) or len(results) > 200 or any(
+                type(value) is not bool for value in results
+            ):
+                raise StateError("invalid recent results")
+            candidate.last_results = list(results)
+            stats = data["strategy_wr"]
+            if not isinstance(stats, dict):
+                raise StateError("invalid strategy counters")
+            for name, row in stats.items():
+                text(name, "strategy", True)
+                n, w = integer(row["n"], "n"), integer(row["w"], "w")
+                if w > n:
+                    raise StateError("strategy wins exceed observations")
+            return candidate, {k: dict(v) for k, v in stats.items()}
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateError("invalid saved risk governor") from exc
+
+    def restore_state(self, data: Dict[str, Any], now: Optional[float] = None) -> None:
+        candidate, stats = self.decode_state(data)
+        with self._lock:
+            self.state, self._strategy_wr = candidate, stats
+            self._roll_clock(timex.now() if now is None else now)
 
     def update_balance(self, balance: float) -> None:
         with self._lock:
@@ -214,7 +275,7 @@ class RiskManager:
             )
             balance = max(
                 0.0,
-                st.current_balance or st.day_start_balance or cfg.starting_balance,
+                st.current_balance,
             )
             daily_loss_frac = self._daily_loss_frac()
             book.add(
@@ -416,6 +477,7 @@ class RiskManager:
         """Backtest-friendly closer without a full Order object."""
         now = now if now is not None else timex.now()
         with self._lock:
+            self._roll_clock(now)  # settlements can be the first event after UTC midnight
             st = self.state
             st.open_count = max(0, st.open_count - 1)
             if asset:
@@ -445,6 +507,7 @@ class RiskManager:
                  now: Optional[float] = None) -> None:
         now = now if now is not None else timex.now()
         with self._lock:
+            self._roll_clock(now)  # settlements can be the first event after UTC midnight
             st = self.state
             st.open_count = max(0, st.open_count - 1)
             st.open_stake_sum = max(0.0, st.open_stake_sum - order.amount)
@@ -528,18 +591,28 @@ class RiskManager:
     # -- internals ---------------------------------------------------------
     def _roll_clock(self, now: float) -> None:
         st = self.state
-        # Re-anchor on a fresh window, and also when the event clock moves
-        # backwards (simulated/backdated streams) so rate limits stay honest.
+        # Only elapsed forward time opens a fresh window. A backwards
+        # system clock must not forgive persisted trade-rate consumption;
+        # independent replays explicitly call reset_day before they start.
         if (
             st.hour_start_ts == 0
             or now - st.hour_start_ts >= 3600
-            or now < st.hour_start_ts
         ):
             st.hour_start_ts = now
             st.trades_this_hour = 0
         day = timex.next_daily_boundary(now) - 86400
         if st.day_start_ts == 0:
             st.day_start_ts = day
+        elif day > timex.next_daily_boundary(st.day_start_ts) - 86400:
+            # Only a genuine later UTC day resets daily limits. A restart
+            # in the same day (or a backwards clock) never forgives losses.
+            st.day_start_balance = st.current_balance
+            st.day_start_ts = day
+            st.trades_today = 0
+            if st.locked_until <= now:
+                st.locked_until = 0.0
+            # Peak, loss streak, cooldown, exposure, and kill are lifetime
+            # constraints, not daily counters.
 
     def _daily_loss_frac(self, current: Optional[float] = None) -> float:
         st = self.state
@@ -553,7 +626,7 @@ class RiskManager:
         st = self.state
         if st.peak_balance <= 0:
             return 0.0
-        current = st.current_balance or st.day_start_balance
+        current = st.current_balance  # zero cash is a 100% drawdown, not "missing"
         return max(0.0, (st.peak_balance - current) / st.peak_balance)
 
     def _record_rejection(self, check: LimitCheck, asset: str, strategy: str) -> None:

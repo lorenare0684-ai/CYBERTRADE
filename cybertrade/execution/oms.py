@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
+from functools import wraps
 import threading
 import time
 from typing import Callable, Dict, List, Optional
@@ -26,6 +28,16 @@ from .ledger import Ledger
 log = logging.getLogger("cybertrade.oms")
 
 
+def _transactional(operation):
+    def decorate(fn):
+        @wraps(fn)
+        def wrapped(self, *args, **kwargs):
+            with self.transaction(operation):
+                return fn(self, *args, **kwargs)
+        return wrapped
+    return decorate
+
+
 class OrderManager:
     """Single gateway between strategies and a venue.
 
@@ -46,17 +58,44 @@ class OrderManager:
         self.risk = risk
         self.ledger = ledger or Ledger(risk.config.starting_balance)
         self._lock = threading.RLock()
+        self._continuity = None  # attached only by durable runtime engines
+        self._transaction_depth = 0
         self.orders: Dict[str, Order] = {}
         self.fills: Dict[str, Fill] = {}
         self.settlements: List[Settlement] = []
         self.trades: List[TradeRecord] = []
         self._on_settle: List[Callable[[TradeRecord], None]] = []
 
+    @contextmanager
+    def transaction(self, operation: str):
+        """Serialize mutations and bracket them with durable intent/commit.
+
+        A crash between the writes leaves an in-flight marker. On restart
+        we hold for review rather than replay an uncertain execution.
+        """
+        with self._lock:
+            outer = self._transaction_depth == 0
+            if outer and self._continuity is not None:
+                self._continuity.begin(operation)
+            self._transaction_depth += 1
+            try:
+                yield
+            except BaseException:
+                if outer and self._continuity is not None:
+                    self._continuity.abort(operation)
+                raise
+            else:
+                if outer and self._continuity is not None:
+                    self._continuity.commit()
+            finally:
+                self._transaction_depth -= 1
+
     # -- hooks -------------------------------------------------------------
     def add_settle_listener(self, fn: Callable[[TradeRecord], None]) -> None:
         self._on_settle.append(fn)
 
     # -- trading -----------------------------------------------------------
+    @_transactional("submit")
     def submit(
         self,
         asset: str,
@@ -119,11 +158,13 @@ class OrderManager:
             self.orders[order.id] = order
             self.fills[fill.id] = fill
         self.risk.on_open(order)
+        self.risk.update_balance(self.ledger.balance)
         default_bus.publish(Topic.ORDER_SUBMIT, order, source="oms")
         default_bus.publish(Topic.FILL, fill, source="oms")
         return order
 
     # -- settlement --------------------------------------------------------
+    @_transactional("settle")
     def pump(self, now: Optional[float] = None) -> List[TradeRecord]:
         """Settle everything due at *now*; safe to call at high frequency."""
         settlements = self.broker.settle_due(now)
@@ -142,6 +183,7 @@ class OrderManager:
                     won=settlement.won and not settlement.refunded,
                     pnl=settlement.pnl,
                     balance=self.ledger.balance,
+                    now=now,
                 )
             else:
                 self.risk.update_balance(self.ledger.balance)
@@ -156,6 +198,26 @@ class OrderManager:
         self.risk.update_balance(balance)
         default_bus.publish(Topic.BALANCE, self.account(), source="oms")
         return records
+
+    @_transactional("close")
+    def close_position(self, position_id: str) -> bool:
+        """Keep broker salvage + pending delivery + ledger credit one transaction."""
+        if not self.broker.close_position(position_id):
+            return False
+        self.pump()
+        return True
+
+    def resolve_recovery(self, position_id: str, expiry_price: float) -> bool:
+        from .paper import PaperBroker
+        from ..statestore import finite
+        expiry_price = finite(expiry_price, "expiry_price", 1e-12)
+        if not isinstance(self.broker, PaperBroker):
+            return False  # never fabricate a settlement at a live venue
+        with self.transaction("resolve-paper"):
+            if not self.broker.resolve_recovery(position_id, expiry_price):
+                return False
+            self.pump()
+            return True
 
     # -- views -------------------------------------------------------------
     def account(self) -> AccountSnapshot:
@@ -174,12 +236,15 @@ class OrderManager:
     def stats(self) -> dict:
         return self.ledger.summary()
 
+    @_transactional("sync")
     def sync_balance_from_broker(self) -> None:
         """Align ledger cash with the venue (live reconnect)."""
         snap = self.broker.account()
         delta = snap.balance - self.ledger.balance
         if abs(delta) > 1e-9:
             self.ledger.deposit(delta, ref="sync", note="broker sync")
+        self.ledger.peak = max(self.ledger.peak, self.ledger.balance)
+        self.risk.update_balance(self.ledger.balance)
 
 
 __all__ = ["OrderManager"]

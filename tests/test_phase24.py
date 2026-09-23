@@ -116,15 +116,17 @@ class TestPaperPerOrderSlip(unittest.TestCase):
         class _R:
             def authorize(self, **kw): return None
             def on_open(self, order): return None
+            def update_balance(self, balance): self.balance = balance
 
         class _L:
             balance = 1000.0
-            def stake(self, *a, **k): return None
+            def stake(self, amount, **kw): self.balance -= amount
 
         oms = OrderManager(broker=_B(), risk=_R(), ledger=_L())
         o = oms.submit("EURUSD_otc", Side.CALL, 5.0, 60, slippage_bps=12.5)
         self.assertIsNotNone(o)
         self.assertEqual(o.meta.get("slippage_bps"), 12.5)
+        self.assertEqual(oms.risk.balance, 995.0)  # P32: escrow immediately reaches risk
 
 
 if __name__ == "__main__":

@@ -267,6 +267,8 @@ class EngineHub:
         now = timex.now()
         feed_last = self.engine.feed.last_price
         broker_last = getattr(self.engine.broker, "last_price", None)
+        hold_reader = getattr(self.engine.broker, "recovery_holds", None)
+        held = set(hold_reader()) if callable(hold_reader) else set()
         for pos in self.engine.broker.open_positions():
             try:
                 last = feed_last(pos.asset)
@@ -297,7 +299,8 @@ class EngineHub:
                 "label": pos.label,
                 "expiry_ts": pos.expiry_ts,
                 "seconds_left": max(0.0, pos.expiry_ts - now),
-                "state": state,
+                "state": "review" if pos.id in held else state,
+                "recovery_hold": pos.id in held,
             })
         out.sort(key=lambda r: r["expiry_ts"])
         return out
@@ -529,19 +532,21 @@ class WebTerminal:
                 )
                 placed = engine.inject_signal(sig)
                 return {"ok": placed, "placed": placed}
+            if cmd == "resolve_paper":
+                from ..statestore import finite
+                pos_id = str(body.get("position") or "")
+                price = finite(body.get("expiry_price"), "expiry_price", 1e-12)
+                resolved = engine.oms.resolve_recovery(pos_id, price)
+                return {"ok": resolved, "resolved": pos_id if resolved else "",
+                        "error": "" if resolved else "not a held paper position"}
             if cmd == "close":
                 pos_id = str(body.get("position") or "")
                 if not pos_id:
                     return {"ok": False, "error": "position id required"}
-                if not engine.broker.close_position(pos_id):
+                if not engine.oms.close_position(pos_id):
                     return {"ok": False,
                             "error": f"position {pos_id!r} not closable"}
-                # cash moved in the broker; flush the pending settlement so
-                # ledger, journal, and HUD see the cut immediately (P19 path)
-                try:
-                    engine.oms.pump()
-                except Exception:  # noqa: BLE001 — cycle will flush it
-                    pass
+                # OMS atomically brackets broker salvage + ledger delivery.
                 engine.health.note_message(
                     f"manual close {pos_id} — operator cut"
                 )

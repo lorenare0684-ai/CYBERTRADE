@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 from ..data.models import Settlement, TradeRecord
+from ..statestore import StateError, finite
 from ..utils import timex
 
 
@@ -33,6 +34,40 @@ class Ledger:
         self.by_strategy: Dict[str, Dict[str, float]] = {}
         self.by_asset: Dict[str, Dict[str, float]] = {}
         self.equity_curve: List[tuple] = [(timex.now(), starting_balance)]
+
+    def export_state(self) -> dict:
+        """Cash anchors + bounded chart trace; the journal owns trade history."""
+        with self._lock:
+            return {"starting_balance": self.starting_balance, "balance": self.balance,
+                    "peak": self.peak, "equity_curve": list(self.equity_curve[-400:])}
+
+    @staticmethod
+    def decode_state(data: dict) -> dict:
+        try:
+            result = {k: finite(data[k], k) for k in ("starting_balance", "balance", "peak")}
+            if result["peak"] < result["balance"]:
+                raise StateError("ledger peak below cash")
+            curve = data["equity_curve"]
+            if not isinstance(curve, list) or len(curve) > 400:
+                raise StateError("invalid equity trace")
+            result["equity_curve"] = [(finite(p[0], "curve.ts"), finite(p[1], "curve.balance"))
+                                      for p in curve if len(p) == 2]
+            if len(result["equity_curve"]) != len(curve):
+                raise StateError("invalid equity point")
+            return result
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise StateError("invalid saved ledger") from exc
+
+    def restore_state(self, data: dict) -> None:
+        decoded = self.decode_state(data)
+        with self._lock:
+            self.starting_balance = decoded["starting_balance"]
+            self.balance, self.peak = decoded["balance"], decoded["peak"]
+            self.equity_curve = decoded["equity_curve"]
+            self.entries.clear()
+            self.trades.clear()
+            self.by_strategy.clear()
+            self.by_asset.clear()
 
     def deposit(self, amount: float, ref: str = "", note: str = "") -> None:
         with self._lock:

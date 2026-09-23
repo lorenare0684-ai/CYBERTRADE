@@ -47,6 +47,7 @@ function render(state) {
   const risk = snap.risk || {};
   const regimes = snap.regimes || {};
   const limits = risk.limits || {};
+  renderRecovery(snap.continuity || {}, (risk.state || {}).kill);
 
   // LEDs
   setLed("led-feed", health.feed_ok ? "on" : "warn");
@@ -349,6 +350,34 @@ function renderBlotter(trades) {
   $("blotter-count").textContent = `${trades.length} settled`;
 }
 
+/* ---------- Phase-32: durable recovery status (not a trading signal) ---------- */
+function renderRecovery(info, killed) {
+  const el = $("recovery-status");
+  if (!el) return;
+  const blocked = Boolean(info.blocked || killed);
+  let message = "RECOVERY OFF · ephemeral engine";
+  if (info.enabled) {
+    const saved = info.saved_ts ? new Date(info.saved_ts * 1000).toLocaleTimeString() : "pending";
+    message = info.blocked ? `RECOVERY HOLD · ${info.reason || "operator review required"}`
+      : `RECOVERY ${info.restored ? "RESTORED" : "ACTIVE"} · checkpoint ${saved}`;
+    if (killed && !info.blocked) message += " · KILL LATCHED";
+  }
+  el.textContent = message;
+  el.className = "recovery-status" + (blocked ? " blocked" : "");
+  for (const id of ["btn-arm", "btn-call", "btn-put"]) {
+    const button = $(id);
+    if (button) {
+      button.disabled = blocked;
+      button.title = blocked ? (info.reason || "Clear the latched kill before trading") : "";
+    }
+  }
+}
+
+function escapeCell(value) {
+  return String(value == null ? "" : value).replace(/[&<>"']/g,
+    (ch) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[ch]));
+}
+
 /* ---------- Phase-27: open positions + per-position cut ---------- */
 function renderPositions(list) {
   const body = $("pos-body");
@@ -363,12 +392,14 @@ function renderPositions(list) {
     const mm = String(Math.floor(left / 60)).padStart(2, "0");
     const ss = String(left % 60).padStart(2, "0");
     return `<tr class="${cls}">`
-      + `<td>${p.strategy || "—"}</td><td>${p.asset}</td>`
-      + `<td>${String(p.side || "").toUpperCase()}</td>`
+      + `<td>${escapeCell(p.strategy || "—")}</td><td>${escapeCell(p.asset)}</td>`
+      + `<td>${escapeCell(String(p.side || "").toUpperCase())}</td>`
       + `<td>${fmt(p.stake)}</td><td>${fmt(p.strike, 5)}</td>`
       + `<td>${fmt(p.mark, 5)}</td>`
-      + `<td>${String(p.state || "").toUpperCase()}</td><td>${mm}:${ss}</td>`
-      + `<td><button class="btn sm" data-close="${p.id}">CLOSE</button></td>`
+      + `<td>${escapeCell(String(p.state || "").toUpperCase())}</td><td>${p.recovery_hold ? "OFFLINE" : `${mm}:${ss}`}</td>`
+      + (p.recovery_hold
+        ? `<td><button class="btn sm yellow" data-resolve="${escapeCell(p.id)}">RESOLVE</button></td>`
+        : `<td><button class="btn sm" data-close="${escapeCell(p.id)}">CLOSE</button></td>`)
       + `</tr>`;
   }).join("");
   const c = $("pos-count");
@@ -453,6 +484,21 @@ deckEl && deckEl.addEventListener("click", (e) => {
 });
 const posEl = $("pos-body");
 posEl && posEl.addEventListener("click", (e) => {
+  const resolve = e.target.closest("[data-resolve]");
+  if (resolve) {
+    const raw = window.prompt("PAPER recovery only: enter the known expiry price. "
+      + "Do not guess. Cancel if you have no expiry evidence; the contract stays held.");
+    if (raw === null || !raw.trim()) return;
+    const price = Number(raw);
+    if (!Number.isFinite(price) || price <= 0) {
+      window.alert("Expiry price must be a positive finite number.");
+      return;
+    }
+    if (window.confirm(`Resolve this held PAPER contract at expiry price ${price}? This records its simulated P/L.`)) {
+      cmd({ cmd: "resolve_paper", position: resolve.dataset.resolve, expiry_price: price });
+    }
+    return;
+  }
   const b = e.target.closest("[data-close]");
   if (!b) return;
   cmd({ cmd: "close", position: b.dataset.close });

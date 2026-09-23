@@ -277,6 +277,8 @@ class AppConfig:
     calibration_path: str = os.path.join("data", "calibration.json")
     operator_path: str = os.path.join("data", "operator.json")
     qx_session_path: str = os.path.join("data", "qx_session.json")
+    continuity_path: str = os.path.join("data", "continuity.json")  # P32
+    heartbeat_path: str = os.path.join("data", "heartbeat.json")    # P32
     log_path: str = os.path.join("data", "cybertrade.log")
     config_path: str = DEFAULT_CONFIG_PATH
 
@@ -287,6 +289,14 @@ class AppConfig:
         self.broker.validate()
         self.display.validate()
         self.backtest.validate()
+        for name in ("continuity_path", "heartbeat_path"):
+            if not isinstance(getattr(self, name), str):
+                raise ConfigError(f"{name} must be a path string (empty disables it)")
+        if self.continuity_path and self.heartbeat_path and (
+            os.path.realpath(os.path.expanduser(self.continuity_path)) ==
+            os.path.realpath(os.path.expanduser(self.heartbeat_path))
+        ):
+            raise ConfigError("continuity and heartbeat paths must differ")
 
     # -- persistence -------------------------------------------------------
     def to_dict(self, include_secrets: bool = False) -> Dict[str, Any]:
@@ -305,6 +315,8 @@ class AppConfig:
             "journal_path": self.journal_path,
             "operator_path": self.operator_path,
             "qx_session_path": self.qx_session_path,
+            "continuity_path": self.continuity_path,
+            "heartbeat_path": self.heartbeat_path,
             "log_path": self.log_path,
         }
         if not include_secrets:
@@ -325,6 +337,8 @@ class AppConfig:
                 journal_path=data.get("journal_path", cls.journal_path),
                 operator_path=data.get("operator_path", cls.operator_path),
                 qx_session_path=data.get("qx_session_path", cls.qx_session_path),
+                continuity_path=data.get("continuity_path", cls.continuity_path),
+                heartbeat_path=data.get("heartbeat_path", cls.heartbeat_path),
                 log_path=data.get("log_path", cls.log_path),
             )
         except TypeError as exc:

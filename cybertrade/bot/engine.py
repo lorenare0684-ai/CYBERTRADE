@@ -7,6 +7,8 @@ ticks through thread-safe books; the OMS settles expirations every cycle.
 from __future__ import annotations
 
 import logging
+import os
+import uuid
 import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence
@@ -23,7 +25,8 @@ from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
 from ..risk.sessions import session_for, session_report as sessions_snapshot
 from ..risk.slippage import expected_slippage_bps
-from ..statestore import load_operator_state, save_operator_state as persist_operator_state
+from ..statestore import (StateError, load_operator_state, write_heartbeat,
+                          save_operator_state as persist_operator_state)
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
 from ..strategies.registry import build_all_weather
@@ -56,6 +59,8 @@ class TradingEngine:
         feed: Optional[Feed] = None,
         broker=None,
         ensemble: Optional[AllWeatherEnsemble] = None,
+        *,
+        durable: bool = False,
     ) -> None:
         self.config = config or AppConfig()
         self.config.validate()
@@ -116,6 +121,11 @@ class TradingEngine:
         self.last_error = ""
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._stop_event = threading.Event()
+        self._cycles = 0
+        self._heartbeat_path = (os.path.abspath(os.path.expanduser(self.config.heartbeat_path))
+                                if durable and self.config.heartbeat_path else "")
+        self._heartbeat_run_id = os.environ.get("CYBERTRADE_RUN_ID") or uuid.uuid4().hex
         self._lock = threading.RLock()
         self._ticks_this_cycle: Dict[str, int] = {a: 0 for a in self.feed.assets}
         self._last_candle_ts: Dict[str, float] = {}
@@ -154,7 +164,13 @@ class TradingEngine:
 
         self.feed.add_listener(self._on_tick)
         self.oms.add_settle_listener(self._on_settle)
-        default_bus.subscribe(Topic.KILL, lambda e: self._enter_kill(str(e.payload)))
+        self._kill_subscription = default_bus.subscribe(
+            Topic.KILL, lambda e: self._enter_kill(str(e.payload)) if self.risk.state.kill else None
+        )
+        self.continuity = None
+        if durable and self.config.continuity_path:
+            from ..continuity import Continuity
+            self.continuity = Continuity(self, self.config.continuity_path)
 
     # -- lifecycle ---------------------------------------------------------
     def _on_connection_event(self, kind: str, payload: dict) -> None:
@@ -212,7 +228,7 @@ class TradingEngine:
         closed = 0
         for pos in list(self.broker.open_positions()):
             try:
-                if self.broker.close_position(pos.id):
+                if self.oms.close_position(pos.id):
                     closed += 1
             except Exception:  # noqa: BLE001
                 log.exception("salvage failed for %s", pos.id)
@@ -310,17 +326,23 @@ class TradingEngine:
         })
 
     def boot(self) -> None:
-        """Connect everything but keep trading disarmed."""
+        """Connect disarmed; runtime checkpoints never restore an ARMED flag."""
+        try:
+            if self.continuity is not None:
+                self.continuity.acquire()  # reject a second writer before connecting
+            self._boot()
+        except BaseException:
+            if self.continuity is not None:
+                self.continuity.release()
+            self._kill_subscription.unsubscribe()
+            self.feed.stop()
+            self.broker.disconnect()
+            raise
+
+    def _boot(self) -> None:
         self.state = EngineState.BOOT
         self._restore_calibration()
         self._restore_operator_state()
-        if self.journal is not None:
-            try:
-                self._journal_session = self.journal.start_session(
-                    self.config.broker.mode, self.config.risk.starting_balance
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("journal session start failed")
         if hasattr(self.feed, "warmup"):
             self.feed.warmup()
         self.broker.connect()
@@ -363,10 +385,27 @@ class TradingEngine:
                 resubscribe=_resubscribe,
                 on_event=self._on_connection_event,
             )
-        self.risk.reset_day(self.config.risk.starting_balance)
+        balance = self.config.risk.starting_balance
+        if self.continuity is not None:
+            balance = self.broker.account().balance
+            self.oms.ledger.balance = self.oms.ledger.starting_balance = balance
+            self.oms.ledger.peak = max(balance, self.broker.account().peak_balance)
+            self.oms.ledger.equity_curve = [(timex.now(), balance)]
+            self.risk.state.peak_balance = self.oms.ledger.peak
+        self.risk.reset_day(balance)
+        if self.continuity is not None:
+            self.continuity.restore()
+            self.oms._continuity = self.continuity
+        if self.journal is not None:
+            try:
+                self._journal_session = self.journal.start_session(
+                    self.config.broker.mode, self.oms.ledger.balance
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("journal session start failed")
         for asset in self.feed.assets:
             self.detectors[asset] = RegimeDetector()
-        self.state = EngineState.DISARMED
+        self.state = EngineState.KILL if self.risk.state.kill else EngineState.DISARMED
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         self.alerts.attach()
         self.tape.attach()
@@ -374,20 +413,48 @@ class TradingEngine:
         for strategy in self.plugins.strategies():
             self.ensemble.attach(strategy)
             self.health.note_message(f"plugin attached: {strategy.name}")
-        self.health.note_message("engine booted (disarmed)")
+        if self.continuity is not None and not self.continuity.fault:
+            try:
+                self.continuity.commit()
+            except StateError:
+                pass  # fail-closed state is visible in the HUD
+        self._heartbeat()
+        self.health.note_message(f"engine booted ({self.state.value})")
         log.info("engine booted state=%s assets=%s", self.state.value, self.feed.assets)
 
     def arm(self, live: bool = False) -> None:
+        with self._lock:  # concurrent ARM requests cannot create duplicate loops
+            self._arm(live)
+
+    def _arm(self, live: bool = False) -> None:
         """Permit trading.  ``live=True`` requires config.allow_live AND is
         gated behind an explicit second confirmation in the CLI/GUI."""
+        if self.risk.state.kill or self.state is EngineState.KILL:
+            raise KillSwitchEngaged(self.risk.state.kill_reason or "kill is latched")
+        if self.continuity is not None:
+            self.continuity.assert_ready()
+            if self.continuity.status()["blocked"]:
+                raise KillSwitchEngaged(self.continuity.status()["reason"])
+        if not isinstance(self.broker, PaperBroker) and not live:
+            raise KillSwitchEngaged("a live broker requires explicit live arming")
         if live and not self.config.risk.allow_live:
             raise KillSwitchEngaged(
                 "live trading disabled in config (risk.allow_live=false) — "
                 "paper mode protects you from yourself"
             )
+        if self._running:
+            self.state = EngineState.LIVE if live else EngineState.ARMED
+            default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
+            return  # repeat ARM does not spawn a second decision thread
+        if self._thread and self._thread.is_alive():
+            if self._thread is not threading.current_thread():
+                self._thread.join(timeout=3.0)
+            if self._thread.is_alive():
+                raise KillSwitchEngaged("previous engine loop is still stopping")
         self.state = EngineState.LIVE if live else EngineState.ARMED
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         self._running = True
+        self._stop_event.clear()
         self.feed.start()
         self.watchdog.start()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="engine")
@@ -402,20 +469,38 @@ class TradingEngine:
 
     def kill(self, reason: str) -> None:
         self._running = False
+        self._stop_event.set()
         self.state = EngineState.KILL
-        self.risk.engage_kill(reason)
+        if self.continuity is None or not self.continuity.fault:
+            with self.oms.transaction("kill"):
+                self.risk.engage_kill(reason)
+        self._heartbeat()
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         self.health.note_message(f"KILL: {reason}")
         log.critical("engine KILL: %s", reason)
 
     def shutdown(self) -> None:
         self._running = False
+        self._stop_event.set()
         self.feed.stop()
         self.watchdog.stop()
-        if self._thread:
+        if self._thread and self._thread is not threading.current_thread():
             self._thread.join(timeout=3.0)
+        stopped = not self._thread or not self._thread.is_alive()
+        if self.continuity is not None and self.continuity.active:
+            if not stopped:
+                self.continuity._fail("engine thread did not stop; retaining state lease")
+            elif not self.continuity.fault:
+                try:
+                    self.continuity.commit()
+                except StateError:
+                    pass
+            if stopped:
+                self.continuity.release()
+        self._kill_subscription.unsubscribe()
         self.broker.disconnect()
         self.tape.detach()
+        self.alerts.detach()
         self._persist_calibration()
         if self.journal is not None:
             try:
@@ -423,15 +508,22 @@ class TradingEngine:
             except Exception:  # noqa: BLE001
                 log.exception("journal session end failed")
         self.state = EngineState.SHUTDOWN
+        self._heartbeat()
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         log.info("engine shutdown complete")
 
     def clear_kill(self) -> None:
-        self.risk.release_kill()
-        self.survivor.clear_lockdown()
-        self.save_operator_state()   # Phase-28: disk must match the unlock
-        self.state = EngineState.DISARMED
+        with self.oms.transaction("clear-kill"):
+            self.risk.release_kill()
+            self.survivor.clear_lockdown()
+            self.save_operator_state()   # Phase-28: disk must match the unlock
+            self.state = EngineState.DISARMED
         self.health.note_message("kill switch cleared — disarmed")
+
+    def _heartbeat(self) -> None:
+        if self._heartbeat_path:
+            write_heartbeat(self._heartbeat_path, state=self.state.value,
+                            cycle=self._cycles, run_id=self._heartbeat_run_id)
 
     # -- main loop ---------------------------------------------------------
     def _run_loop(self) -> None:
@@ -449,7 +541,7 @@ class TradingEngine:
             next_cycle += max(0.25, tf_seconds / 6.0)
             delay = next_cycle - time.time()
             if delay > 0:
-                time.sleep(delay)
+                self._stop_event.wait(delay)  # shutdown wakes even an H1 engine
             else:
                 next_cycle = time.time()
 
@@ -511,6 +603,8 @@ class TradingEngine:
         if self.supervisor is not None:
             self.supervisor.sweep(now)
         self.watchdog.sweep(now)
+        self._cycles += 1
+        self._heartbeat()  # wall-clock, AFTER success, never the simulation clock
         return summary
 
     # -- stages ------------------------------------------------------------
@@ -819,6 +913,7 @@ class TradingEngine:
 
     def _enter_kill(self, reason: str) -> None:
         if self.state is not EngineState.KILL:
+            self._stop_event.set()
             self._running = False
             self.state = EngineState.KILL
             if self.drill.stats is not None:
@@ -854,6 +949,8 @@ class TradingEngine:
             "risk": self.risk.snapshot(account.balance),
             "regimes": {a: r.to_dict() for a, r in self.regime_of.items()},
             "watchdog": self.watchdog.status(),
+            "continuity": (self.continuity.status() if self.continuity is not None
+                           else {"enabled": False, "blocked": False}),
             "survivor": self.survivor.describe(),
             "strategies": self.ensemble.describe(),
         }

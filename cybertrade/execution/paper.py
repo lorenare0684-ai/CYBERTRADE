@@ -12,7 +12,7 @@ import math
 import random
 import threading
 import time
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from ..constants import ASSET_CATALOG, OrderStatus, OrderType, Side
 from ..data.models import (
@@ -24,6 +24,8 @@ from ..data.models import (
     Tick,
 )
 from ..exceptions import OrderRejected
+from ..statestore import (StateError, finite, pack_position, pack_settlement,
+                          unpack_position, unpack_settlement)
 from ..utils import timex
 from .broker import Broker
 
@@ -54,6 +56,8 @@ class PaperBroker(Broker):
         self._pending: List[Settlement] = []
         self.salvage_rate = float(salvage_rate)
         self._prices: Dict[str, Tick] = {}
+        self._recovered: set = set()
+        self._recovery_holds: set = set()
         self._connected = False
         self._daily_start = self._balance
         self._day = timex.next_daily_boundary(timex.now()) - 86400
@@ -79,7 +83,8 @@ class PaperBroker(Broker):
 
     # -- quotes ------------------------------------------------------------
     def on_tick(self, tick: Tick) -> None:
-        self._prices[tick.asset] = tick
+        with self._lock:
+            self._prices[tick.asset] = tick
 
     def last_price(self, asset: str) -> Optional[float]:
         tick = self._prices.get(asset)
@@ -98,6 +103,10 @@ class PaperBroker(Broker):
 
     # -- trading -----------------------------------------------------------
     def submit(self, order: Order) -> Fill:
+        with self._lock:
+            return self._submit(order)
+
+    def _submit(self, order: Order) -> Fill:
         if not self._connected:
             raise OrderRejected("paper broker not connected", code="NO_CONN")
         if order.amount <= 0:
@@ -166,6 +175,12 @@ class PaperBroker(Broker):
                 self._pending.clear()
             due = [p for p in self._positions.values() if p.expiry_ts <= now]
             for pos in due:
+                if pos.id in self._recovery_holds:
+                    continue  # expiry crossed while offline: no invented result
+                if pos.id in self._recovered:
+                    tick = self._prices.get(pos.asset)
+                    if tick is None or tick.ts < pos.expiry_ts:
+                        continue  # never turn a missing recovery quote into a refund
                 price = self.last_price(pos.asset)
                 if price is None:
                     price = pos.strike  # frozen feed -> refund semantics via ATM
@@ -175,6 +190,7 @@ class PaperBroker(Broker):
                     self._peak = self._balance
                 self._settled.append(settlement)
                 del self._positions[pos.id]
+                self._recovered.discard(pos.id)
                 out.append(settlement)
                 self._notify("settle", settlement)
         return out
@@ -182,6 +198,8 @@ class PaperBroker(Broker):
     def force_settle(self, position_id: str, expiry_price: float) -> Settlement:
         with self._lock:
             pos = self._positions.pop(position_id)
+            self._recovered.discard(position_id)
+            self._recovery_holds.discard(position_id)
             settlement = pos.settle(expiry_price)
             self._balance += settlement.returned
             self._settled.append(settlement)
@@ -197,6 +215,8 @@ class PaperBroker(Broker):
         paths downstream.
         """
         with self._lock:
+            if position_id in self._recovery_holds:
+                return False  # expired offline; needs an explicit expiry price, not salvage
             pos = self._positions.pop(position_id, None)
             if pos is None:
                 return False
@@ -212,6 +232,8 @@ class PaperBroker(Broker):
                 self._peak = self._balance
             self._settled.append(settlement)
             self._pending.append(settlement)
+            self._recovered.discard(position_id)
+            self._recovery_holds.discard(position_id)
             self._notify("close", settlement)
             return True
 
@@ -236,6 +258,75 @@ class PaperBroker(Broker):
     def settlements(self, limit: int = 50) -> List[Settlement]:
         return self._settled[-limit:]
 
+    def resolve_recovery(self, position_id: str, expiry_price: float) -> bool:
+        """Operator-supplied expiry evidence for a held PAPER contract only."""
+        expiry_price = finite(expiry_price, "expiry_price", 1e-12)
+        with self._lock:
+            if position_id not in self._recovery_holds:
+                return False
+            settlement = self.force_settle(position_id, expiry_price)
+            self._peak = max(self._peak, self._balance)
+            self._pending.append(settlement)
+            return True
+
+    def recovery_holds(self) -> List[str]:
+        with self._lock:
+            return sorted(self._recovery_holds)
+
+    def export_state(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "balance": self._balance, "starting": self._starting,
+                "peak": self._peak, "daily_start": self._daily_start, "day": self._day,
+                "positions": [pack_position(p) for p in self._positions.values()],
+                "pending": [pack_settlement(s) for s in self._pending],
+                "held_positions": sorted(self._recovery_holds),
+            }
+
+    @staticmethod
+    def decode_state(data: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            result = {k: finite(data[k], k) for k in
+                      ("balance", "starting", "peak", "daily_start", "day")}
+            if result["peak"] < result["balance"]:
+                raise StateError("paper peak below cash")
+            if not isinstance(data["positions"], list) or not isinstance(data["pending"], list):
+                raise StateError("invalid paper book")
+            positions = [unpack_position(row) for row in data["positions"]]
+            if any(p is None for p in positions):
+                raise StateError("invalid position: refusing partial recovery")
+            pending = [unpack_settlement(row) for row in data["pending"]]
+            ids = [p.id for p in positions]
+            order_ids = [p.fill.order_id for p in positions] + [s.order_id for s in pending]
+            fill_ids = [p.fill.id for p in positions] + [s.fill_id for s in pending]
+            if (len(ids) != len(set(ids)) or len(order_ids) != len(set(order_ids))
+                    or len(fill_ids) != len(set(fill_ids))):
+                raise StateError("duplicate paper contract")
+            holds = data["held_positions"]
+            if not isinstance(holds, list) or any(h not in ids for h in holds):
+                raise StateError("invalid held positions")
+            result.update(positions=positions, pending=pending, held_positions=set(holds))
+            return result
+        except (KeyError, TypeError, ValueError) as exc:
+            raise StateError("invalid saved paper book") from exc
+
+    def restore_state(self, data: Dict[str, Any], now: Optional[float] = None) -> None:
+        decoded = self.decode_state(data)
+        now = timex.now() if now is None else now
+        with self._lock:
+            self._balance, self._starting = decoded["balance"], decoded["starting"]
+            self._peak, self._daily_start = decoded["peak"], decoded["daily_start"]
+            self._day = decoded["day"]
+            self._positions = {p.id: p for p in decoded["positions"]}
+            self._pending = decoded["pending"]
+            self._settled = []
+            self._prices.clear()  # saved/warmup quotes are NOT expiry evidence
+            self._recovered = set(self._positions)
+            self._recovery_holds = decoded["held_positions"] | {
+                p.id for p in self._positions.values() if p.expiry_ts <= now
+            }
+            self._roll_day(now)
+
     def reset(self, balance: Optional[float] = None) -> None:
         with self._lock:
             self._balance = float(balance if balance is not None else self._starting)
@@ -244,9 +335,12 @@ class PaperBroker(Broker):
             self._daily_start = self._balance
             self._positions.clear()
             self._settled.clear()
+            self._pending.clear()
+            self._recovered.clear()
+            self._recovery_holds.clear()
 
-    def _roll_day(self) -> None:
-        day = timex.next_daily_boundary(timex.now()) - 86400
+    def _roll_day(self, now: Optional[float] = None) -> None:
+        day = timex.next_daily_boundary(timex.now() if now is None else now) - 86400
         if day != self._day:
             self._day = day
             self._daily_start = self._balance

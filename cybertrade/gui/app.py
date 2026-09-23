@@ -194,6 +194,12 @@ class CybertradeApp(tk.Tk):
         self.clock_led = tk.Label(head, text="--:--:--", bg=t["bg2"],
                                   fg=t["yellow"], font=MONO_BOLD)
         self.clock_led.pack(side="right", padx=14)
+        self.recovery_led = tk.Label(
+            self, text="RECOVERY · checking…", bg=t["bg2"], fg=t["cyan"],
+            font=MONO_SMALL, anchor="w", justify="left", padx=10, pady=4,
+            wraplength=800,
+        )
+        self.recovery_led.pack(fill="x")  # visible above every tab, even compact
 
     def _build_body(self) -> None:
         t = self.theme
@@ -411,6 +417,17 @@ class CybertradeApp(tk.Tk):
                 "KILL": "red", "SHUTDOWN": "magenta",
             }.get(engine_state, "dim")
             self.state_led.config(text=f"● {engine_state}", fg=self.theme[color])
+            recovery = state.get("continuity", {})
+            label = "RECOVERY OFF · ephemeral engine"
+            if recovery.get("enabled"):
+                label = ("RECOVERY HOLD · " + recovery.get("reason", "review required")
+                         if recovery.get("blocked") else
+                         "RECOVERY " + ("RESTORED" if recovery.get("restored") else "ACTIVE")
+                         + " · risk governor + book checkpointed")
+            self.recovery_led.config(
+                text=label, wraplength=max(200, self.winfo_width() - 32),
+                fg=self.theme["yellow" if recovery.get("blocked") else "cyan"],
+            )
         except Exception:  # noqa: BLE001
             log.exception("gui poll failed")
         self.after(max(50, int(1000 / max(1, self.config.display.fps))), self._poll)

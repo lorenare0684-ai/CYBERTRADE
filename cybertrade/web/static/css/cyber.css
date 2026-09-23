@@ -354,3 +354,12 @@ html, body {
   .deck-panel #deck-body { max-height: 96px; }
   .stat .num { font-size: 16px; }
 }
+
+/* Phase-32: recovery stays beside the fire controls at every breakpoint. */
+.recovery-status {
+  padding: 8px 10px; margin: 0 0 8px; font-size: 11px; line-height: 1.5;
+  color: var(--cyan); border-left: 2px solid var(--cyan);
+  background: rgba(0, 255, 249, .04); overflow-wrap: anywhere;
+}
+.recovery-status.blocked { color: var(--yellow); border-color: var(--yellow); }
+.btn:disabled { opacity: .4; cursor: not-allowed; filter: saturate(.25); }

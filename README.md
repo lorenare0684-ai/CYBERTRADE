@@ -37,8 +37,11 @@ python -m cybertrade web --port 8899 --auto
 # desktop terminal (Tkinter; needs python3-tk)
 python run_gui.py
 
-# headless paper trading loop
+# headless paper trading loop (durable risk governor + paper book)
 python -m cybertrade run
+
+# bounded crash/hang restarts — PAPER ONLY, never automatic live re-arming
+python -m cybertrade supervise --max-restarts 5 --restart-window 600
 
 # the ALL-WEATHER GAUNTLET — every market condition, 10 stress scenarios
 python -m cybertrade backtest --bars 600
@@ -51,7 +54,7 @@ python -m cybertrade strategies
 python -m cybertrade scenarios
 python -m cybertrade journal
 
-# run the 163-test verification suite
+# run the 593-test verification suite
 python -m unittest discover -s tests
 ```
 
@@ -59,13 +62,14 @@ python -m unittest discover -s tests
 
 | Layer | What it is |
 |---|---|
-| **Indicators (45)** | SMA/EMA/WMA/DEMA/TEMA/HMA/ALMA/KAMA/VWMA, RSI, Stoch-RSI, MACD, PPO, ROC, TSI, ATR, NATR, Bollinger (+bandwidth, %B), Keltner, Donchian, SuperTrend, PSAR, Ichimoku, ADX/DI, Aroon, Vortex, CCI, MFI, Williams %R, Ultimate/Accel-Decel oscillators, Elder Ray, squeeze, GARCH(1,1), EWMA/HV/Parkinson vol, Ulcer, OBV, VWAP, CMF, A/D, Force Index, EOM, Klinger, pivots … |
+| **Indicators (54 registered)** | SMA/EMA/WMA/DEMA/TEMA/HMA/ALMA/KAMA/VWMA, RSI, Stoch-RSI, MACD, PPO, ROC, TSI, ATR, NATR, Bollinger (+bandwidth, %B), Keltner, Donchian, SuperTrend, PSAR, Ichimoku, ADX/DI, Aroon, Vortex, CCI, MFI, Williams %R, Ultimate/Accel-Decel oscillators, Elder Ray, squeeze, GARCH(1,1), EWMA/HV/Parkinson vol, Ulcer, OBV, VWAP, CMF, A/D, Force Index, EOM, Klinger, pivots … |
 | **Patterns (12)** | Engulfing, hammer/hanger, morning/evening star, three soldiers/crows, pin bars, marubozu, inside/outside bars, tweezers, harami, doji + blended pattern score |
-| **Strategies (33 + ensemble)** | 6 trend, 6 mean-reversion, 5 breakout, 6 momentum, 4 volatility, 5 price-action, defensive veto, and the **ALL-WEATHER ENSEMBLE** (regime-weighted voting, adaptive EWMA performance weights, strategy quarantine, conflict vetoes) |
+| **Strategies (40 registered)** | Trend, mean-reversion, breakout, momentum, volatility, price-action, defensive veto, and the **ALL-WEATHER ENSEMBLE** (regime-weighted voting, adaptive EWMA performance weights, strategy quarantine, conflict vetoes) |
 | **Regime engine** | Trend/range/vol/crisis/gap classifier fusing ADX, regression slope, vol percentile, GARCH, gap scans → `RegimeReading` + stress score |
 | **SURVIVOR playbook** | Condition → response matrix on a 5-rung posture ladder (ATTACK → NORMAL → GUARD → DEFENSE → LOCKDOWN): stake scaling, confidence floors, expiry caps, forbidden strategy families, news blackouts, weekend/friday locks, spread/liquidity vetoes |
 | **Risk fortress** | Stake bands, fractional-Kelly + vol-target sizing, drawdown governor (daily lock + total kill), loss-streak cooldowns, per-asset / correlation-cluster caps, rate limits, payout floor, strategy win-rate floors |
 | **Execution** | Broker ABC → PaperBroker (payout/latency/slippage/ATM-refund modelling) → DryRunBroker → QuotexBroker; OMS + ledger + SQLite journal |
+| **Recovery (Phase 32)** | Single-writer, fsynced risk/book checkpoints; intent/commit transaction markers; restart-preserved loss limits and kill; offline-expiry review; PID/run-bound completed-cycle heartbeats; bounded **paper-only** process supervision |
 | **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused; **ghost wire** (Phase-30): human-paced frames, jittered reconnects, subscription replay, gap-only backfill, portfolio reconcile |
 | **Backtest lab** | Event-driven binary-option simulator + 10-scenario gauntlet (bull/bear trend, range chop, low-vol grind, high-vol expansion, flash crash, gap open, news spike, liquidity vacuum, regime whipsaw), survival scoring, walk-forward optimizer |
 | **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) — both **resolution-aware** (Phase-31: shared `gui/layout.py` breakpoints, plan-driven buttons/stat placement, explicit grid areas, DPR canvas fitting) |
@@ -87,7 +91,9 @@ cybertrade/
 ├── journal/     store (SQLite) · analytics
 ├── gui/         theme · widgets · chart · panels · app · boot
 ├── web/         server (HTTP+SSE) · static/ (cyberpunk dashboard)
-└── cli.py       gui · web · run · backtest · optimize · journal · doctor
+├── continuity.py  runtime risk/book checkpoints · fail-closed recovery
+├── watchdog.py    bounded process supervisor (PAPER ONLY)
+└── cli.py       gui · web · run · supervise · backtest · optimize · journal · doctor
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
@@ -99,6 +105,45 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 32 — the watchdog (crash recovery without risk amnesia)
+
+A process restart used to forget paper contracts and reset the risk-day
+baseline. Runtime `gui`, `web`, and `run` now checkpoint the **governor and
+paper book together**; the new `supervise` command guards unattended **paper**
+execution without quietly re-arming live trading.
+
+| Piece | Recovery behaviour |
+|---|---|
+| **Governor memory** | Same-day loss anchors, lifetime peak, order budgets, streaks, cooldown, kill/reason, and exposure survive restart. Only forward UTC day/elapsed-hour boundaries replenish their respective budgets; a backwards clock does not. |
+| **Paper book + ledger** | Cash, escrow, original contract/fill/order IDs, attribution metadata, pending salvage, and a bounded equity trace restore together. Cash/exposure mismatches or corrupt rows block the entire recovery rather than dropping risk. |
+| **Durable transaction boundary** | OMS mutations write an in-flight intent before execution and a cleared commit after bookkeeping. Interrupted operations hold for review—**no blind replay**. Private atomic JSON, fsync, and an OS lease prevent torn replacements and competing writers. |
+| **Honest expiry recovery** | Contracts that expired offline stay held; no made-up strike refunds or wins from newly generated prices. The web **RESOLVE** control requires a known expiry price and confirmation, and works only for paper contracts. |
+| **Process watchdog** | PID + unique run ID + advancing completed-cycle heartbeat; monotonic hang deadlines; concurrent bounded output drain; capped jittered backoff; default 5 restarts / 600s. Clean stops and safety holds do **not** respawn. |
+| **Both HUDs** | Visible recovery status/hold reason. Web ARM/CALL/PUT controls disable during a recovery hold or latched kill; backend gates enforce it regardless of UI. |
+
+```bash
+python -m cybertrade supervise --max-restarts 5 --restart-window 600
+```
+
+Config adds `continuity_path` (default `data/continuity.json`) and
+`heartbeat_path` (default `data/heartbeat.json`). Use distinct paths per
+book/account, and stop the supervisor before opening the same book in a HUD.
+Library/backtest engines stay ephemeral unless `durable=True` is requested.
+Historical trade records remain in the SQLite journal; session blotter metrics
+are not reconstructed wholesale. Synthetic price generators are not resumed.
+
+**Live stays manual:** authenticated account identity must match; current cash
+comes from the venue, never cached paper balances. Unresolved live exposure
+requires reconciliation. This is not an exactly-once remote execution guarantee
+or a substitute for the broker's records. Existing corrupt/in-flight files are
+preserved, not silently overwritten by a fresh bankroll.
+
+Full operating guide: **[`docs/RECOVERY.md`](docs/RECOVERY.md)**.
+Suite: **593 green in 39 test modules**, including **73 new Phase-32 tests**
+and real-process crash/pipe/cleanup probes. The actual supervisor CLI also
+passed a SIGTERM shutdown + committed-checkpoint smoke check. Desktop Tk wiring
+was checked headlessly; Tkinter is not installed in this sandbox.
+
 ## Phase 31 — the adaptive HUD (resolution-aware placement)
 
 The desktop shell opened a hardcoded `1280x800` on every machine and the
@@ -109,7 +154,7 @@ mirrored exactly in CSS media queries):
 
 | Class | Breakpoint | Placement behaviour |
 |---|---|---|
-| **compact** | `<1109px` wide **or** `<620px` tall (phones/tablets/short laptops) | single-column flow, page scrolls, stat cells 3/row, fire buttons wrap 3+2, meters 220px, gauges 90px, blotter 8 rows, **secondary labs hidden** (`risklab`, `equity`) — chart/fire/account/positions never leave |
+| **compact** | `<1100px` wide **or** `<620px` tall (phones/tablets/short laptops) | single-column flow, page scrolls, stat cells 3/row, fire buttons wrap 3+2, meters 220px, gauges 90px, blotter 8 rows, **secondary labs hidden** (`risklab`, `equity`) — chart/fire/account/positions never leave |
 | **medium** | `<1600px` | baseline dashboard: side rail 300–340px, 4-col stats, 5 fire buttons one row |
 | **large** | `<2560px` | 2-column emphasis, stats 5/row, meters 420, gauges 150, blotter 14 |
 | **wide** | `≥2560px` |3-column: chart+positions above blotter, side rail right; stats 6/row, blotter 18 |
