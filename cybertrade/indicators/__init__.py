@@ -83,6 +83,13 @@ from .divergence import (
     find_pivots,
     last_divergence,
 )
+from .orderflow import (
+    TickFlow,
+    VolumeProfile,
+    cumulative_delta,
+    delta_divergence,
+    tick_imbalance,
+)
 
 INDICATOR_REGISTRY: Dict[str, Callable[..., Any]] = {
     "sma": sma,
@@ -134,6 +141,11 @@ INDICATOR_REGISTRY: Dict[str, Callable[..., Any]] = {
     "detect_divergence": detect_divergence,
     "last_divergence": last_divergence,
     "divergence_score": divergence_score,
+    "tick_imbalance": tick_imbalance,
+    "cumulative_delta": cumulative_delta,
+    "delta_divergence": delta_divergence,
+    "VolumeProfile": VolumeProfile,
+    "TickFlow": TickFlow,
 }
 
 

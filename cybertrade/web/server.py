@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
 
 from ..events import Topic, default_bus
+from ..quant.binary import breakeven_winrate
 from ..utils import timex
 from ..utils.jsonx import dumps
 
@@ -124,6 +125,17 @@ class EngineHub:
             ) if len(self.engine.feed.assets) > 1 else {},
             "calendar": self.engine.calendar.to_list(timex.now())[:8],
             "scenarios": scenarios,
+            # -- Phase-4 edge layer -----------------------------------------
+            "edge": {
+                "payout": self.engine.config.broker.payout_default,
+                "breakeven": round(breakeven_winrate(self.engine.config.broker.payout_default), 4),
+                "min_edge": self.engine.config.risk.min_edge,
+                "gate": self.engine.config.risk.edge_gate,
+                "rejects": self.engine.edge_rejects,
+                "calibration": self.engine.calibrator.summary(),
+            },
+            "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
+            "tape": self.engine.tape.stats(),
         }
 
     def montecarlo(self, runs: int = 400, horizon: int = 200) -> Dict[str, Any]:

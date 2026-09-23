@@ -64,6 +64,10 @@ function render(state) {
   $("daily").style.color = daily >= 0 ? "#39ff5e" : "#ff3860";
   $("winrate").textContent = Math.round((health.win_rate || 0) * 100) + "%";
   $("trades").textContent = health.trades_total || 0;
+  if (snap.edge) {
+    $("edge-ev").textContent = (snap.edge.breakeven * 100).toFixed(1) + "%";
+    $("cal-gap").textContent = fmt(snap.edge.calibration ? snap.edge.calibration.calibration_gap : 0);
+  }
 
   // meters
   const ddMax = (limits.max_total_drawdown_frac || 0.2) * 100;
@@ -118,6 +122,11 @@ function render(state) {
   $("posture").textContent = posture;
   $("regime-detail").textContent =
     `REGIME ${(reg.regime || "?")} · trend ${reg.trend_direction ?? "?"} · stress ${fmt(reg.stress)}`;
+  if (snap.edge) {
+    $("regime-detail").textContent +=
+      ` · EDGE be ${(snap.edge.breakeven * 100).toFixed(1)}% gate ${snap.edge.gate} rej ${snap.edge.rejects}` +
+      (snap.tape ? ` · tape ${snap.tape.written}` : "");
+  }
   $("engine-state").textContent = "STATE: " + (st || "?").toUpperCase();
   $("vetoes").textContent = "vetoes " + (health.vetoes || 0);
 

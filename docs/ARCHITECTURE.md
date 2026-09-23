@@ -66,6 +66,19 @@ Reconnect ladder: exponential backoff 2s → 60s, max 12 attempts, session
 re-auth on every reconnect. All wire shapes documented in
 `docs/QUOTEX_PROTOCOL.md`.
 
+## Quant edge layer
+
+Signals arrive as *claims* (confidence 0..1). Before sizing, the engine asks
+`CalibrationTracker.p_for(strategy, confidence)` for a shrunk posterior
+(Beta(2,2) prior per confidence bucket, blended with the raw claim) and
+converts it to EV at the quoted payout: `edge = p·(1+b) − 1`. Negative EV is
+vetoed unconditionally (`Topic.RISK_REJECT`, `engine.edge_rejects`); below
+`RiskConfig.min_edge` the stake is scaled (`edge_gate="scale"`) or the trade
+is vetoed (`"hard"`). Settlements feed the calibrator in `_on_settle`, so a
+strategy that overstates confidence gradually loses its own gate. Order-flow
+snapshots (`TickFlow`) ride in `StrategyContext.extra["flow"]`; the
+`TapeRecorder` taps the event bus at boot for bounded JSONL forensics.
+
 ## Testing strategy
 
 1. **Known-value math** — moving averages on constants, RSI of monotone

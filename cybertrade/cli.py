@@ -4,6 +4,7 @@
     python -m cybertrade web             browser terminal (live preview)
     python -m cybertrade run             paper-trade headless
     python -m cybertrade backtest        run the all-weather gauntlet
+    python -m cybertrade edge            binary-options edge calculator
     python -m cybertrade optimize        walk-forward parameter search
     python -m cybertrade journal         trade journal analytics
     python -m cybertrade strategies      list the strategy matrix
@@ -22,6 +23,7 @@ from typing import List, Optional
 from . import __version__
 from .config import AppConfig
 from .logging_setup import setup_logging
+from .quant.binary import breakeven_winrate, edge_of, kelly_fraction_for, kelly_stake
 
 log = logging.getLogger("cybertrade.cli")
 
@@ -435,6 +437,15 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--out", default="", help="write json report")
     b.set_defaults(func=cmd_backtest)
 
+    eg = sub.add_parser("edge", help="binary-options edge calculator (payout math)")
+    eg.add_argument("--payout", type=float, default=0.85, help="payout per win (0.85 = +85%%)")
+    eg.add_argument("--winrate", type=float, default=None,
+                    help="true/claimed P(win) to evaluate against the hurdle")
+    eg.add_argument("--confidence", type=float, default=None,
+                    help="a strategy's claimed confidence (for contrast only)")
+    eg.add_argument("--bankroll", type=float, default=1000.0)
+    eg.set_defaults(func=cmd_edge)
+
     o = sub.add_parser("optimize", help="walk-forward search")
     o.add_argument("--scenario", default="regime_whipsaw")
     o.add_argument("--seed", type=int, default=99)
@@ -470,6 +481,25 @@ def build_parser() -> argparse.ArgumentParser:
     d = sub.add_parser("doctor", help="environment self-test")
     d.set_defaults(func=cmd_doctor)
     return p
+
+
+def cmd_edge(args: argparse.Namespace) -> int:
+    """Binary-options edge calculator: the payout hurdle is brutal; see it."""
+    b = args.payout
+    be = breakeven_winrate(b)
+    print(f"payout        : +{b * 100:.0f}%  (win pays {1 + b:.2f}x stake, loss costs 1.0x)")
+    print(f"breakeven P   : {be:.4f}  <- must win MORE than this to profit")
+    if args.winrate is not None:
+        p = args.winrate
+        e = edge_of(p, b)
+        print(f"true P(win)   : {p:.4f}")
+        print(f"edge per 1.0  : {e:+.4f}   ({'PROFITABLE' if e > 0 else 'LOSING'} long-run)")
+        print(f"kelly stake   : {kelly_stake(p, b, args.bankroll):.2f} of {args.bankroll:.2f}"
+              f"  (fraction {kelly_fraction_for(p, b):.4f})")
+    if args.confidence is not None:
+        print(f"confidence    : {args.confidence:.2f}  <- a CLAIM, not P(win);"
+              f" the engine gates on calibrated P(win) from its own ledger.")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:

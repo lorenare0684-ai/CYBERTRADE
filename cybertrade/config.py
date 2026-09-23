@@ -36,6 +36,8 @@ class RiskConfig:
     max_total_drawdown_frac: float = 0.20  # kill switch beyond this
     win_rate_floor: float = 0.40          # quarantine strategies below this
     min_payout: float = 0.75              # refuse trades under this payout
+    edge_gate: str = "scale"              # off | scale | hard (calibrated edge gate)
+    min_edge: float = 0.02                # calibrated P(win) edge needed for full size
     max_correlated_exposure: int = 2      # open trades sharing quote currency
     cooldown_after_losses: int = 3        # consecutive losses -> cooldown
     cooldown_seconds: float = 120.0
@@ -66,6 +68,10 @@ class RiskConfig:
             raise ConfigError("martingale_cap must be >= 1.0")
         if not 0.0 < self.kelly_fraction <= 1.0:
             raise ConfigError("kelly_fraction must be in (0, 1]")
+        if self.edge_gate not in {"off", "scale", "hard"}:
+            raise ConfigError("edge_gate must be off | scale | hard")
+        if not -1.0 < self.min_edge < 1.0:
+            raise ConfigError("min_edge must be in (-1, 1)")
 
 
 @dataclass
@@ -241,6 +247,8 @@ class AppConfig:
     journal_path: str = os.path.join("data", "journal.db")
     plugins_dir: str = os.path.join("~", ".cybertrade", "plugins")
     calendar_path: str = os.path.join("~", ".cybertrade", "calendar.json")
+    tape_dir: str = os.path.join("data", "tapes")
+    tape_enabled: bool = True
     log_path: str = os.path.join("data", "cybertrade.log")
     config_path: str = DEFAULT_CONFIG_PATH
 

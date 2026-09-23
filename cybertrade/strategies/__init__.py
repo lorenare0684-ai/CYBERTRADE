@@ -51,6 +51,7 @@ from .divergence import (
     MultiTimeframeConfluence,
     RSIDivergenceEdge,
 )
+from .orderflow import AbsorptionFade, ImbalanceMomentum, POCReversion
 
 STRATEGY_REGISTRY: Dict[str, Type[Strategy]] = {
     # trend
@@ -96,6 +97,10 @@ STRATEGY_REGISTRY: Dict[str, Type[Strategy]] = {
     "macd_hidden_divergence": MacdHiddenDivergence,
     "cci_divergence_fade": CCIDivergenceFade,
     "mtf_confluence": MultiTimeframeConfluence,
+    # orderflow
+    "imbalance_momentum": ImbalanceMomentum,
+    "absorption_fade": AbsorptionFade,
+    "poc_reversion": POCReversion,
     # meta
     "defensive_veto": DefensiveVeto,
 }

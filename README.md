@@ -99,6 +99,33 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 4 — quant edge layer
+
+Phase 3 left the honest wound open: mean win rate 49.3% against a **54.05%
+breakeven** at the standard 85% payout. Phase 4 attacks exactly that.
+
+- **Payout math (`cybertrade/quant/binary.py`)** — `breakeven_winrate`,
+  `edge_of`, fractional-Kelly `kelly_stake`, drifted-GBM `probability_itm`,
+  expiry edge profiles. `python3 -m cybertrade edge --payout 0.85 --winrate
+  0.55` prints your real hurdle (and the confidence-vs-evidence lecture).
+- **Calibration (`cybertrade/quant/calibration.py`)** — per-strategy
+  reliability buckets blended with a Beta(2,2) prior and a raw-confidence
+  shrink. `CalibrationTracker.p_for` turns claimed confidence into the
+  P(win) your own ledger has earned. Confidence is a claim; calibrated
+  P(win) is evidence.
+- **The edge gate (`RiskConfig.edge_gate`: `off|scale|hard`, `min_edge`)** —
+  every entry must clear `P(win)·(1+payout) − 1 > 0` *after* calibration.
+  Negative EV is vetoed unconditionally (even with the gate `off`).
+  Thin-but-positive edge is stake-scaled (`scale`) or vetoed (`hard`).
+- **Order flow (`indicators/orderflow.py`, `strategies/orderflow.py`)** —
+  tick imbalance, cumulative delta, volume profile/POC; three strategies
+  (`imbalance_momentum`, `absorption_fade`, `poc_reversion`) that fall
+  silent without flow data instead of guessing.
+- **Tape forensics (`data/tape.py`)** — signal-grade bus events recorded to
+  bounded daily JSONL (`data/tapes/`) for replay and post-mortems.
+
+36 new tests (`tests/test_phase4.py`); suite at **267 green**.
+
 ## Phase 3 — defect burn-down + venue depth
 
 - **Crash-echo regime guard** — flash-crash bounces can no longer masquerade

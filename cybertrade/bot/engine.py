@@ -33,6 +33,10 @@ from .alerts import AlertCenter
 from .calendar import EconomicCalendar, calendar_for_asset
 from ..risk.correlation import CorrelationMonitor
 from ..strategies.plugins import PluginRegistry
+from ..quant.calibration import CalibrationTracker
+from ..quant.binary import breakeven_winrate, edge_of
+from ..indicators.orderflow import TickFlow
+from ..data.tape import TapeRecorder
 
 log = logging.getLogger("cybertrade.engine")
 
@@ -104,6 +108,11 @@ class TradingEngine:
         self.corr = CorrelationMonitor()
         self.alerts = AlertCenter(self.config.alerts)
         self.plugins = PluginRegistry(self.config.plugins_dir)
+        # -- Phase-4 edge layer ---------------------------------------------
+        self.calibrator = CalibrationTracker()
+        self.flow: Dict[str, TickFlow] = {a: TickFlow() for a in self.feed.assets}
+        self.tape = TapeRecorder(self.config.tape_dir, enabled=self.config.tape_enabled)
+        self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
                 self.config.calendar_path,
@@ -143,6 +152,7 @@ class TradingEngine:
         self.state = EngineState.DISARMED
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         self.alerts.attach()
+        self.tape.attach()
         self.plugins.load_all()
         for strategy in self.plugins.strategies():
             self.ensemble.attach(strategy)
@@ -188,6 +198,7 @@ class TradingEngine:
         if self._thread:
             self._thread.join(timeout=3.0)
         self.broker.disconnect()
+        self.tape.detach()
         self.state = EngineState.SHUTDOWN
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         log.info("engine shutdown complete")
@@ -319,6 +330,7 @@ class TradingEngine:
             expiry_seconds=self.config.strategy.expiry_seconds,
             payout=self.config.broker.payout_default,
             ts=timex.now(),
+            extra={"flow": self.flow.get(asset)},
         )
         return self.ensemble.generate(ctx)
 
@@ -385,12 +397,47 @@ class TradingEngine:
             drawdown=self.risk.total_drawdown(),
             regime_scale=decision.stake_scale,
         )
+        stake = sizing.stake
+
+        # Phase-4: calibrated edge gate — never pay a structural tax.
+        # P(win) comes from the strategy's own ledger history (shrunk toward
+        # 0.5 while evidence is thin), not from its marketing copy.
+        payout = self.config.broker.payout_default
+        p_win = self.calibrator.p_for(signal.strategy, signal.confidence)
+        edge = edge_of(p_win, payout)
+        gate_mode = self.config.risk.edge_gate
+        if edge < 0:  # negative EV is ALWAYS wrong — even with the gate off
+            self.edge_rejects += 1
+            self.health.note_message(
+                f"edge veto {signal.strategy}: p={p_win:.2f} edge={edge:+.3f}"
+            )
+            default_bus.publish(Topic.RISK_REJECT, {
+                "asset": signal.asset, "strategy": signal.strategy,
+                "p_win": round(p_win, 3), "edge": round(edge, 4),
+                "reason": "negative EV at quoted payout",
+            }, source="edge")
+            return False
+        if gate_mode != "off" and edge < self.config.risk.min_edge:
+            if gate_mode == "hard":
+                self.edge_rejects += 1
+                self.health.note_message(
+                    f"edge veto (hard) {signal.strategy}: edge={edge:+.3f}"
+                )
+                default_bus.publish(Topic.RISK_REJECT, {
+                    "asset": signal.asset, "strategy": signal.strategy,
+                    "p_win": round(p_win, 3), "edge": round(edge, 4),
+                    "reason": "edge below min_edge",
+                }, source="edge")
+                return False
+            scale = clamp(edge / max(self.config.risk.min_edge, 1e-6), 0.25, 1.0)
+            stake = max(self.config.risk.min_stake, stake * scale)
+
         order = self.oms.submit(
             asset=signal.asset,
             side=signal.side,
-            stake=sizing.stake,
+            stake=stake,
             expiry_seconds=min(signal.expiry_seconds, decision.max_expiry_seconds),
-            payout=self.config.broker.payout_default,
+            payout=payout,
             confidence=signal.confidence,
             strategy=signal.strategy,
             tag=f"{decision.posture}:{signal.reason}",
@@ -403,6 +450,9 @@ class TradingEngine:
     def _on_tick(self, tick) -> None:
         self.quotes.on_tick(tick)
         self.corr.on_price(tick.asset, tick.price)
+        flow = self.flow.get(tick.asset)
+        if flow is not None:
+            flow.on_tick(tick.price)
         if hasattr(self.broker, "on_tick"):
             self.broker.on_tick(tick)
         self.health.note_tick()
@@ -415,6 +465,14 @@ class TradingEngine:
         order = self.oms.orders.get(record.settlement.order_id)
         if order and "votes" in order.meta:
             meta_votes = order.meta["votes"]
+        # Phase-4: the ledger teaches the calibrator what confidence was worth
+        try:
+            claimed = float((order.meta.get("confidence", 0.6)) if order else 0.6)
+        except (TypeError, ValueError):
+            claimed = 0.6
+        self.calibrator.observe(
+            record.strategy or (order.strategy if order else "manual"), claimed, won
+        )
         for vote in meta_votes:
             name = vote.get("strategy")
             if name:
