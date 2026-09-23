@@ -99,6 +99,24 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 8 — the runtime payout gate (the venue quotes the hurdle)
+
+Every previous gate computed EV against the **config default** payout (0.85)
+while the venue actually pays 0.78–0.92 depending on asset and expiry —
+the paper broker was already quoting honestly (`payout_for`: catalog +
+expiry decay + jitter); the engine simply ignored it. Now the gate, Kelly
+sizing, adaptive expiry, and `StrategyContext` all consume the **real
+quote** (`broker.payout_for`), so the hurdle is per-trade: same P(win),
+0.80 quote is a veto, 0.95 quote is a fill *at 0.95*. The HUD shows the
+worst-case quote + per-asset payout map.
+
+This also exposed a two-layer clash: Phase-7's `min_payout=0.85` floor
+fought quote noise around 0.85 (payout_floor rejects, edge gate never
+fired). Clean split: **`min_payout` = 0.80 scam floor**, edge gate = EV
+math on the true quote. Gauntlet unchanged by construction (synthetic
+scenarios pay flat) — pinned by `tests/test_phase8.py` (5 tests);
+suite at **305 green**.
+
 ## Phase 7 — the WHEN matrix (regime-conditional calibration)
 
 Phase 6's ceiling said unconditional claims don't predict outcomes. The

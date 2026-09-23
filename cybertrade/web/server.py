@@ -127,8 +127,10 @@ class EngineHub:
             "scenarios": scenarios,
             # -- Phase-4 edge layer -----------------------------------------
             "edge": {
-                "payout": self.engine.config.broker.payout_default,
-                "breakeven": round(breakeven_winrate(self.engine.config.broker.payout_default), 4),
+                "payout": round(self.worst_payout(), 4),
+                "breakeven": round(breakeven_winrate(self.worst_payout()), 4),
+                "payouts": {a: round(self.engine.broker.payout_for(a, 60), 4)
+                            for a in self.engine.feed.assets},
                 "min_edge": self.engine.config.risk.min_edge,
                 "gate": self.engine.config.risk.edge_gate,
                 "rejects": self.engine.edge_rejects,
@@ -137,6 +139,11 @@ class EngineHub:
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
         }
+
+    def worst_payout(self) -> float:
+        """The binding hurdle: the lowest venue quote across the universe."""
+        qs = [self.engine.broker.payout_for(a, 60) for a in self.engine.feed.assets]
+        return min(qs) if qs else self.engine.config.broker.payout_default
 
     def montecarlo(self, runs: int = 400, horizon: int = 200) -> Dict[str, Any]:
         """Risk lab report bootstrapped from settled trades (or synthetic

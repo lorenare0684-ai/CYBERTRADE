@@ -328,7 +328,7 @@ class TradingEngine:
             regime=reading,
             timeframe_seconds=self.config.timeframe().seconds,
             expiry_seconds=self.config.strategy.expiry_seconds,
-            payout=self.config.broker.payout_default,
+            payout=self.broker.payout_for(asset, self.config.strategy.expiry_seconds),
             ts=timex.now(),
             extra={"flow": self.flow.get(asset)},
         )
@@ -388,7 +388,8 @@ class TradingEngine:
             return False
 
         balance = self.oms.ledger.balance
-        payout = self.config.broker.payout_default
+        # Phase-8: the venue quotes the hurdle — never the config default.
+        payout = self.broker.payout_for(signal.asset, signal.expiry_seconds)
 
         # Phase-4/6: calibrated P(win) — per-voter evidence, not marketing copy.
         p_win = self.calibrator.p_win_for(

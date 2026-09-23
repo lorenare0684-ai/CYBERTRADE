@@ -35,7 +35,7 @@ class RiskConfig:
     max_daily_loss_frac: float = 0.08     # stop trading for the day beyond this
     max_total_drawdown_frac: float = 0.20  # kill switch beyond this
     win_rate_floor: float = 0.40          # quarantine strategies below this
-    min_payout: float = 0.85              # the hurdle is brutal below this (54%+ WR needed)
+    min_payout: float = 0.80              # scam floor; the EDGE gate owns the real hurdle
     edge_gate: str = "scale"              # off | scale | hard (calibrated edge gate)
     min_edge: float = 0.05                # calibrated P(win) edge needed for full size
     expiry_select: str = "signal"         # signal | adaptive (best_expiry chooser)

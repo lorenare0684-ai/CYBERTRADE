@@ -87,7 +87,9 @@ Since Phase 6 the gate estimate is `p_win_for = min(blob, voter-blend)`
 consumes the same calibrated P(win)); since Phase 7 every estimate can be
 conditioned on the active regime (`p_regime`, `RiskConfig.regime_cal`), and
 `oms.submit` carries `votes` so live settlements teach the same tables the
-backtester does.
+backtester does. Since Phase 8 the hurdle itself is a venue quote
+(`broker.payout_for`, per asset/expiry) feeding gate, sizing, and expiry
+selection; `min_payout` is the scam floor below that math.
 
 ## Testing strategy
 
