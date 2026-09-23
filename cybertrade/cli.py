@@ -44,6 +44,19 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     return cfg
 
 
+def _qx_api(cfg: AppConfig):
+    """Configured venue facade — ghost wire timings ride the construction."""
+    from .brokers.quotex.api import QuotexAPI
+
+    return QuotexAPI(
+        demo=cfg.broker.demo_account,
+        ghost=cfg.broker.ghost_pace,
+        order_think_ms=cfg.broker.order_think_ms,
+        order_min_gap_ms=cfg.broker.order_min_gap_ms,
+        max_orders_per_min=cfg.broker.max_orders_per_min,
+    )
+
+
 def _build_venue(cfg: AppConfig, api_factory=None, allow_orders: bool = False):
     """Build a QuotexBroker with a live session, or None.
 
@@ -61,7 +74,7 @@ def _build_venue(cfg: AppConfig, api_factory=None, allow_orders: bool = False):
             from .brokers.quotex.api import QuotexAPI
 
             def api_factory() -> Any:
-                return QuotexAPI(demo=cfg.broker.demo_account)
+                return _qx_api(cfg)
 
         api = api_factory()
         ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
@@ -180,9 +193,7 @@ def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
         return 1
     print(f"  ✓ session saved → {session_path} (0600)")
     try:
-        from .brokers.quotex.api import QuotexAPI
-
-        api = QuotexAPI(demo=cfg.broker.demo_account)
+        api = _qx_api(cfg)
         api.set_ssid(sess["ssid"], sess.get("cookies", ""))
         api.connect()
         snap = api.account_snapshot()
@@ -206,10 +217,7 @@ def _live_api(cfg: AppConfig, api_factory=None):
     from .exceptions import ConfigError
 
     if api_factory is None:
-        from .brokers.quotex.api import QuotexAPI
-
-        def api_factory():
-            return QuotexAPI(demo=cfg.broker.demo_account)
+        api_factory = lambda: _qx_api(cfg)  # noqa: E731
 
     api = api_factory()
     ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
@@ -253,15 +261,23 @@ def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None):
             warm_bars=400,
         )
         live_ok = cfg.broker.mode == "quotex" and bool(cfg.risk.allow_live)
+        venue = QuotexBroker(api, allow_orders=live_ok)
+        try:
+            adopted = venue.reconcile_venue()
+            if adopted:
+                print(f"  ⚠ reconciled {adopted} venue-open contract(s) "
+                      "from a previous session.")
+        except Exception:  # noqa: BLE001 — reconcile never blocks boot
+            pass
         if live_ok:
             print("  ⚠ QUOTEX LIVE — real orders enabled at the venue.")
-            broker = QuotexBroker(api, allow_orders=True)
+            broker = venue
         else:
             if cfg.broker.mode == "quotex":
                 print("  ⚠ mode=quotex without --live — DRY-RUN "
                       "(venue quotes, paper fills).")
             broker = DryRunBroker(
-                venue=QuotexBroker(api, allow_orders=False),
+                venue=venue,
                 starting_balance=cfg.risk.starting_balance,
                 default_payout=cfg.broker.payout_default,
                 latency_ms=cfg.broker.latency_ms,

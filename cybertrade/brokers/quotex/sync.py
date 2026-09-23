@@ -91,9 +91,49 @@ def warm_universe(
     return total
 
 
+def backfill_gaps(
+    api,
+    series: CandleSeries,
+    *,
+    gap_bars: int = 2,
+    wait: float = 3.0,
+    now: Optional[float] = None,
+) -> int:
+    """Pull only the bars a series is actually missing (Phase-30).
+
+    A live chart does not re-request its whole history every refresh — it
+    notices the last closed bucket and fetches the hole.  Returns candles
+    added; ``0`` when the tail is fresh enough or the venue is slow (never
+    raises — continuity is best-effort, honesty comes from warmup).
+    """
+    from ...utils import timex
+
+    tf = int(series.timeframe_seconds)
+    tail = series.candles(limit=1)
+    if not tail:
+        return 0
+    last = tail[-1]
+    current = timex.bucket_start(timex.now() if now is None else now, tf)
+    missing = int((current - last.open_ts) // tf)
+    if missing <= gap_bars:
+        return 0
+    count = min(500, missing + 5)
+    try:
+        fetched = api.get_candles(series.asset, tf, count=count, wait=wait)
+    except Exception as exc:  # noqa: BLE001
+        log.debug("gap backfill failed %s@%ss: %s", series.asset, tf, exc)
+        return 0
+    added = qxcandles_into_series(fetched, series)
+    if added:
+        log.info("gap backfill %s@%ss +%d (missing≈%d)",
+                 series.asset, tf, added, missing)
+    return added
+
+
 __all__ = [
     "qxcandles_into_series",
     "warm_asset",
     "warm_book",
     "warm_universe",
+    "backfill_gaps",
 ]

@@ -10,13 +10,18 @@ Warmup pulls real history through ``sync.warm_book``; the running stream
 rides ``QuotexAPI`` tick handlers into the same MultiTimeframeBook the
 engine's detector already reads. If the venue yields zero candles, boot
 fails loudly (a blind trader is worse than a stopped one).
+
+Phase-30 continuity: the refresher no longer re-pulls whole history on a
+fixed grid (chart-like behaviour = fetch *only* actual gaps via
+``sync.backfill_gaps``), and a venue reconnect event triggers an immediate
+gap sweep so a dropped wire never leaves stale bars in the books.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from typing import Optional, Sequence
+from typing import List, Optional, Sequence
 
 from ..constants import Timeframe
 from ..exceptions import FeedError
@@ -147,6 +152,11 @@ class LiveQuotexFeed(Feed):
         adder = getattr(self.api, "add_tick_handler", None)
         if adder is not None:
             adder(self._on_venue_tick)
+        listener = getattr(self.api, "add_listener", None)
+        if listener is not None:
+            # Phase-30: a restored wire means bars may be missing — sweep
+            # gaps the moment the API reports "reconnected".
+            listener(self._on_api_event)
         sub = getattr(self.api, "subscribe", None)
         if sub is not None:
             for asset in self.assets:
@@ -178,30 +188,37 @@ class LiveQuotexFeed(Feed):
         self._last[tick.asset] = tick.price
         self._emit_tick(tick)
 
-    def _refresh_loop(self) -> None:
-        """Belt-and-braces: re-pull closed candles so bars stay honest."""
-        from ..brokers.quotex.sync import qxcandles_into_series
+    def _on_api_event(self, kind: str, payload: object) -> None:
+        if kind == "reconnected" and self._running:
+            log.info("venue reconnect noticed — sweeping candle gaps")
+            self._backfill_all()
 
+    def _backfill_all(self) -> int:
+        """Fetch only missing bars across every asset (Phase-30)."""
+        from ..brokers.quotex.sync import backfill_gaps
+
+        total = 0
+        for asset in self.assets:
+            try:
+                series = self._books[asset].book(self.timeframe_seconds)
+                total += backfill_gaps(self.api, series, gap_bars=2, wait=3.0)
+            except Exception:  # noqa: BLE001 — continuity never kills the feed
+                log.debug("backfill failed for %s", asset, exc_info=True)
+        return total
+
+    def _refresh_loop(self) -> None:
+        """Belt-and-braces: chart-like behaviour — pull only actual gaps.
+
+        A human chart does not re-download its whole history every 30s; it
+        fetches the bars it is missing. Same wire footprint, honest books.
+        """
         while self._running:
             time.sleep(self.refresh_seconds)
             if not self._running:
                 break
-            for asset in self.assets:
-                try:
-                    candles = self.api.get_candles(
-                        asset, self.timeframe_seconds,
-                        count=min(self.warm_bars, 300), wait=3.0,
-                    )
-                    if candles:
-                        qxcandles_into_series(
-                            candles,
-                            self._books[asset].book(self.timeframe_seconds),
-                        )
-                except Exception:  # noqa: BLE001 — a slow venue never kills the feed
-                    log.debug("live refresh failed for %s", asset, exc_info=True)
+            added = self._backfill_all()
+            if added:
+                log.debug("live refresh filled %d gap bars", added)
 
-
-# typing convenience for annotations above
-from typing import List  # noqa: E402  (kept local to avoid import cycle noise)
 
 __all__ = ["LiveQuotexFeed"]

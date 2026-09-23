@@ -223,6 +223,41 @@ def parse_balance(args: List[Any]) -> QXBalance:
     return QXBalance.from_payload(args[0] if args else {})
 
 
+def parse_portfolio(args: List[Any]) -> List[QXOrderResult]:
+    """Absorb a portfolio snapshot into order rows (schema-tolerant).
+
+    Community payloads vary: ``[{orders: [...]}]``, ``[{data: [...]}]``,
+    bare lists of rows, or mappings ``{orderId: {…}}``.  Rows without any
+    identity (no id / requestId / asset) are dropped rather than guessed.
+    """
+    out: List[QXOrderResult] = []
+
+    def _absorb(obj: Any) -> None:
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                _absorb(item)
+        elif isinstance(obj, dict):
+            looks_row = "amount" in obj and any(
+                k in obj for k in ("asset", "id", "orderId", "requestId")
+            )
+            if looks_row:
+                row = QXOrderResult.from_payload(obj)
+                if row.order_id or row.request_id or row.asset:
+                    out.append(row)
+                return
+            for key in ("orders", "data", "portfolio", "list", "items", "open"):
+                nested = obj.get(key)
+                if nested:
+                    _absorb(nested)
+            for value in obj.values():
+                if isinstance(value, dict):
+                    _absorb(value)
+
+    for entry in args or []:
+        _absorb(entry)
+    return out
+
+
 def parse_order_result(args: List[Any]) -> QXOrderResult:
     return QXOrderResult.from_payload(args[0] if args else {})
 
@@ -253,6 +288,7 @@ __all__ = [
     "parse_candles",
     "parse_tick",
     "parse_balance",
+    "parse_portfolio",
     "parse_order_result",
     "parse_error",
 ]

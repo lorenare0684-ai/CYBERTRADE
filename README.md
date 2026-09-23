@@ -66,7 +66,7 @@ python -m unittest discover -s tests
 | **SURVIVOR playbook** | Condition → response matrix on a 5-rung posture ladder (ATTACK → NORMAL → GUARD → DEFENSE → LOCKDOWN): stake scaling, confidence floors, expiry caps, forbidden strategy families, news blackouts, weekend/friday locks, spread/liquidity vetoes |
 | **Risk fortress** | Stake bands, fractional-Kelly + vol-target sizing, drawdown governor (daily lock + total kill), loss-streak cooldowns, per-asset / correlation-cluster caps, rate limits, payout floor, strategy win-rate floors |
 | **Execution** | Broker ABC → PaperBroker (payout/latency/slippage/ATM-refund modelling) → DryRunBroker → QuotexBroker; OMS + ledger + SQLite journal |
-| **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused |
+| **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused; **ghost wire** (Phase-30): human-paced frames, jittered reconnects, subscription replay, gap-only backfill, portfolio reconcile |
 | **Backtest lab** | Event-driven binary-option simulator + 10-scenario gauntlet (bull/bear trend, range chop, low-vol grind, high-vol expansion, flash crash, gap open, news spike, liquidity vacuum, regime whipsaw), survival scoring, walk-forward optimizer |
 | **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) |
 
@@ -98,6 +98,30 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
 Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
+
+## Phase 30 — the ghost wire (organic pacing + advanced venue continuity)
+
+"Most advanced + undetectable" resolves to one honest definition: **this
+client's network manners are indistinguishable from the Chrome it was
+paired from** — human timing, truthful headers, no faked capabilities.
+No CAPTCHA bypass, no fingerprint spoofing, no proxy rotation: none of
+that exists in this codebase, by standing rule (`QUOTEX_PROTOCOL` §10).
+
+| Piece | What it does |
+|---|---|
+| `ghost.Pacekeeper` | Every venue frame rides class gates: **orders** get jittered think-time (uniform 0.7–1.4 × `order_think_ms`), a hard `order_min_gap_ms`, and a sliding `max_orders_per_min` window; history/poll and generic frames get smaller gaps. Bots are metronomic — we are deliberately sloppy, and timings are injectable for tests. |
+| `ghost.parity_headers` | HTTP + WS handshakes carry the paired browser's truthful extras (UA, `Accept-Language`, no-cache). `Sec-WebSocket-Extensions` is **omitted, never faked** — advertising a capability we don't implement is itself a fingerprint. |
+| `ghost.reconnect_delay` | Exponential backoff (2s ×1.8, 60s cap) ±20–25% jitter — reconnects never land on a fixed grid. |
+| `ghost.is_session_fault` | "Session dead" venue errors (`invalid session`, `unauthorized`, `cloudflare`, `captcha`, …) → `session_stale` flag, CRITICAL log with a `quotex login` re-pair hint, one-shot `session_stale` event — never blind retries. |
+| Subscription registry | `subscribeCandle` frames replay after **either** reconnect path (client-level hook or supervisor `api.connect()`); double-connect closes the old socket first — no ghost wires. |
+| `sync.backfill_gaps` | The live feed fetches **only missing bars** (chart-like: notice the hole, fill the hole) instead of re-pulling full history on a grid; `reconnected` events trigger an immediate sweep. |
+| `adapter.reconcile_venue` | Boot pulls the portfolio wire (`parse_portfolio`, schema-tolerant) and adopts venue-open contracts with plausible expiry metadata — crash restarts and multi-tab sessions reconcile; metadata-less orphans are logged for manual review, never guessed. |
+
+Config: `BrokerConfig.ghost_pace=True`, `order_think_ms=140`,
+`order_min_gap_ms=350`, `max_orders_per_min=10` (validated). Paper mode
+untouched — no venue frames exist to pace.
+
+Suite at **499 green** (`tests/test_phase30.py` 20 tests).
 
 ## Phase 29 — the airlock (Chrome pairing + LIVE candles only)
 

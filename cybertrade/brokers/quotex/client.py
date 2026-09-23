@@ -3,6 +3,12 @@
 Transport = stdlib WebSocket (RFC6455) + Engine.IO v3 / Socket.IO codec.
 Everything about reconnection and heartbeat timing is centralized here so the
 API layer can stay synchronous and boring.
+
+Phase-30 ghost wire: the handshake carries browser-parity headers (the same
+Chrome identity used for pairing — locale, no-cache; no faked capabilities),
+and reconnect backoff is jittered so the pattern never lands on a fixed grid.
+After a client-level reconnect the ``on_reconnected`` hook replays candle
+subscriptions through the API layer.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ from ...network.socketio import (
 from ...network.websocket import WebSocketConnection
 from ...utils import timex
 from . import constants as C
+from .ghost import parity_headers, reconnect_delay
 from .protocol import parse_event
 
 log = logging.getLogger("cybertrade.qx.client")
@@ -42,6 +49,7 @@ class QuotexSocket:
         origin: str = C.ORIGIN,
         is_demo: bool = True,
         on_event: Optional[EventHandler] = None,
+        on_reconnected: Optional[Callable[[], None]] = None,
         reconnect_max: int = 12,
         timeout: float = 15.0,
     ) -> None:
@@ -52,6 +60,7 @@ class QuotexSocket:
         self.origin = origin
         self.is_demo = is_demo
         self.on_event = on_event
+        self.on_reconnected = on_reconnected
         self.reconnect_max = reconnect_max
         self.timeout = timeout
 
@@ -91,7 +100,11 @@ class QuotexSocket:
         log.info("quotex socket connected sid=%s", self.eio.sid[:8])
 
     def _open_socket(self) -> None:
-        headers = {"User-Agent": self.user_agent, "Origin": self.origin}
+        # Browser-parity handshake: same identity as the paired Chrome tab.
+        # Origin rides the dedicated parameter (the transport writes it
+        # once); headers carry UA + locale + no-cache only — we never
+        # advertise websocket extensions we do not implement.
+        headers = parity_headers(self.user_agent)
         self.conn = WebSocketConnection(
             self.ws_url,
             headers=headers,
@@ -217,13 +230,18 @@ class QuotexSocket:
                 self._last_pong = time.time()
 
     def _try_reconnect(self) -> None:
-        delay = 2.0
+        """Jittered exponential backoff; replay hook fires on success."""
         for attempt in range(1, self.reconnect_max + 1):
             if not self._running:
                 return
-            log.warning("reconnect attempt %d/%d", attempt, self.reconnect_max)
+            delay = reconnect_delay(attempt)
+            log.warning(
+                "reconnect attempt %d/%d in %.1fs (jittered)",
+                attempt, self.reconnect_max, delay,
+            )
             time.sleep(delay)
-            delay = min(60.0, delay * 1.8)
+            if not self._running:
+                return
             try:
                 self._open_socket()
                 self.eio = EngineIOSession()
@@ -236,12 +254,18 @@ class QuotexSocket:
                 self._raw_send(encode_connect())
                 self.authorize(timeout=5.0)
                 self._connected.set()
+                self._last_pong = time.time()
                 self.reconnects += 1
                 self._reader = threading.Thread(
                     target=self._read_loop, daemon=True, name="qx-read"
                 )
                 self._reader.start()
                 log.info("reconnected (attempt %d)", attempt)
+                if self.on_reconnected is not None:
+                    try:
+                        self.on_reconnected()
+                    except Exception:  # noqa: BLE001 — restore must not kill wire
+                        log.exception("on_reconnected hook crashed")
                 return
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)

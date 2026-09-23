@@ -45,8 +45,77 @@ class QuotexBroker(Broker):
     def connect(self) -> None:
         if not self.api.session.ssid:
             raise BrokerConnectionError("QuotexBroker requires an authenticated API session")
-        self.api.connect()
+        # Reuse an already-open wire (Phase-30: no ghost sockets from
+        # double-connect); open one only when actually down.
+        if not getattr(self.api, "connected", False):
+            self.api.connect()
+        self.reconcile_venue()
         self._notify("connect", self.name)
+
+    def reconcile_venue(self) -> int:
+        """Adopt venue-open contracts the engine doesn't know (Phase-30).
+
+        Boot pulls the portfolio wire and folds in any open contract with
+        enough metadata (id + asset + plausible expiry) that we did not
+        place this process — crash restarts and multi-tab sessions stay
+        reconciled.  Orphans without expiry metadata are logged loudly for
+        manual review rather than guessed at.  Returns contracts adopted.
+        """
+        opener = getattr(self.api, "open_trades", None)
+        if opener is None:
+            return 0
+        try:
+            trades = list(opener() or [])
+        except Exception as exc:  # noqa: BLE001 — reconcile is best-effort
+            log.debug("venue portfolio pull failed: %s", exc)
+            return 0
+        now = timex.now()
+        known_ids = {p.fill.broker_id for p in self._positions.values()}
+        known_ids.update(self._by_request.keys())
+        adopted = 0
+        for t in trades:
+            rid = t.order_id or t.request_id
+            if not rid or rid in known_ids:
+                continue
+            if t.request_id and t.request_id in known_ids:
+                continue
+            expiry = _venue_expiry(t, now)
+            if expiry <= now - 60.0:
+                log.warning(
+                    "venue-open orphan %s %s amount=%s — no usable expiry "
+                    "metadata; manual review required", rid, t.asset, t.amount,
+                )
+                continue
+            side = Side.CALL if (t.action or "call").lower() in ("call", "buy") else Side.PUT
+            fill = Fill(
+                order_id=f"venue:{rid}",
+                asset=t.asset or "UNKNOWN",
+                side=side,
+                price=t.open_price,
+                amount=t.amount,
+                payout=t.payout if 0 < t.payout < 1 else 0.85,
+                ts=now,
+                broker_id=rid,
+            )
+            pos = Position(
+                fill=fill,
+                expiry_ts=expiry,
+                strategy="venue",
+                label="reconciled",
+            )
+            with self._lock:
+                self._positions[pos.id] = pos
+                self._by_request[rid] = fill.id
+                if t.request_id:
+                    self._by_request[t.request_id] = fill.id
+            adopted += 1
+            log.info(
+                "reconciled venue-open %s %s x%s exp=%.0f",
+                rid, t.asset, t.amount, expiry,
+            )
+        if adopted:
+            self._notify("reconcile", {"adopted": adopted})
+        return adopted
 
     def disconnect(self) -> None:
         self.api.close()
@@ -208,6 +277,41 @@ class QuotexBroker(Broker):
                 self._positions.pop(pos_id, None)
             self._notify("settle", settlement)
             return
+
+
+def _venue_expiry(result: QXOrderResult, now: float) -> float:
+    """Best-effort expiry timestamp from venue portfolio rows.
+
+    Community payloads carry the close timestamp under assorted keys
+    (``time`` on orders/open echoes expiry).  Accept seconds or
+    milliseconds; return 0 when nothing plausible is present (caller then
+    refuses to guess and logs the orphan for manual review).
+    """
+    raw = result.raw or {}
+
+    def _scan(obj: object) -> float:
+        if isinstance(obj, dict):
+            for key in ("time", "expiry", "expiryTime", "closeTime", "endTime",
+                        "duration", "expireAt"):
+                if key in obj and key != "duration":
+                    try:
+                        val = float(obj[key])
+                    except (TypeError, ValueError):
+                        continue
+                    if val > 1e11:  # milliseconds
+                        val /= 1000.0
+                    if now - 60.0 <= val <= now + 86400.0 * 2.0:
+                        return val
+            nested = obj.get("data")
+            if isinstance(nested, dict):
+                return _scan(nested)
+        return 0.0
+
+    found = _scan(raw)
+    if found:
+        return found
+    # duration-only rows: open now + duration is too loose to trust — refuse
+    return 0.0
 
 
 __all__ = ["QuotexBroker"]

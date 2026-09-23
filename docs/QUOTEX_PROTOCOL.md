@@ -190,3 +190,25 @@ cybertrade quotex login
   generator-backed feed. Missing session → loud startup error naming
   `quotex login` — never a silent paper/synthetic fallback.
 - Paper mode (the default) is unchanged: fully offline synthetic tape.
+
+## 10. Ghost wire — organic traffic discipline (Phase-30)
+
+"Undetectable" in this codebase means one honest thing: **the client's
+network manners are indistinguishable from the Chrome it was paired from
+(§9)** — not CAPTCHA bypass, not fingerprint spoofing, not proxy rotation,
+none of which exist here by standing rule.
+
+| Mechanism | What it does |
+|---|---|
+| `ghost.Pacekeeper` | Every venue frame rides class gates: orders get jittered think-time (uniform 0.7–1.4 × `order_think_ms`), a hard `order_min_gap_ms`, and a sliding `max_orders_per_min` window; history/poll and generic frames get their own smaller gaps. A bot signature is *timing* — 12 orders/sec, metronomic think-time — so ours is deliberately sloppy. |
+| `ghost.parity_headers` | HTTP + WS handshakes carry the paired browser's truthful extras (UA, `Accept-Language`, no-cache). `Sec-WebSocket-Extensions` is **omitted, never faked** — advertising a capability we do not implement is itself a fingerprint. |
+| `ghost.reconnect_delay` | Exponential backoff (2s ×1.8, 60s cap) with ±20–25% jitter so reconnects never land on a fixed grid. |
+| `ghost.is_session_fault` | Venue errors meaning "session dead" (`invalid session`, `unauthorized`, `cloudflare`, `captcha`, …) set `session_stale`, log CRITICAL with a `cybertrade quotex login` re-pair hint, and emit `session_stale` — never blind retries. |
+| Subscriptions registry | `subscribeCandle` frames are remembered and replayed after *any* reconnect path (client-level `_try_reconnected` hook **or** supervisor-level `api.connect()`), so the chart stream restores itself. |
+| `sync.backfill_gaps` | The live feed fetches **only missing bars** (chart-like behaviour) instead of re-pulling full history on a fixed grid; reconnect events trigger an immediate gap sweep. |
+| `adapter.reconcile_venue` | Boot pulls the portfolio wire and adopts venue-open contracts (id + asset + plausible expiry) this process didn't place — crash restarts stay reconciled; metadata-less orphans are logged for manual review, never guessed. |
+
+Config knobs (`BrokerConfig`): `ghost_pace` (default **True**),
+`order_think_ms=140`, `order_min_gap_ms=350`, `max_orders_per_min=10`.
+Timing is injectable (`Pacekeeper(clock=, sleep=, rnd=)`) for tests.
+Paper mode is untouched — no venue frames exist to pace.

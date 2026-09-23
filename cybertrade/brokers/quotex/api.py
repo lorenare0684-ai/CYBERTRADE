@@ -4,6 +4,12 @@ This is *unofficial* integration against community-documented endpoints and
 event names (see docs/QUOTEX_PROTOCOL.md).  Default account is the broker's
 PRACTICE purse.  Live (REAL) order flow can violate the broker's Terms of
 Service — see DISCLAIMER.md before ever enabling it.
+
+Phase-30 "ghost wire": every venue frame rides a :class:`~...ghost.Pacekeeper`
+(human jitter, order think-time, sliding orders/min window), subscriptions are
+replayed after any reconnect (client-level or supervisor-level), portfolio
+snapshots fold into order state, and session-fault venue errors are classified
+loudly (re-pair via ``cybertrade quotex login``) instead of retried blindly.
 """
 
 from __future__ import annotations
@@ -20,11 +26,13 @@ from ...utils import timex
 from ...utils.jsonx import dig
 from . import constants as C
 from .client import QuotexSocket
+from .ghost import Pacekeeper, is_session_fault, parity_headers
 from .models import QXAsset, QXBalance, QXCandle, QXOrderRequest, QXOrderResult, QXSession
 from .protocol import (
     build_balance,
     build_candle_history,
     build_change_balance,
+    build_instruments,
     build_order,
     build_portfolio,
     build_sell_option,
@@ -33,6 +41,7 @@ from .protocol import (
     parse_balance,
     parse_candles,
     parse_order_result,
+    parse_portfolio,
     parse_tick,
 )
 
@@ -51,6 +60,11 @@ class QuotexAPI:
         demo: bool = True,
         timeout: float = 15.0,
         legacy_orders: bool = False,
+        ghost: bool = True,
+        order_think_ms: int = 140,
+        order_min_gap_ms: int = 350,
+        max_orders_per_min: int = 10,
+        pace: Optional[Pacekeeper] = None,
     ) -> None:
         self.http_base = http_base
         self.ws_url = ws_url
@@ -59,7 +73,18 @@ class QuotexAPI:
         self.timeout = timeout
         self.legacy_orders = legacy_orders
 
-        self.http = HttpClient(base_url=http_base, user_agent=user_agent, timeout=timeout)
+        self.pace = pace or Pacekeeper(
+            enabled=ghost,
+            order_think_ms=order_think_ms,
+            order_min_gap_ms=order_min_gap_ms,
+            max_orders_per_min=max_orders_per_min,
+        )
+        self.http = HttpClient(
+            base_url=http_base,
+            user_agent=user_agent,
+            timeout=timeout,
+            headers=parity_headers(user_agent, origin=http_base),
+        )
         self.session = QXSession(user_agent=user_agent, demo=demo)
         self.socket: Optional[QuotexSocket] = None
 
@@ -74,6 +99,9 @@ class QuotexAPI:
         self._listeners: List[Callable[[str, Any], None]] = []
         self._lock = threading.RLock()
         self._tick_handlers: List[Callable[[Tick], None]] = []
+        # Phase-30: replayable candle subscriptions + session health.
+        self._subs: Dict[Tuple[str, int], None] = {}
+        self._session_stale = False
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -114,6 +142,7 @@ class QuotexAPI:
             demo=self.demo,
             host=self.http_base.split("//")[-1],
         )
+        self._session_stale = False
         log.info("website login ok host=%s demo=%s", self.session.host, self.demo)
         self._emit("login", self.session.to_dict())
         return self.session
@@ -127,12 +156,20 @@ class QuotexAPI:
             demo=self.demo,
             host=self.http_base.split("//")[-1],
         )
+        self._session_stale = False
         return self.session
 
     # -- socket ------------------------------------------------------------
     def connect(self, authorize: bool = True) -> bool:
         if not self.session.ssid:
             raise BrokerAuthError("no session — call login() or set_ssid() first")
+        # Phase-30: never leave a ghost socket behind (double-connect must
+        # replace the old wire, not fork a second one).
+        if self.socket is not None:
+            try:
+                self.close()
+            except Exception:  # noqa: BLE001
+                pass
         self.socket = QuotexSocket(
             self.session.ssid,
             ws_url=self.ws_url,
@@ -140,17 +177,23 @@ class QuotexAPI:
             user_agent=self.user_agent,
             is_demo=self.demo,
             on_event=self._on_socket_event,
+            on_reconnected=self._on_reconnected,
             timeout=self.timeout,
         )
         self.socket.connect(authorize=authorize)
+        # Supervisor heals call api.connect() directly — replay here too so
+        # either reconnect path restores the chart stream.
+        self._replay_subscriptions()
         self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
         self.request_balance()
         return True
 
     def close(self) -> None:
         if self.socket is not None:
-            self.socket.disconnect()
-            self.socket = None
+            try:
+                self.socket.disconnect()
+            finally:
+                self.socket = None
 
     @property
     def connected(self) -> bool:
@@ -158,7 +201,31 @@ class QuotexAPI:
 
     # -- market data -------------------------------------------------------
     def subscribe(self, asset: str, timeframe_seconds: int = 60) -> None:
-        self._send(build_subscribe_candles(asset, timeframe_seconds))
+        self._subs[(asset, int(timeframe_seconds))] = None
+        self._send(build_subscribe_candles(asset, timeframe_seconds), kind="frame")
+
+    def _replay_subscriptions(self) -> int:
+        """Re-send every candle subscription after a reconnect (Phase-30)."""
+        sent = 0
+        for asset, tf in list(self._subs.keys()):
+            try:
+                self._send(build_subscribe_candles(asset, tf), kind="frame")
+                sent += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("resubscribe failed %s@%ss: %s", asset, tf, exc)
+        if sent:
+            log.info("replayed %d candle subscriptions", sent)
+        return sent
+
+    def _on_reconnected(self) -> None:
+        """Client-level reconnect hook: restore stream + session heartbeat."""
+        try:
+            self._replay_subscriptions()
+            self.request_balance()
+            self._emit("reconnected", self.stats())
+            log.info("venue wire restored — subscriptions replayed")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("post-reconnect restore failed: %s", exc)
 
     def get_candles(
         self, asset: str, timeframe_seconds: int = 60, count: int = 200, wait: float = 3.0
@@ -166,7 +233,7 @@ class QuotexAPI:
         key = (asset, timeframe_seconds)
         with self._lock:
             self._candles.setdefault(key, [])
-        self._send(build_candle_history(asset, timeframe_seconds, count))
+        self._send(build_candle_history(asset, timeframe_seconds, count), kind="history")
         deadline = time.time() + wait
         while time.time() < deadline:
             with self._lock:
@@ -195,16 +262,16 @@ class QuotexAPI:
 
     def request_instruments(self) -> None:
         """Ask the venue to push its instrument listing (fills the catalog)."""
-        self._send(build_instruments())
+        self._send(build_instruments(), kind="history")
 
     # -- account -----------------------------------------------------------
     def request_balance(self) -> QXBalance:
-        self._send(build_balance())
+        self._send(build_balance(), kind="poll")
         return self.balance
 
     def change_balance(self, account_type: str = C.ACCOUNT_DEMO) -> None:
         self.demo = account_type.upper() != C.ACCOUNT_REAL
-        self._send(build_change_balance(account_type))
+        self._send(build_change_balance(account_type), kind="frame")
 
     def account_snapshot(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -240,7 +307,8 @@ class QuotexAPI:
             request_id=make_request_id(),
             time=int(timex.now()) + duration,
         )
-        self._send(build_order(req, legacy=self.legacy_orders))
+        # Phase-30: think-time + min gap + orders/min window all ride here.
+        self._send(build_order(req, legacy=self.legacy_orders), kind="order")
         log.info(
             "qx order sent %s %s %.2f exp=%ds demo=%s rid=%s",
             asset, action, amount, duration, self.demo, req.request_id,
@@ -249,10 +317,11 @@ class QuotexAPI:
         return req
 
     def sell_option(self, order_id: str) -> None:
-        self._send(build_sell_option(order_id))
+        # sell-backs are trade actions too — same organic gate as orders.
+        self._send(build_sell_option(order_id), kind="order")
 
     def open_trades(self) -> List[QXOrderResult]:
-        self._send(build_portfolio())
+        self._send(build_portfolio(), kind="poll")
         return [o for o in self._orders.values() if o.status == "open"]
 
     # -- event plumbing ----------------------------------------------------
@@ -269,8 +338,11 @@ class QuotexAPI:
             except Exception:  # noqa: BLE001
                 pass
 
-    def _send(self, wire: str) -> None:
+    def _send(self, wire: str, kind: str = "frame") -> None:
         if self.socket is None:
+            raise BrokerConnectionError("socket not connected")
+        self.pace.wait(kind)
+        if self.socket is None:  # pacing may have waited through a close()
             raise BrokerConnectionError("socket not connected")
         self.socket.send(wire)
 
@@ -318,8 +390,30 @@ class QuotexAPI:
                     self._orders[key] = result
                 self._emit("order", result)
 
+        elif name in (C.SV_PORTFOLIO, C.EV_PORTFOLIO, "portfolio", "openOrders"):
+            rows = parse_portfolio(args)
+            if rows:
+                with self._lock:
+                    for row in rows:
+                        key = row.order_id or row.request_id or row.asset
+                        if key:
+                            self._orders[key] = row
+                self._emit("portfolio", rows)
+
         elif name in (C.SV_ERROR, "error"):
-            log.warning("qx error event: %s", args)
+            from .protocol import parse_error
+
+            msg = parse_error(args)
+            log.warning("qx error event: %s", msg)
+            if is_session_fault(msg) and not self._session_stale:
+                # Loud, not blind: a dead session must be re-paired by a
+                # human (Chrome + CAPTCHA), never hammered with retries.
+                self._session_stale = True
+                log.critical(
+                    "venue session fault: %s — run `cybertrade quotex login` "
+                    "and solve the CAPTCHA once", msg,
+                )
+                self._emit("session_stale", msg)
             self._emit("error", args)
 
         else:
@@ -351,10 +445,13 @@ class QuotexAPI:
         return {
             "connected": self.connected,
             "session": self.session.to_dict(),
+            "session_stale": self._session_stale,
             "balance": self.balance.balance,
             "account_type": self.balance.account_type,
             "socket": self.socket.stats() if self.socket else {},
             "tracked_assets": len(self._last_tick),
+            "subscriptions": len(self._subs),
+            "pace": self.pace.stats(),
         }
 
 

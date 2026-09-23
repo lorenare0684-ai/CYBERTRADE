@@ -158,6 +158,11 @@ class BrokerConfig:
     slippage_bps: float = 0.5
     reconnect_max: int = 12
     request_timeout: float = 15.0
+    # Phase-30 ghost wire: organic traffic discipline on the venue link.
+    ghost_pace: bool = True                   # human-shaped frame timing
+    order_think_ms: int = 140                 # jittered pre-order think-time base
+    order_min_gap_ms: int = 350               # min spacing between order frames
+    max_orders_per_min: int = 10              # sliding window cap (never burst)
 
     def validate(self) -> None:
         if self.mode not in {"paper", "quotex", "dryrun"}:
@@ -166,6 +171,10 @@ class BrokerConfig:
             raise ConfigError("payout_default must be in (0, 1)")
         if self.latency_ms < 0:
             raise ConfigError("latency_ms must be >= 0")
+        if self.order_think_ms < 0 or self.order_min_gap_ms < 0:
+            raise ConfigError("ghost pacing timings must be >= 0 ms")
+        if self.max_orders_per_min < 1:
+            raise ConfigError("max_orders_per_min must be >= 1")
 
     def redacted(self) -> Dict[str, Any]:
         data = dataclasses.asdict(self)
