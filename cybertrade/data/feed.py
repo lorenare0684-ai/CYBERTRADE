@@ -157,7 +157,16 @@ class SyntheticFeed(Feed):
             )
             for c in candles:
                 self._books[asset].on_price(c.close, c.close_ts - 1)
-            self._last[asset] = candles[-1].close if candles else sim.price
+            if candles:
+                # continuity: the simulator must RESUME at the warmup end,
+                # or the first live tick teleports price to start_price and
+                # every detector downstream sees a phantom crash bar.
+                sim.state.price = candles[-1].close
+                if sim.state.anchor:
+                    pass  # keep configured anchor (mean-revert center)
+                self._last[asset] = candles[-1].close
+            else:
+                self._last[asset] = sim.price
         log.info("synthetic warmup complete bars=%d assets=%d", self.warmup_bars, len(self._sims))
 
     def last_price(self, asset: str) -> Optional[float]:

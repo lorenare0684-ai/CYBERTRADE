@@ -424,6 +424,18 @@ class TestScenarios(unittest.TestCase):
         feed.set_scenario("EURUSD", "regime_whipsaw")
         self.assertEqual(feed.scenarios["EURUSD"], "regime_whipsaw")
 
+    def test_warmup_resumes_sim_price(self):
+        # regression: warmup used to leave sim.state.price at start_price, so
+        # the first live tick teleported price and faked a crash bar at boot
+        feed = SyntheticFeed(assets=["EURUSD"], scenarios={"EURUSD": "bull_trend"},
+                             warmup_bars=300, tick_interval=0.01)
+        feed.warmup()
+        sim = feed._sims["EURUSD"]
+        self.assertAlmostEqual(sim.state.price, feed.last_price("EURUSD"), places=9)
+        px, _spread = sim.tick()
+        # the next tick must live in the same neighbourhood (no teleport)
+        self.assertLess(abs(px - feed.last_price("EURUSD")) / feed.last_price("EURUSD"), 0.05)
+
 
 class TestEnginePhase2Wiring(unittest.TestCase):
     def test_calendar_veto_and_cluster_plumbing(self):
