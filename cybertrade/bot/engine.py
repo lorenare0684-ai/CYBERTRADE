@@ -392,7 +392,8 @@ class TradingEngine:
 
         # Phase-4/6: calibrated P(win) — per-voter evidence, not marketing copy.
         p_win = self.calibrator.p_win_for(
-            signal.strategy, signal.confidence, signal.meta.get("votes")
+            signal.strategy, signal.confidence, signal.meta.get("votes"),
+            regime=reading.regime.value if cfg.risk.regime_cal else "",
         )
         edge = edge_of(p_win, payout)
         sizing = self.risk.size_stake(
@@ -460,6 +461,7 @@ class TradingEngine:
             tag=f"{decision.posture}:{signal.reason}",
             cluster=self.corr.cluster_of(signal.asset),
             regime=reading.regime.value,
+            votes=tuple(signal.meta.get("votes") or ()),
         )
         return order is not None
 
@@ -488,9 +490,12 @@ class TradingEngine:
         except (TypeError, ValueError):
             claimed = 0.6
         self.calibrator.observe(
-            record.strategy or (order.strategy if order else "manual"), claimed, won
+            record.strategy or (order.strategy if order else "manual"), claimed, won,
+            regime=record.regime,
         )
-        self.calibrator.observe_votes(order.meta.get("votes") if order else None, won)
+        self.calibrator.observe_votes(
+            order.meta.get("votes") if order else None, won, regime=record.regime
+        )
         for vote in meta_votes:
             name = vote.get("strategy")
             if name:

@@ -69,6 +69,7 @@ class OrderManager:
         tag: str = "",
         cluster: str = "",
         regime: str = "",
+        votes: tuple = (),
     ) -> Optional[Order]:
         """Authorize + route one binary order. Returns None when risk vetoes."""
         if not side.is_trade:
@@ -82,7 +83,8 @@ class OrderManager:
             payout=payout,
             strategy=strategy,
             tag=tag,
-            meta={"cluster": cluster or asset, "regime": regime, "confidence": confidence},
+            meta={"cluster": cluster or asset, "regime": regime,
+                  "confidence": confidence, "votes": list(votes)},
         )
         try:
             self.risk.authorize(

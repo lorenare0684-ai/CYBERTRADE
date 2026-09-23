@@ -84,7 +84,10 @@ calibrator per run, and `RiskConfig.expiry_select="adaptive"` swaps the
 signal's horizon for the best modeled candidate (`quant/expiry.py`).
 Since Phase 6 the gate estimate is `p_win_for = min(blob, voter-blend)`
 (`observe_votes` gives every voter its own reliability table; Kelly sizing
-consumes the same calibrated P(win)).
+consumes the same calibrated P(win)); since Phase 7 every estimate can be
+conditioned on the active regime (`p_regime`, `RiskConfig.regime_cal`), and
+`oms.submit` carries `votes` so live settlements teach the same tables the
+backtester does.
 
 ## Testing strategy
 

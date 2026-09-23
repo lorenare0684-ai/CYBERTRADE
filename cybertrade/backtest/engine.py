@@ -196,9 +196,12 @@ class Backtester:
                     )
                     ensemble.record_result(won and not refunded, pnl)
                     self.calibrator.observe(
-                        trade.strategy, trade.confidence, won and not refunded
+                        trade.strategy, trade.confidence, won and not refunded,
+                        regime=trade.regime,
                     )
-                    self.calibrator.observe_votes(trade.votes, won and not refunded)
+                    self.calibrator.observe_votes(
+                        trade.votes, won and not refunded, regime=trade.regime
+                    )
                 else:
                     still_open.append(trade)
             open_trades = still_open
@@ -276,7 +279,8 @@ class Backtester:
                 continue
 
             p_win = self.calibrator.p_win_for(
-                signal.strategy, signal.confidence, signal.meta.get("votes")
+                signal.strategy, signal.confidence, signal.meta.get("votes"),
+                regime=reading.regime.value if cfg.risk.regime_cal else "",
             )
             sizing = risk.size_stake(
                 balance=balance,

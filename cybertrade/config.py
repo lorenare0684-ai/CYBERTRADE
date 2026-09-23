@@ -35,11 +35,12 @@ class RiskConfig:
     max_daily_loss_frac: float = 0.08     # stop trading for the day beyond this
     max_total_drawdown_frac: float = 0.20  # kill switch beyond this
     win_rate_floor: float = 0.40          # quarantine strategies below this
-    min_payout: float = 0.75              # refuse trades under this payout
+    min_payout: float = 0.85              # the hurdle is brutal below this (54%+ WR needed)
     edge_gate: str = "scale"              # off | scale | hard (calibrated edge gate)
     min_edge: float = 0.05                # calibrated P(win) edge needed for full size
     expiry_select: str = "signal"         # signal | adaptive (best_expiry chooser)
     expiry_candidates: List[int] = field(default_factory=lambda: [30, 60, 120, 300])
+    regime_cal: bool = True               # regime-conditional P(win) — the WHEN matrix
     max_correlated_exposure: int = 2      # open trades sharing quote currency
     cooldown_after_losses: int = 3        # consecutive losses -> cooldown
     cooldown_seconds: float = 120.0

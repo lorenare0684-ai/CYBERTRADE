@@ -99,6 +99,26 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 7 — the WHEN matrix (regime-conditional calibration)
+
+Phase 6's ceiling said unconditional claims don't predict outcomes. The
+remaining information is *context*: a strategy can be lethal in
+`bull_trend` and toxic in `range`, and its unconditional record averages
+the two into a lie. `CalibrationTracker.p_regime` keeps (strategy × regime)
+reliability tables, shrunk toward the strategy-level prior and silent below
+4 samples; `p_win_for(..., regime=…)` routes every estimate through them
+(`RiskConfig.regime_cal`, default on). This hunt also found that `oms.submit`
+never carried votes — **live per-voter learning was silently dead**; fixed
+(`votes` in order meta) and pinned by test.
+
+A/B gauntlet (30 runs/arm): grade mix moves **A10→A14**, trades tighten
+(40.5→39.3), survival identical… and pooled WR stays ~50%. Third
+experiment, same ceiling — the ensemble's synthetic calls aren't sharper
+than coin flips net of the spread. So the wrap also moves the *hurdle*
+instead of the WR: **`min_payout` default 0.75 → 0.85** — at 90% payouts
+breakeven is 52.6%, at 95% it is 51.3%; below 75% you need 57%+ just to
+tread water. `tests/test_phase7.py` (10 tests); suite at **300 green**.
+
 ## Phase 6 — per-voter calibration (and one honest negative result)
 
 A gauntlet truth: the ensemble blob erased strategy identity — one liar in

@@ -19,6 +19,8 @@ BUCKET_EDGES: Tuple[float, ...] = (0.50, 0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.8
 PRIOR_WEIGHT = 4.0        # Beta(2,2)-ish pseudo-observations at 0.5
 RAW_BLEND = 20.0          # raw conf counts this much until a bucket matures
 RAW_SHRINK = 0.5          # cold-start raw conf is pulled halfway to 0.5
+REGIME_MIN_N = 4          # regime rows before regime evidence speaks
+REGIME_PRIOR_N = 8.0      # weight of the strategy-level estimate as prior
 
 
 def bucket_index(confidence: float) -> int:
@@ -57,12 +59,13 @@ class CalibrationTracker:
 
     def __init__(self) -> None:
         self._by_strategy: Dict[str, List[ReliabilityBucket]] = {}
+        self._by_regime: Dict[str, List[ReliabilityBucket]] = {}
         self._global = [ReliabilityBucket() for _ in range(len(BUCKET_EDGES) - 1)]
         self._lock = threading.RLock()
         self._observed = 0
 
     # -- learning ----------------------------------------------------------
-    def observe(self, strategy: str, confidence: float, won: bool) -> None:
+    def observe(self, strategy: str, confidence: float, won: bool, regime: str = "") -> None:
         idx = bucket_index(confidence)
         with self._lock:
             table = self._by_strategy.setdefault(
@@ -71,6 +74,12 @@ class CalibrationTracker:
             table[idx].observe(won)
             self._global[idx].observe(won)
             self._observed += 1
+            if regime:
+                rtable = self._by_regime.setdefault(
+                    f"{strategy}|{regime}",
+                    [ReliabilityBucket() for _ in range(len(BUCKET_EDGES) - 1)],
+                )
+                rtable[idx].observe(won)
 
     # -- estimation --------------------------------------------------------
     def p_for(self, strategy: str, confidence: float) -> float:
@@ -99,7 +108,7 @@ class CalibrationTracker:
         p = (n * post + RAW_BLEND * raw_shrunk) / (n + RAW_BLEND)
         return clamp(p, 0.0, 1.0)
 
-    def observe_votes(self, votes, won: bool) -> None:
+    def observe_votes(self, votes, won: bool, regime: str = "") -> None:
         """Teach every voter behind a blended signal (shared outcome).
 
         Each subordinate strategy that voted 'called' this trade — its own
@@ -114,19 +123,56 @@ class CalibrationTracker:
             except (TypeError, ValueError, AttributeError):
                 continue
             if strat:
-                self.observe(strat, conf, won)
+                self.observe(strat, conf, won, regime=regime)
 
-    def p_win_for(self, strategy: str, confidence: float, votes=None) -> float:
+    def p_regime(self, strategy: str, regime: str, confidence: float) -> float:
+        """P(win) given the market regime — the WHEN matrix.
+
+        A strategy can be lethal in ``bull_trend`` and toxic in ``range``;
+        its unconditional record averages the two into a lie.  Regime rows
+        shrink toward the strategy-level estimate (prior weight
+        ``REGIME_PRIOR_N``) and stay silent below ``REGIME_MIN_N`` samples.
+        """
+        base = self.p_for(strategy, confidence)
+        if not regime:
+            return base
+        idx = bucket_index(confidence)
+        key = f"{strategy}|{regime}"
+        with self._lock:
+            table = self._by_regime.get(key)
+            bucket = table[idx] if table else None
+        n = bucket.total if bucket else 0
+        if n < REGIME_MIN_N:
+            return base
+        p = (n * bucket.posterior() + REGIME_PRIOR_N * base) / (n + REGIME_PRIOR_N)
+        return clamp(p, 0.0, 1.0)
+
+    def regime_rows(self) -> int:
+        """How many (strategy, regime) tables hold any evidence."""
+        with self._lock:
+            return sum(
+                1 for t in self._by_regime.values() if any(b.total for b in t)
+            )
+
+    def p_win_for(
+        self, strategy: str, confidence: float, votes=None, regime: str = ""
+    ) -> float:
         """Evidence-based P(win) for a blended signal.
 
         Mean of per-voter posteriors, shrunk toward the blob-level estimate
         (weight 2) so a lone opinionated voter cannot hijack the gate — then
         taken as the MINIMUM of that blend and the blob estimate: voter
         evidence may only *lower* the gate, never paper over a strategy the
-        ensemble's own record has discredited.
+        ensemble's own record has discredited.  When ``regime`` is set, every
+        estimate goes through :meth:`p_regime` (the WHEN matrix).
         Falls back to :meth:`p_for` when no votes exist.
         """
-        base = self.p_for(strategy, confidence)
+        est = self.p_regime if regime else self.p_for
+
+        def _one(name: str, conf: float) -> float:
+            return est(name, regime, conf) if regime else self.p_for(name, conf)
+
+        base = _one(strategy, confidence)
         if not votes:
             return base
         ps: List[float] = []
@@ -137,7 +183,7 @@ class CalibrationTracker:
             except (TypeError, ValueError, AttributeError):
                 continue
             if strat:
-                ps.append(self.p_for(strat, conf))
+                ps.append(_one(strat, conf))
         if not ps:
             return base
         voter_p = sum(ps) / len(ps)
