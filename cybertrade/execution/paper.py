@@ -39,6 +39,7 @@ class PaperBroker(Broker):
         slippage_bps: float = 0.5,
         seed: int = 42,
         fill_delay: bool = False,
+        salvage_rate: float = 0.25,
     ) -> None:
         super().__init__()
         self._balance = float(starting_balance)
@@ -50,6 +51,8 @@ class PaperBroker(Broker):
         self._rng = random.Random(seed)
         self._positions: Dict[str, Position] = {}
         self._settled: List[Settlement] = []
+        self._pending: List[Settlement] = []
+        self.salvage_rate = float(salvage_rate)
         self._prices: Dict[str, Tick] = {}
         self._connected = False
         self._daily_start = self._balance
@@ -156,6 +159,9 @@ class PaperBroker(Broker):
         now = now if now is not None else timex.now()
         out: List[Settlement] = []
         with self._lock:
+            if self._pending:
+                out.extend(self._pending)
+                self._pending.clear()
             due = [p for p in self._positions.values() if p.expiry_ts <= now]
             for pos in due:
                 price = self.last_price(pos.asset)
@@ -179,6 +185,33 @@ class PaperBroker(Broker):
             self._settled.append(settlement)
             self._notify("settle", settlement)
             return settlement
+
+    def close_position(self, position_id: str) -> bool:
+        """Lifeboat: liquidate at the mark minus the salvage haircut.
+
+        Losing contracts salvage ``salvage_rate`` of stake back (the venue's
+        sell-back quote); winners bank the modeled payout.  Cash moves now;
+        the settlement rides :meth:`settle_due` like an expiry — no special
+        paths downstream.
+        """
+        with self._lock:
+            pos = self._positions.pop(position_id, None)
+            if pos is None:
+                return False
+            price = self.last_price(pos.asset)
+            if price is None:
+                self._positions[position_id] = pos  # unmarkable — leave it
+                return False
+            settlement = pos.settle(price)
+            if not settlement.won and not settlement.refunded:
+                settlement.salvage = settlement.stake * self.salvage_rate
+            self._balance += settlement.returned
+            if self._balance > self._peak:
+                self._peak = self._balance
+            self._settled.append(settlement)
+            self._pending.append(settlement)
+            self._notify("close", settlement)
+            return True
 
     # -- account -----------------------------------------------------------
     def account(self) -> AccountSnapshot:

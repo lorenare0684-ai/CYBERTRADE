@@ -166,6 +166,25 @@ class TradingEngine:
         except Exception:  # noqa: BLE001
             log.exception("decay check failed")
 
+    def _salvage_all(self, reason: str) -> None:
+        """The lifeboat: liquidate every open contract at the salvage mark."""
+        closed = 0
+        for pos in list(self.broker.open_positions()):
+            try:
+                if self.broker.close_position(pos.id):
+                    closed += 1
+            except Exception:  # noqa: BLE001
+                log.exception("salvage failed for %s", pos.id)
+        if closed:
+            self.health.note_message(
+                f"LIFEBOAT: salvaged {closed} position(s) — {reason}"
+            )
+            default_bus.publish(
+                Topic.ALERT,
+                {"kind": "salvage", "count": closed, "reason": reason},
+                source="lifeboat",
+            )
+
     def _restore_calibration(self) -> None:
         """Reload the honesty ledger so learning survives process death."""
         path = self.config.calibration_path
@@ -371,6 +390,16 @@ class TradingEngine:
                 summary["vetoes"] += 1
                 self.vetoes += 1
 
+        # Phase-19: the lifeboat — salvage open risk before the storm takes it.
+        if self.config.risk.crisis_salvage:
+            try:
+                if self.broker.open_positions():
+                    reading = self.regime_of.get(self.feed.assets[0])
+                    if (reading is not None
+                            and self.survivor.posture_for(reading) == "LOCKDOWN"):
+                        self._salvage_all("survivor LOCKDOWN")
+            except Exception:  # noqa: BLE001
+                log.exception("lifeboat check failed")
         if self.supervisor is not None:
             self.supervisor.sweep(now)
         self.watchdog.sweep(now)

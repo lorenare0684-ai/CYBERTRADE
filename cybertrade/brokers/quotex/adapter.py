@@ -24,14 +24,17 @@ class QuotexBroker(Broker):
     its order events when they arrive).
     """
 
-    def __init__(self, api: QuotexAPI, allow_orders: bool = True) -> None:
+    def __init__(self, api: QuotexAPI, allow_orders: bool = True,
+                 salvage_rate: float = 0.25) -> None:
         super().__init__()
         self.api = api
         self.allow_orders = allow_orders  # dry-run rail: False = data only
+        self.salvage_rate = float(salvage_rate)
         self._positions: Dict[str, Position] = {}
         self._fills: Dict[str, Fill] = {}
         self._by_request: Dict[str, str] = {}
         self._settled: List[Settlement] = []
+        self._pending: List[Settlement] = []
         self._balance_override: Optional[float] = None
         self.api.add_listener(self._on_api_event)
 
@@ -107,6 +110,9 @@ class QuotexBroker(Broker):
         now = now if now is not None else timex.now()
         out: List[Settlement] = []
         with self._lock:
+            if self._pending:
+                out.extend(self._pending)
+                self._pending.clear()
             for pos in list(self._positions.values()):
                 if pos.expiry_ts > now:
                     continue
@@ -127,6 +133,35 @@ class QuotexBroker(Broker):
             self._settled.append(settlement)
             self._notify("settle", settlement)
             return settlement
+
+    def close_position(self, position_id: str) -> bool:
+        """Lifeboat: venue sell-back (``sell_option``) + local salvage mark.
+
+        The wire is best-effort — if the venue refuses or is unreachable we
+        still salvage locally at the mark (a dropped wire must not strand
+        risk).  Settlement rides :meth:`settle_due` like an expiry.
+        """
+        with self._lock:
+            pos = self._positions.get(position_id)
+            if pos is None:
+                return False
+            broker_id = pos.fill.broker_id
+        try:
+            self.api.sell_option(broker_id)
+        except Exception as exc:  # noqa: BLE001 — salvage locally anyway
+            log.warning("venue sell-back failed (%s) — local salvage mark", exc)
+        price = self.last_price(pos.asset)
+        if price is None:
+            return False
+        settlement = pos.settle(price)
+        if not settlement.won and not settlement.refunded:
+            settlement.salvage = settlement.stake * self.salvage_rate
+        with self._lock:
+            self._positions.pop(position_id, None)
+            self._settled.append(settlement)
+            self._pending.append(settlement)
+        self._notify("close", settlement)
+        return True
 
     # -- account -----------------------------------------------------------
     def account(self) -> AccountSnapshot:

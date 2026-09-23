@@ -99,6 +99,27 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 19 — the lifeboat (crisis salvage of open positions)
+
+Binaries cannot stop out — they ride to expiry. When Survivor screams
+**LOCKDOWN** (flash crash, news spike, manual), open contracts used to just
+take the storm head-on. The lifeboat now **sells every open contract back at
+the salvage mark** on the next cycle: losing contracts recover
+`salvage_rate` (default 25% of stake — the venue's sell-back quote),
+winners bank the modeled payout, and each settlement rides `settle_due` like
+an expiry (ledger, journal, decay watch all see it — no special paths).
+
+- venue path: `api.sell_option(broker_id)` fires first (best-effort); the
+  local salvage mark happens **even if the wire fails** — a dropped
+  connection must not strand risk
+- `Settlement.salvage` + the `returned = stake + pnl` unification keep every
+  existing cash case byte-identical
+- `RiskConfig.crisis_salvage=True` / `salvage_rate=0.25` (validated); the
+  trigger is the computed posture (`survivor.posture_for(reading)`), so
+  manual `engage_lockdown` launches the lifeboat too
+
+Suite at **396 green** (`tests/test_phase19.py` 8 tests).
+
 ## Phase 18 — the decay watch (stale edges, flagged live)
 
 `decay_check` averages everyone together — one strategy bleeding out hides

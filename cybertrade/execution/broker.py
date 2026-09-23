@@ -74,6 +74,11 @@ class Broker(abc.ABC):
     def cancel(self, order_id: str) -> bool:  # binaries cannot be cancelled
         return False
 
+    def close_position(self, position_id: str) -> bool:
+        """Liquidate one open contract before expiry (venue sell-back /
+        salvage mark).  False = unsupported or unknown position."""
+        return False
+
     def close(self) -> None:
         self.disconnect()
 

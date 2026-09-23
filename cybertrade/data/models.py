@@ -277,21 +277,20 @@ class Settlement:
     payout: float
     won: bool
     refunded: bool = False
+    salvage: float = 0.0
     ts: float = field(default_factory=timex.now)
     id: str = field(default_factory=lambda: _new_id("set"))
 
     @property
     def pnl(self) -> float:
         if self.refunded:
-            return 0.0
-        return self.stake * self.payout if self.won else -self.stake
+            return self.salvage
+        return (self.stake * self.payout if self.won else -self.stake) + self.salvage
 
     @property
     def returned(self) -> float:
-        """Cash returned to the account (0, stake, or stake*(1+payout))."""
-        if self.refunded:
-            return self.stake
-        return self.stake * (1.0 + self.payout) if self.won else 0.0
+        """Cash returned to the account (stake + pnl — covers salvage marks)."""
+        return self.stake + self.pnl
 
 
 @dataclass
