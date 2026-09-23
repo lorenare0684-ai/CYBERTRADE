@@ -147,6 +147,7 @@ class BrokerConfig:
     http_base: str = ""
     username: str = ""
     password: str = ""                        # never serialized to disk
+    ssid: str = ""                            # session cookie — never serialized to disk
     demo_account: bool = True                 # prefer broker demo balance
     payout_default: float = 0.85
     latency_ms: int = 180
@@ -290,6 +291,7 @@ class AppConfig:
         }
         if not include_secrets:
             data["broker"]["password"] = ""
+            data["broker"]["ssid"] = ""
         return json.loads(json.dumps(data, default=_encode))
 
     @classmethod

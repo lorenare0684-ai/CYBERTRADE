@@ -44,6 +44,78 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     return cfg
 
 
+def _build_venue(cfg: AppConfig, api_factory=None):
+    """Build an order-disabled QuotexBroker with a live session, or None.
+
+    Session sources (nothing is ever written to disk): in-memory
+    ``cfg.broker.ssid`` / ``--ssid``, then the ``QX_SSID`` env var; else
+    ``username``+``password`` via ``login()``.  Any failure degrades to
+    ``None`` — paper quotes, zero drama.
+    """
+    import os
+
+    try:
+        if api_factory is None:
+            from .brokers.quotex.adapter import QuotexBroker
+            from .brokers.quotex.api import QuotexAPI
+
+            def api_factory() -> Any:
+                return QuotexAPI(demo=cfg.broker.demo_account)
+
+        api = api_factory()
+        ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
+        if ssid:
+            api.set_ssid(ssid)
+        elif cfg.broker.username and cfg.broker.password:
+            api.login(cfg.broker.username, cfg.broker.password,
+                      is_demo=cfg.broker.demo_account)
+        if hasattr(api, "connect"):
+            api.connect()
+        from .brokers.quotex.adapter import QuotexBroker
+
+        return QuotexBroker(api, allow_orders=False)
+    except Exception as exc:  # noqa: BLE001 — venue trouble degrades to paper
+        print(f"  venue session unavailable ({exc}) — paper quotes")
+        return None
+
+
+def cmd_quotex(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    if getattr(args, "ssid", ""):
+        cfg.broker.ssid = args.ssid  # session-only: never written to disk
+    venue = _build_venue(cfg)
+    if venue is None:
+        print("  no venue session — set QX_SSID, pass --ssid, or configure "
+              "broker.username/password")
+        return 1
+    api = venue.api
+    if args.action == "status":
+        try:
+            api.request_instruments()
+        except Exception:  # noqa: BLE001
+            pass
+        sess = getattr(api, "session", None)
+        print(f"  connected : {getattr(api, 'connected', False)}")
+        print(f"  host      : {getattr(sess, 'host', '?')}"
+              f"  demo={getattr(sess, 'demo', '?')}")
+        snap = api.account_snapshot() if hasattr(api, "account_snapshot") else None
+        if snap is not None:
+            print(f"  balance   : {getattr(snap, 'balance', 0.0):.2f}")
+        print(f"  instruments: {len(getattr(api, 'assets', {}) or {})}")
+        for asset in cfg.strategy.universe[:3]:
+            print(f"  payout {asset}: {api.payout_for(asset, 60):.2f}")
+        return 0
+    from .brokers.quotex.sync import warm_universe
+
+    total = warm_universe(
+        api, cfg.strategy.universe,
+        timeframe_seconds=cfg.timeframe().seconds,
+        bars=int(getattr(args, "bars", 250)), wait=3.0,
+    )
+    print(f"  warmed {total} candles across {len(cfg.strategy.universe)} assets")
+    return 0 if total else 1
+
+
 def _build_engine(cfg: AppConfig, scenario: str = ""):
     from .bot.engine import TradingEngine
     from .data.feed import SyntheticFeed
@@ -65,14 +137,12 @@ def _build_engine(cfg: AppConfig, scenario: str = ""):
         from .execution.dryrun import DryRunBroker
 
         venue = None
-        if cfg.broker.username:
-            try:
-                from .brokers.quotex.adapter import QuotexBroker
-                from .brokers.quotex.api import QuotexAPI
-
-                venue = QuotexBroker(QuotexAPI(), allow_orders=False)
-            except Exception as exc:  # noqa: BLE001 — dry-run degrades to paper
-                print(f"  dry-run: venue session unavailable ({exc}) — paper quotes")
+        import os
+        has_creds = bool(
+            cfg.broker.ssid or cfg.broker.username or os.environ.get("QX_SSID")
+        )
+        if has_creds:
+            venue = _build_venue(cfg)
         if venue is None:
             print("  dry-run: no venue session — catalog quotes, paper fills")
         broker = DryRunBroker(
@@ -541,6 +611,13 @@ def build_parser() -> argparse.ArgumentParser:
     clb.add_argument("--payout", type=float, default=0.85,
                      help="payout hurdle for liar flags")
     clb.set_defaults(func=cmd_calibrate)
+    qx = sub.add_parser("quotex", help="venue session: status / warm history")
+    qx.add_argument("action", choices=["status", "warm"])
+    qx.add_argument("--ssid", default="",
+                    help="session cookie (session-only, never stored)")
+    qx.add_argument("--bars", type=int, default=250,
+                    help="candles per asset for warm")
+    qx.set_defaults(func=cmd_quotex)
 
     cal = sub.add_parser("calendar", help="economic calendar / news blackouts")
     cal.add_argument("--days", type=float, default=7.0, help="horizon in days")

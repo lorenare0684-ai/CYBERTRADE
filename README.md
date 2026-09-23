@@ -99,6 +99,27 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 14 — the venue actually connects (SSID session + real warm)
+
+The dry-run harness built a `QuotexAPI` with **no session and no connect** —
+live quotes and history could never arrive. `_build_venue(cfg)` now
+authenticates from the honest sources — in-memory `--ssid`/`config.broker.ssid`
+(session-only, stripped from every serialization like the password), the
+`QX_SSID` env var, or `username`+`password` via `login()` — builds
+`QuotexBroker(allow_orders=False)`, and any failure degrades to paper quotes.
+
+Engine boot then pulls **real venue history into the books before trading**
+(`warm_book` per asset, 120 bars, best-effort — a slow venue delays warmup,
+it never blocks boot) so live strategies get the same indicator warmup paper
+takes for granted. New `quotex` command surface:
+
+| Command | Does |
+|---|---|
+| `python3 -m cybertrade quotex status` | connect, host/demo, balance, instrument count, sample payouts |
+| `python3 -m cybertrade quotex warm --bars 250` | `candleHistory` round-trip per asset, reports candles added |
+
+Suite at **362 green** (`tests/test_phase14.py` 8 tests).
+
 ## Phase 13 — wire the journal (the record survives)
 
 The sqlite journal store (`data/journal.db`, `TradeJournal`) existed since

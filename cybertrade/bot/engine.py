@@ -186,6 +186,21 @@ class TradingEngine:
                     api.request_instruments()
                 except Exception:  # noqa: BLE001
                     log.exception("instrument catalog request failed")
+            # Phase-14: pull real venue history into the books before trading —
+            # live strategies deserve the same indicator warmup as paper.
+            if hasattr(api, "get_candles") and callable(getattr(self.feed, "book", None)):
+                try:
+                    from ..brokers.quotex.sync import warm_book
+
+                    total = 0
+                    for asset in self.feed.assets:
+                        book = self.feed.book(asset)
+                        if book is not None:
+                            total += warm_book(api, book, bars=120, wait=2.0)
+                    if total:
+                        log.info("venue warm: +%d candles into books", total)
+                except Exception:  # noqa: BLE001 — a slow venue never blocks boot
+                    log.exception("venue warm failed — synthetic history stands")
         self.risk.reset_day(self.config.risk.starting_balance)
         for asset in self.feed.assets:
             self.detectors[asset] = RegimeDetector()
