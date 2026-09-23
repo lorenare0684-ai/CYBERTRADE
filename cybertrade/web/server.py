@@ -145,14 +145,25 @@ class EngineHub:
         qs = [self.engine.broker.payout_for(a, 60) for a in self.engine.feed.assets]
         return min(qs) if qs else self.engine.config.broker.payout_default
 
-    def montecarlo(self, runs: int = 400, horizon: int = 200) -> Dict[str, Any]:
-        """Risk lab report bootstrapped from settled trades (or synthetic
-        default when no history exists yet)."""
+    def montecarlo(self, runs: int = 400, horizon: int = 200,
+                   mode: str = "bootstrap") -> Dict[str, Any]:
+        """Risk lab: bootstrap settled trades, or (``mode="posterior"``)
+        simulate the calibrated Beta posterior over P(win)."""
         from ..risk.montecarlo import simulate_from_records
 
         trades = self.engine.oms.ledger.trades
         starting = self.engine.config.risk.starting_balance
-        if trades:
+        if mode == "posterior":
+            from ..risk.montecarlo import simulate_posterior
+
+            wins, losses = self.engine.calibrator.evidence()
+            report = simulate_posterior(
+                wins, losses,
+                payout=self.worst_payout(),
+                starting_balance=starting, runs=runs, horizon=horizon,
+            )
+            source = f"posterior W{wins}/L{losses}"
+        elif trades:
             report = simulate_from_records(
                 trades, starting_balance=starting, runs=runs, horizon=horizon
             )
@@ -243,7 +254,10 @@ class WebTerminal:
                     q = parse_qs(parsed.query or "")
                     runs = int((q.get("runs") or ["400"])[0])
                     horizon = int((q.get("horizon") or ["200"])[0])
-                    return self._json(200, terminal.hub.montecarlo(runs=runs, horizon=horizon))
+                    return self._json(200, terminal.hub.montecarlo(
+                        runs=runs, horizon=horizon,
+                        mode=parse_qs(urlparse(self.path).query).get("mode", ["bootstrap"])[0],
+                    ))
                 if path == "/api/calendar":
                     return self._json(
                         200,

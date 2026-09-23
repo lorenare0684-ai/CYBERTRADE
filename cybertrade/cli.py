@@ -219,6 +219,20 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
 
     print(BANNER)
     payout = float(args.payout)
+    if getattr(args, "wins", None) is not None or getattr(args, "losses", None) is not None:
+        from .risk.montecarlo import simulate_posterior
+
+        w = int(args.wins or 0)
+        l = int(args.losses or 0)
+        report = simulate_posterior(w, l, payout=payout)
+        print(f"  posterior: Beta({w + 2}, {l + 2}) over P(win) | payout {payout:.2f}"
+              f" | breakeven {1.0 / (1.0 + payout):.4f}")
+        print(f"  {report.summary_text()}")
+        print(f"  P(true edge < 0) = {report.p_edge_negative * 100:.1f}%"
+              f"  <- if this is large, the record is a liar")
+        for n in report.notes:
+            print(f"  note: {n}")
+        return 0
     if args.pnl:
         pnls = [float(x) for x in args.pnl.split(",") if x.strip()]
         label = f"custom sample ({len(pnls)} P&L points)"
@@ -488,6 +502,10 @@ def build_parser() -> argparse.ArgumentParser:
     mc.add_argument("--payout", type=float, default=0.85)
     mc.add_argument("--json", action="store_true")
     mc.set_defaults(func=cmd_montecarlo)
+    mc.add_argument("--wins", type=int, default=None,
+                    help="posterior mode: settled wins in the record")
+    mc.add_argument("--losses", type=int, default=None,
+                    help="posterior mode: settled losses in the record")
 
     cal = sub.add_parser("calendar", help="economic calendar / news blackouts")
     cal.add_argument("--days", type=float, default=7.0, help="horizon in days")

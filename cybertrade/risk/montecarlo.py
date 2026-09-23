@@ -31,6 +31,7 @@ class MonteCarloReport:
     median_max_drawdown: float
     p95_max_drawdown: float
     expectancy_per_trade: float
+    p_edge_negative: float = 0.0
     bands: List[Dict[str, float]] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
 
@@ -50,11 +51,14 @@ class MonteCarloReport:
             "median_max_drawdown": round(self.median_max_drawdown, 4),
             "p95_max_drawdown": round(self.p95_max_drawdown, 4),
             "expectancy_per_trade": round(self.expectancy_per_trade, 4),
+            "p_edge_negative": round(self.p_edge_negative, 5),
             "bands": self.bands,
             "notes": self.notes,
         }
 
     def verdict(self) -> str:
+        if self.p_edge_negative > 0.5:
+            return "RUIN LIKELY — do not trade these stats live"
         if self.risk_of_ruin <= 0.01 and self.p05_terminal >= self.starting_balance * 0.8:
             return "SURVIVABLE"
         if self.risk_of_ruin <= 0.05:
@@ -68,8 +72,98 @@ class MonteCarloReport:
             f"runs {self.runs}×{self.horizon} trades | ruin {self.risk_of_ruin * 100:.2f}% "
             f"| halve {self.risk_of_halving * 100:.1f}% | P5/P50/P95 terminal "
             f"{self.p05_terminal:.0f}/{self.p50_terminal:.0f}/{self.p95_terminal:.0f} "
-            f"| median DD {self.median_max_drawdown * 100:.1f}% | {self.verdict()}"
+            f"| median DD {self.median_max_drawdown * 100:.1f}%"
+            + (f" | P(edge<0) {self.p_edge_negative * 100:.1f}%"
+               if self.p_edge_negative > 0 else "")
+            + f" | {self.verdict()}"
         )
+
+
+def simulate_posterior(
+    wins: int,
+    losses: int,
+    payout: float,
+    starting_balance: float = 1000.0,
+    runs: int = 2000,
+    horizon: int = 200,
+    ruin_frac: float = 0.5,
+    seed: int = 1337,
+    stake_frac: float = 0.01,
+) -> MonteCarloReport:
+    """Forward-simulate the calibrated Beta posterior over P(win).
+
+    Each run draws its own ``p_true ~ Beta(wins+2, losses+2)`` ONCE —
+    parameter uncertainty dominates small samples — then plays ``horizon``
+    constant-stake binary trades at ``payout``.  The headline number is
+    ``p_edge_negative``: posterior mass below breakeven, i.e. the honest
+    probability that this record is a losing strategy wearing a winner's
+    clothes.  Fan bands are elided here (stats row is the substance).
+    """
+    wins = max(0, int(wins))
+    losses = max(0, int(losses))
+    if payout <= -1.0:
+        raise ValueError("payout must be > -1")
+    alpha = wins + 2.0
+    beta = losses + 2.0
+    breakeven = 1.0 / (1.0 + payout)
+    rng = random.Random(seed)
+    stake = max(1e-9, starting_balance * stake_frac)
+    ruin_level = starting_balance * ruin_frac
+
+    terminals: List[float] = []
+    min_equities: List[float] = []
+    drawdowns: List[float] = []
+    edge_neg = 0
+    expectancy = 0.0
+    for _ in range(max(1, runs)):
+        p_true = rng.betavariate(alpha, beta)
+        if p_true < breakeven:
+            edge_neg += 1
+        expectancy += stake * (p_true * (1.0 + payout) - 1.0)
+        equity = starting_balance
+        peak = equity
+        min_eq = equity
+        max_dd = 0.0
+        for _t in range(max(1, horizon)):
+            equity += stake * payout if rng.random() < p_true else -stake
+            if equity > peak:
+                peak = equity
+            if equity < min_eq:
+                min_eq = equity
+            dd = (peak - equity) / peak if peak > 0 else 1.0
+            if dd > max_dd:
+                max_dd = dd
+        terminals.append(equity)
+        min_equities.append(min_eq)
+        drawdowns.append(max_dd)
+
+    def pct(values: List[float], q: float) -> float:
+        s = sorted(values)
+        idx = min(len(s) - 1, max(0, int(round(q * (len(s) - 1)))))
+        return s[idx]
+
+    n = max(1, runs)
+    return MonteCarloReport(
+        runs=n,
+        horizon=max(1, horizon),
+        starting_balance=starting_balance,
+        ruin_level=ruin_level,
+        risk_of_ruin=sum(1 for e in min_equities if e <= ruin_level) / n,
+        risk_of_halving=sum(1 for e in terminals if e <= ruin_level) / n,
+        p05_terminal=pct(terminals, 0.05),
+        p50_terminal=pct(terminals, 0.50),
+        p95_terminal=pct(terminals, 0.95),
+        mean_terminal=sum(terminals) / n,
+        p05_min_equity=pct(min_equities, 0.05),
+        median_max_drawdown=pct(drawdowns, 0.50),
+        p95_max_drawdown=pct(drawdowns, 0.95),
+        expectancy_per_trade=expectancy / n,
+        p_edge_negative=edge_neg / n,
+        notes=[
+            f"Beta({alpha:.0f},{beta:.0f}) posterior | breakeven {breakeven:.4f} "
+            f"at payout {payout:.2f} | constant {stake_frac:.0%} stake | bands elided",
+        ],
+    )
 
 
 def simulate(

@@ -154,6 +154,27 @@ class CalibrationTracker:
                 1 for t in self._by_regime.values() if any(b.total for b in t)
             )
 
+    def evidence(self):
+        """Aggregate (wins, losses) across all strategy tables."""
+        wins = total = 0
+        with self._lock:
+            for b in self._global:
+                wins += b.wins
+                total += b.total
+        return wins, total - wins
+
+    def evidence_for(self, strategy: str):
+        """Aggregate (wins, losses) for one strategy's own table."""
+        with self._lock:
+            table = self._by_strategy.get(strategy)
+        if not table:
+            return 0, 0
+        wins = total = 0
+        for b in table:
+            wins += b.wins
+            total += b.total
+        return wins, total - wins
+
     def p_win_for(
         self, strategy: str, confidence: float, votes=None, regime: str = ""
     ) -> float:

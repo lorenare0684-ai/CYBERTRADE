@@ -99,6 +99,37 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 10 — is the record lying? (Beta-posterior Monte Carlo)
+
+Bootstrapped Monte Carlo **cannot see parameter uncertainty** — resample a
+lucky 20-trade record and every simulation looks like genius.
+`risk/montecarlo.simulate_posterior(wins, losses, payout)` draws
+`P(win) ~ Beta(W+2, L+2)` once per path (the calibrated posterior; prior
+matches `ReliabilityBucket`) and plays `horizon` constant-stake trades at
+the payout. The headline is **`p_edge_negative`** — the honest posterior
+probability that the true edge sits below breakeven `1/(1+payout)` — plus a
+dedicated **"RUIN LIKELY"** verdict when that mass exceeds 50%.
+
+| Record | P(true edge < 0) @ payout 0.85 | Reading |
+|---|---|---|
+| 80W/20L | small | earned confidence |
+| 12W/8L | large | *uncertainty* is the verdict |
+| 20W/80L | ≈ 1 | the record is a liar |
+| 0W/0L | ≈ 0.56 | the Beta(2,2) prior |
+
+Surfaces: `python3 -m cybertrade montecarlo --wins 80 --losses 20 --payout
+0.85`, `GET /api/montecarlo?mode=posterior` (HUD `source` shows
+`posterior W/L`), `CalibrationTracker.evidence()` / `.evidence_for(strategy)`.
+
+**Dry-run runbook (live data, zero risk)** — the practical companion:
+1. `python3 -m cybertrade run --dry-run --live` with venue credentials
+   configured (SSID session; this codebase never stores credentials).
+2. Real ticks/instruments stream in via `.api`; `allow_orders=False` blocks
+   every order at `DRY_RUN` before any wire call; fills are paper at
+   clamped live quotes.
+3. Read `GET /api/montecarlo?mode=posterior` and `montecarlo --wins/--losses`
+   for the honest take on what the session taught the calibrator.
+
 ## Phase 9 — the dry-run harness (live quotes, paper fills, zero venue orders)
 
 The last mile of the original ask: observe what the terminal *would* do at
@@ -248,7 +279,7 @@ breakeven** at the standard 85% payout. Phase 4 attacks exactly that.
 | --- | --- | --- |
 | Divergence detection (regular/hidden bull/bear) | `indicators/divergence.py` | 4 new strategies: `rsi_divergence`, `macd_hidden_divergence`, `cci_divergence_fade`, `mtf_confluence` |
 | Correlation clusters | `risk/correlation.py` | per-cluster exposure caps via `risk.authorize(cluster=…)` |
-| Monte Carlo risk lab | `risk/montecarlo.py` | `python -m cybertrade montecarlo`, `GET /api/montecarlo`, GUI "MC LAB" |
+| Monte Carlo risk lab | `risk/montecarlo.py` | `python3 -m cybertrade montecarlo` (+ `--wins/--losses` posterior), `GET /api/montecarlo` (`?mode=posterior`), GUI "MC LAB" |
 | Economic calendar / news blackouts | `bot/calendar.py` | `python -m cybertrade calendar`, `GET /api/calendar`, engine entry veto |
 | Alert center (webhook/bell) | `bot/alerts.py` | halt/loss/news/equity rules → console + optional webhook |
 | User strategy plugins | `strategies/plugins.py` | `~/.cybertrade/plugins/*.py` — see `docs/STRATEGY_AUTHORING.md` |
