@@ -99,6 +99,24 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 22 — the session clock (when you trade is a market condition)
+
+The clock on the wall is part of the market. `risk.sessions` classifies
+each broker symbol (fx / crypto / metal / index) against the UTC FX session
+(asia · london · overlap · newyork · offhours) and returns a **stake
+multiplier** — 03:00 Asia is not the London/NY overlap, and a weekend on
+synthetic OTC is a deep discount (0.25×), never a ban (the survivor's
+weekend lock still owns that gate). The engine multiplies it into
+`regime_scale` (session × survivor family weight), the cockpit HUD shows
+`SESSION <name> ×<min_scale>` from `state()["session"]`, and the journal
+gains a **`by_session` P&L breakdown** so thin-hour edges are visible
+instead of averaged away.
+
+Profiles are conservative heuristics, documented as such — not claims
+about any venue's fill quality.
+
+Suite at **422 green** (`tests/test_phase22.py` 7 tests).
+
 ## Phase 21 — the cockpit (live drills + console controls)
 
 The DRILL row in the web terminal crashes the **running** market: five

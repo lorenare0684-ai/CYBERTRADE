@@ -21,6 +21,7 @@ from ..execution.oms import OrderManager
 from ..execution.paper import PaperBroker
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
+from ..risk.sessions import session_for, session_report as sessions_snapshot
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
 from ..strategies.registry import build_all_weather
@@ -200,6 +201,10 @@ class TradingEngine:
         if not self.drill.active() and not stats.finished_ts:
             stats.finished_ts = timex.now()
         return stats.to_dict()
+
+    def session_report(self) -> Dict[str, Any]:
+        """Phase-22: wall-clock session + per-asset stake scales (HUD)."""
+        return sessions_snapshot(self.feed.assets, timex.now())
 
     def _restore_calibration(self) -> None:
         """Reload the honesty ledger so learning survives process death."""
@@ -567,7 +572,10 @@ class TradingEngine:
             confidence=signal.confidence,
             win_rate=p_size,
             drawdown=self.risk.total_drawdown(),
-            regime_scale=decision.stake_scale,
+            # Phase-22: thin tape takes a smaller share — session × survivor.
+            regime_scale=(
+                decision.stake_scale * session_for(signal.asset, signal.ts).scale
+            ),
         )
         stake = sizing.stake
 

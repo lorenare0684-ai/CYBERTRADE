@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Sequence
 
+from ..utils import timex
 from ..utils.mathx import max_drawdown, mean
 from .store import TradeJournal
 
@@ -22,6 +23,33 @@ def regime_breakdown(journal: TradeJournal) -> List[Dict[str, Any]]:
         out.append(
             {
                 "regime": regime,
+                "trades": int(b["n"]),
+                "win_rate": (b["w"] / b["n"]) if b["n"] else 0.0,
+                "pnl": round(b["pnl"], 2),
+            }
+        )
+    out.sort(key=lambda r: r["pnl"], reverse=True)
+    return out
+
+
+def session_breakdown(journal: TradeJournal) -> List[Dict[str, Any]]:
+    """Phase-22: P&L by wall-clock session — when the edges actually printed."""
+    rows = journal.trades(limit=10000)
+    buckets: Dict[str, Dict[str, float]] = defaultdict(lambda: {"n": 0, "w": 0, "pnl": 0.0})
+    for row in rows:
+        try:
+            name = timex.session_of_day(float(row["ts"]))
+        except (KeyError, TypeError, ValueError):
+            name = "unknown"
+        b = buckets[name]
+        b["n"] += 1
+        b["w"] += 1 if row["won"] else 0
+        b["pnl"] += float(row["pnl"])
+    out = []
+    for name, b in buckets.items():
+        out.append(
+            {
+                "session": name,
                 "trades": int(b["n"]),
                 "win_rate": (b["w"] / b["n"]) if b["n"] else 0.0,
                 "pnl": round(b["pnl"], 2),
@@ -106,6 +134,7 @@ def journal_report(journal: TradeJournal) -> Dict[str, Any]:
         "by_strategy": journal.strategy_stats(),
         "by_regime": regime_breakdown(journal),
         "by_asset": asset_breakdown(journal),
+        "by_session": session_breakdown(journal),
         "decay": decay_check(journal),
     }
 
@@ -147,6 +176,7 @@ def strategy_decay(journal: TradeJournal, window: int = 10) -> List[Dict[str, An
 __all__ = [
     "regime_breakdown",
     "asset_breakdown",
+    "session_breakdown",
     "streaks",
     "decay_check",
     "strategy_decay",

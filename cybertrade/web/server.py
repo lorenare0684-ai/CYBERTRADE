@@ -140,6 +140,7 @@ class EngineHub:
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
             "drill": self.engine.drill_report(),
+            "session": self.engine.session_report(),
         }
 
     def worst_payout(self) -> float:

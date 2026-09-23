@@ -147,7 +147,10 @@ function render(state) {
   $("conf").textContent = fmt(reg.confidence);
   $("stress").textContent = fmt(reg.stress);
   $("volstate").textContent = (reg.volatility_state || "—").toUpperCase();
-  $("session").textContent = new Date().getUTCHours() + " UTC";
+  const ses = snap.session;
+  $("session").textContent = ses
+    ? `${ses.name.toUpperCase()} ×${fmt(ses.min_scale)}`
+    : new Date().getUTCHours() + " UTC";
   $("posture").textContent = posture;
   $("regime-detail").textContent =
     `REGIME ${(reg.regime || "?")} · trend ${reg.trend_direction ?? "?"} · stress ${fmt(reg.stress)}`;
