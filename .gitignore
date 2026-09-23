@@ -1,0 +1,21 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# runtime data (journals, logs, configs with secrets) — ROOT level only.
+# Never ignore the cybertrade/data *source* package!
+/data/
+*.db
+*.log
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+
+# virtualenvs
+.venv/
+venv/

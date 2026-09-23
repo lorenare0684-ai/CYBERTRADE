@@ -1,0 +1,4 @@
+# CYBERTRADE runs on the Python standard library alone (3.10+).
+# Optional for development:
+#   pytest >= 7
+# The desktop GUI needs tkinter (Debian/Ubuntu: apt install python3-tk).
