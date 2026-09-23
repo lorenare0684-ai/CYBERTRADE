@@ -99,6 +99,35 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 20 — crisis drills (chaos engineering for the defense stack)
+
+Claims are cheap — **`cybertrade drill`** makes "survives every market
+condition" measurable. Each drill drives a real scenario process (the same
+`data.synthetic` generators the gauntlet backtest uses) through the live
+engine's tick seam while the whole defense chain stays armed: regime
+detector, survivor postures, risk guards, checkpoint, watchdog, and the
+Phase-19 lifeboat. The book it shocks is the one you were already holding.
+
+```
+$ python3 -m cybertrade drill --ticks 250
+  SURVIVAL GAUNTLET — live defense stack (PAPER)  seed=1337
+  scenario             posture floor  book salv  kill      pnl  verdict
+  flash_crash          DEFENSE           1    0    no   -10.00  SURVIVED (defended)
+  gap_open             LOCKDOWN          1    0    no     8.50  SURVIVED (defended)
+  news_spike           LOCKDOWN          1    0    no   -10.00  SURVIVED (defended)
+  liquidity_vacuum     LOCKDOWN          1    1    no     8.50  SURVIVED (lifeboat)
+  regime_whipsaw       LOCKDOWN          1    1    no     8.50  SURVIVED (lifeboat)
+```
+
+- five storms: `flash_crash gap_open news_spike liquidity_vacuum regime_whipsaw`
+- scored from what **actually happened** — posture floor reached, contracts
+  salvaged, kill switch tripped — never from hopes
+- verdicts are honest: `SURVIVED (untested)` when the storm never engaged
+  the defenses (reported, not hidden), `SURVIVED (defended)`, `SURVIVED
+  (lifeboat)`, `KILLED`
+
+Suite at **408 green** (`tests/test_phase20.py` 12 tests).
+
 ## Phase 19 — the lifeboat (crisis salvage of open positions)
 
 Binaries cannot stop out — they ride to expiry. When Survivor screams

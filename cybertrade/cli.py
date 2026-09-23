@@ -495,6 +495,42 @@ def cmd_scenarios(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_drill(args: argparse.Namespace) -> int:
+    """Crisis drills — shock the live defense stack and score what it did."""
+    import os
+    import tempfile
+
+    from .bot.drills import CRISIS_SCENARIOS, run_gauntlet
+    from .bot.engine import TradingEngine
+    from .data.feed import SyntheticFeed
+    from .execution.paper import PaperBroker
+
+    print(BANNER)
+    names = tuple(args.scenario) or CRISIS_SCENARIOS
+    cfg = AppConfig()
+    with tempfile.TemporaryDirectory() as tmp:
+        cfg.journal_path = os.path.join(tmp, "drill-journal.db")
+        cfg.calibration_path = os.path.join(tmp, "drill-cal.json")
+        eng = TradingEngine(cfg, feed=SyntheticFeed(),
+                            broker=PaperBroker(starting_balance=1000.0))
+        eng.boot()
+        rows = run_gauntlet(eng, scenarios=names, ticks=args.ticks, seed=args.seed)
+        eng.shutdown()
+    print(f"  SURVIVAL GAUNTLET — live defense stack (PAPER)  seed={args.seed}")
+    print(f"  {'scenario':<20} {'posture floor':<14} {'book':>4} {'salv':>4} "
+          f"{'kill':>5} {'pnl':>8}  verdict")
+    for row in rows:
+        print(f"  {row['name']:<20} {row['posture_min']:<14} "
+              f"{row.get('booked', 0):>4} {row['salvaged']:>4} "
+              f"{('YES' if row['killed'] else 'no'):>5} {row.get('pnl', 0.0):>8.2f}  "
+              f"{row['verdict']}")
+    untested = sum(1 for r in rows if r["verdict"] == "SURVIVED (untested)")
+    if untested:
+        print(f"  note: {untested} drill(s) never engaged the defenses — "
+              f"that is reported, not hidden")
+    return 0 if all(r["verdict"] != "KILLED" for r in rows) else 1
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     print(BANNER)
     checks = []
@@ -672,6 +708,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     sc = sub.add_parser("scenarios", help="list stress scenarios")
     sc.set_defaults(func=cmd_scenarios)
+
+    dr = sub.add_parser("drill", help="crisis drills — live-stack survival gauntlet")
+    dr.add_argument("scenario", nargs="*", default=[],
+                    help="scenario name(s) — default: all five crisis drills")
+    dr.add_argument("--ticks", type=int, default=400, help="shock ticks per scenario")
+    dr.add_argument("--seed", type=int, default=1337)
+    dr.set_defaults(func=cmd_drill)
 
     d = sub.add_parser("doctor", help="environment self-test")
     d.set_defaults(func=cmd_doctor)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..config import AppConfig
@@ -29,6 +30,7 @@ from ..utils.mathx import clamp
 from .health import HealthMonitor, HealthSnapshot
 from .survivor import Posture, Survivor
 from .watchdog import Watchdog
+from .drills import StressDrill
 from .alerts import AlertCenter
 from .calendar import EconomicCalendar, calendar_for_asset
 from ..risk.correlation import CorrelationMonitor
@@ -122,6 +124,8 @@ class TradingEngine:
         self._journal_session = 0
         self.supervisor: Optional[ReconnectSupervisor] = None
         self._decay_alerted: set = set()
+        # Phase-20: crisis drills (chaos engineering for the defense stack)
+        self.drill = StressDrill(seed=1337)
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -175,6 +179,8 @@ class TradingEngine:
                     closed += 1
             except Exception:  # noqa: BLE001
                 log.exception("salvage failed for %s", pos.id)
+        if closed and self.drill.stats is not None:
+            self.drill.stats.salvaged += closed
         if closed:
             self.health.note_message(
                 f"LIFEBOAT: salvaged {closed} position(s) — {reason}"
@@ -184,6 +190,15 @@ class TradingEngine:
                 {"kind": "salvage", "count": closed, "reason": reason},
                 source="lifeboat",
             )
+
+    def drill_report(self) -> Optional[Dict[str, Any]]:
+        """Current (or last) drill stats — scored from what happened (P20)."""
+        stats = self.drill.stats
+        if stats is None:
+            return None
+        if not self.drill.active() and not stats.finished_ts:
+            stats.finished_ts = timex.now()
+        return stats.to_dict()
 
     def _restore_calibration(self) -> None:
         """Reload the honesty ledger so learning survives process death."""
@@ -391,15 +406,20 @@ class TradingEngine:
                 self.vetoes += 1
 
         # Phase-19: the lifeboat — salvage open risk before the storm takes it.
-        if self.config.risk.crisis_salvage:
-            try:
-                if self.broker.open_positions():
-                    reading = self.regime_of.get(self.feed.assets[0])
-                    if (reading is not None
-                            and self.survivor.posture_for(reading) == "LOCKDOWN"):
-                        self._salvage_all("survivor LOCKDOWN")
-            except Exception:  # noqa: BLE001
-                log.exception("lifeboat check failed")
+        # Phase-20: the same seam records the posture floor while a drill runs.
+        try:
+            reading = self.regime_of.get(self.feed.assets[0])
+            if reading is None:  # first cycles — self-heal the seam
+                reading = self._update_regime(self.feed.assets[0])
+            posture = (self.survivor.posture_for(reading)
+                       if reading is not None else Posture.NORMAL)
+            if self.drill.stats is not None:
+                self.drill.stats.note_posture(posture)
+            if (self.config.risk.crisis_salvage and posture == "LOCKDOWN"
+                    and self.broker.open_positions()):
+                self._salvage_all("survivor LOCKDOWN")
+        except Exception:  # noqa: BLE001
+            log.exception("lifeboat check failed")
         if self.supervisor is not None:
             self.supervisor.sweep(now)
         self.watchdog.sweep(now)
@@ -611,6 +631,8 @@ class TradingEngine:
 
     # -- callbacks ---------------------------------------------------------
     def _on_tick(self, tick) -> None:
+        if self.drill.active():
+            tick = replace(tick, price=self.drill.shock_price(tick.asset, tick.price))
         self.quotes.on_tick(tick)
         self.corr.on_price(tick.asset, tick.price)
         flow = self.flow.get(tick.asset)
@@ -660,6 +682,8 @@ class TradingEngine:
         if self.state is not EngineState.KILL:
             self._running = False
             self.state = EngineState.KILL
+            if self.drill.stats is not None:
+                self.drill.stats.killed = True
 
     # -- introspection -----------------------------------------------------
     def snapshot(self) -> Dict[str, Any]:
