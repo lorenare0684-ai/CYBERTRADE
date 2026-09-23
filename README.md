@@ -99,6 +99,19 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 27 — the positions bay (open contracts, live marks, one-cut close)
+
+The ACCOUNT CORE showed an exposure *count*; nothing showed the contracts.
+**OPEN POSITIONS** lists every open order with strategy, strike, live feed
+mark, **ITM / OTM / EVEN**, expiry countdown, and a per-row **CLOSE**
+button — `{"cmd":"close","position":id}` runs P19's
+`broker.close_position` for ONE contract (salvage haircut on losers,
+modeled payout on winners) and immediately pumps the pending settlement so
+ledger, journal, and HUD see the cut: the lifeboat's downstream path,
+selectively. Unknown/missing ids rejected; `manual_close` ALERT published.
+
+Suite at **456 green** (`tests/test_phase27.py` 5 tests).
+
 ## Phase 26 — the strategy deck (40 strategies, visible and switchable)
 
 The arsenal already streamed into `state()["strategies"]` and

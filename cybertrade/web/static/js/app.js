@@ -230,6 +230,7 @@ function render(state) {
   $("vetoes").textContent = "vetoes " + (health.vetoes || 0);
 
   renderBlotter(state.trades || []);
+  renderPositions(state.positions || []);
   if (state.logs && state.logs.length) {
     const box = $("console");
     if (!box.childElementCount) state.logs.forEach(pushLog);
@@ -348,6 +349,32 @@ function renderBlotter(trades) {
   $("blotter-count").textContent = `${trades.length} settled`;
 }
 
+/* ---------- Phase-27: open positions + per-position cut ---------- */
+function renderPositions(list) {
+  const body = $("pos-body");
+  if (!body) return;
+  const rows = Array.isArray(list) ? list : [];
+  const key = JSON.stringify(rows);
+  if (body.dataset.key === key) return;
+  body.dataset.key = key;
+  body.innerHTML = rows.map((p) => {
+    const cls = p.state === "itm" ? "won" : p.state === "otm" ? "lost" : "";
+    const left = Math.max(0, Math.round(p.seconds_left || 0));
+    const mm = String(Math.floor(left / 60)).padStart(2, "0");
+    const ss = String(left % 60).padStart(2, "0");
+    return `<tr class="${cls}">`
+      + `<td>${p.strategy || "—"}</td><td>${p.asset}</td>`
+      + `<td>${String(p.side || "").toUpperCase()}</td>`
+      + `<td>${fmt(p.stake)}</td><td>${fmt(p.strike, 5)}</td>`
+      + `<td>${fmt(p.mark, 5)}</td>`
+      + `<td>${String(p.state || "").toUpperCase()}</td><td>${mm}:${ss}</td>`
+      + `<td><button class="btn sm" data-close="${p.id}">CLOSE</button></td>`
+      + `</tr>`;
+  }).join("");
+  const c = $("pos-count");
+  if (c) c.textContent = `${rows.length} open`;
+}
+
 /* ---------- networking ---------- */
 async function pollState() {
   try {
@@ -423,6 +450,12 @@ deckEl && deckEl.addEventListener("click", (e) => {
   const b = e.target.closest("[data-strat]");
   if (!b) return;
   cmd({ cmd: "strategy", name: b.dataset.strat, enabled: b.dataset.en === "1" });
+});
+const posEl = $("pos-body");
+posEl && posEl.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-close]");
+  if (!b) return;
+  cmd({ cmd: "close", position: b.dataset.close });
 });
 $("btn-scenario") && ($("btn-scenario").onclick = async () => {
   const sel = $("scenario-select");

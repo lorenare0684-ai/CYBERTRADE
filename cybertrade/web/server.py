@@ -120,6 +120,7 @@ class EngineHub:
             "snapshot": snap,
             "assets": self.engine.feed.assets,
             "trades": [t.to_dict() for t in self.engine.oms.recent_trades(30)],
+            "positions": self._positions_block(),
             "signals": [s.to_dict() for s in self.engine.signals[-20:]],
             "candles": candles,
             "logs": self._log_lines[-80:],
@@ -259,6 +260,47 @@ class EngineHub:
             }
         except Exception:  # noqa: BLE001
             return {"available": False}
+
+    def _positions_block(self) -> List[Dict[str, Any]]:
+        """Open contracts with live ITM/OTM mark + countdown (P27)."""
+        out: List[Dict[str, Any]] = []
+        now = timex.now()
+        feed_last = self.engine.feed.last_price
+        broker_last = getattr(self.engine.broker, "last_price", None)
+        for pos in self.engine.broker.open_positions():
+            try:
+                last = feed_last(pos.asset)
+            except Exception:  # noqa: BLE001
+                last = None
+            if last is None and callable(broker_last):
+                try:
+                    last = broker_last(pos.asset)
+                except Exception:  # noqa: BLE001
+                    last = None
+            mark = float(last) if last is not None else float(pos.strike)
+            if mark == pos.strike:
+                state = "even"
+            else:
+                call = pos.side == "call"
+                state = "itm" if (call and mark > pos.strike) or (
+                    not call and mark < pos.strike
+                ) else "otm"
+            out.append({
+                "id": pos.id,
+                "asset": pos.asset,
+                "side": pos.side.value,
+                "stake": round(pos.stake, 2),
+                "strike": round(float(pos.strike), 5),
+                "mark": round(mark, 5),
+                "payout": float(pos.fill.payout),
+                "strategy": pos.strategy,
+                "label": pos.label,
+                "expiry_ts": pos.expiry_ts,
+                "seconds_left": max(0.0, pos.expiry_ts - now),
+                "state": state,
+            })
+        out.sort(key=lambda r: r["expiry_ts"])
+        return out
 
     def montecarlo(self, runs: int = 400, horizon: int = 200,
                    mode: str = "bootstrap") -> Dict[str, Any]:
@@ -487,6 +529,28 @@ class WebTerminal:
                 )
                 placed = engine.inject_signal(sig)
                 return {"ok": placed, "placed": placed}
+            if cmd == "close":
+                pos_id = str(body.get("position") or "")
+                if not pos_id:
+                    return {"ok": False, "error": "position id required"}
+                if not engine.broker.close_position(pos_id):
+                    return {"ok": False,
+                            "error": f"position {pos_id!r} not closable"}
+                # cash moved in the broker; flush the pending settlement so
+                # ledger, journal, and HUD see the cut immediately (P19 path)
+                try:
+                    engine.oms.pump()
+                except Exception:  # noqa: BLE001 — cycle will flush it
+                    pass
+                engine.health.note_message(
+                    f"manual close {pos_id} — operator cut"
+                )
+                default_bus.publish(
+                    Topic.ALERT,
+                    {"kind": "manual_close", "position": pos_id},
+                    source="console",
+                )
+                return {"ok": True, "closed": pos_id}
             if cmd == "news":
                 engine.survivor.flag_news()
                 return {"ok": True, "msg": "news blackout armed"}
