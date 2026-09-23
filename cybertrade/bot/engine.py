@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..config import AppConfig
@@ -126,6 +125,8 @@ class TradingEngine:
         self._decay_alerted: set = set()
         # Phase-20: crisis drills (chaos engineering for the defense stack)
         self.drill = StressDrill(seed=1337)
+        if hasattr(self.feed, "price_filter"):  # live shocks enter at the source
+            self.feed.price_filter = self.drill.shock_price
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -631,8 +632,6 @@ class TradingEngine:
 
     # -- callbacks ---------------------------------------------------------
     def _on_tick(self, tick) -> None:
-        if self.drill.active():
-            tick = replace(tick, price=self.drill.shock_price(tick.asset, tick.price))
         self.quotes.on_tick(tick)
         self.corr.on_price(tick.asset, tick.price)
         flow = self.flow.get(tick.asset)

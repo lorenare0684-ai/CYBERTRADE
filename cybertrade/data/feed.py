@@ -97,6 +97,7 @@ class SyntheticFeed(Feed):
         self._last: Dict[str, float] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._bar_timers: Dict[str, float] = {}
+        self.price_filter: Optional[Callable[[str, float], float]] = None
         params_by_asset = params_by_asset or {}
 
         for i, asset in enumerate(self.assets):
@@ -225,6 +226,8 @@ class SyntheticFeed(Feed):
         rng = sim._tick_rng  # deliberate: same stream as tick jitter
         while self._running:
             px, spread = sim.tick()
+            if self.price_filter is not None:  # crisis drills reshape the market here
+                px = self.price_filter(asset, px)
             half = spread / 2.0
             tick = Tick(asset=asset, price=px, bid=px - half, ask=px + half)
             self._last[asset] = px

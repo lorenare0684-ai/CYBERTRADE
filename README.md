@@ -99,6 +99,24 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 21 — the cockpit (live drills + console controls)
+
+The DRILL row in the web terminal crashes the **running** market: five
+magenta buttons (FLASH CRASH / GAP / NEWS / VACUUM / WHIPSAW) + STOP + a
+live `#drill` strip (name, steps, posture floor, salvaged). The shock now
+enters at **one point** — `SyntheticFeed.price_filter`, wired to
+`drill.shock_price` at boot — so tick, chart candles, broker marks, and the
+regime detector all see the same storm (no more calm warmup candles behind
+a crash). The console LOCKDOWN button launches the P19 lifeboat through the
+real survivor chain (`posture_for` honours manual lockdown).
+
+- `POST /api/command {"cmd":"drill","scenario":…|stop}` + `"drill"` in
+  `/api/state` — same `terminal.command` surface the HTTP API and tests use
+- `StressDrill.disarm()` aborts mid-storm (market returns to its own path)
+- the single-shock rule is regression-tested (`_on_tick` must not re-apply)
+
+Suite at **415 green** (`tests/test_phase21.py` 7 tests).
+
 ## Phase 20 — crisis drills (chaos engineering for the defense stack)
 
 Claims are cheap — **`cybertrade drill`** makes "survives every market

@@ -119,8 +119,11 @@ class TestEngineDrill(unittest.TestCase):
             self.assertIsNone(eng.drill_report())
             asset = eng.feed.assets[0]
             eng.drill.arm("flash_crash", assets=[asset], ticks=60)
-            for _ in range(60):
-                eng._on_tick(Tick(asset=asset, price=1.10, ts=1.0))
+            for i in range(60):
+                ts = 1.0 + i * 60.0
+                price = eng.drill.shock_price(asset, 1.10)  # explicit shock (P21 seam)
+                eng.feed.book(asset).on_price(price, ts)
+                eng._on_tick(Tick(asset=asset, price=price, ts=ts))
             self.assertLess(eng.broker.last_price(asset), 1.09)  # paper saw the crash
             eng.survivor = SimpleNamespace(posture_for=lambda *a, **k: Posture.LOCKDOWN)
             eng.regime_of = {asset: SimpleNamespace()}

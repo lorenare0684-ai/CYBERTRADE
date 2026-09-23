@@ -139,6 +139,7 @@ class EngineHub:
             },
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
+            "drill": self.engine.drill_report(),
         }
 
     def worst_payout(self) -> float:
@@ -418,6 +419,21 @@ class WebTerminal:
                 current = feed.current_scenarios() if callable(
                     getattr(feed, "current_scenarios", None)) else {}
                 return {"ok": True, "scenarios": current}
+            if cmd == "drill":
+                from ..bot.drills import CRISIS_SCENARIOS
+
+                scenario = str(body.get("scenario") or "")
+                if scenario in ("", "stop"):
+                    engine.drill.disarm()
+                    return {"ok": True, "drill": engine.drill_report()}
+                if scenario not in CRISIS_SCENARIOS:
+                    return {"ok": False, "error": f"unknown drill {scenario!r}"}
+                engine.drill.arm(scenario, assets=engine.feed.assets,
+                                 ticks=int(body.get("ticks") or 250))
+                from ..events import Topic as _T
+
+                default_bus.publish(_T.SCENARIO, {"drill": scenario}, source="web")
+                return {"ok": True, "drill": engine.drill_report()}
             if cmd == "alerts":
                 return {"ok": True, "alerts": engine.alerts.recent(
                     int(body.get("limit") or 20))}

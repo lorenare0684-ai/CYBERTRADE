@@ -126,6 +126,12 @@ class StressDrill:
     def active(self) -> bool:
         return bool(self._procs) and any(n > 0 for n in self._left.values())
 
+    def disarm(self) -> None:
+        """Abort a running drill — the market returns to its own path."""
+        self._procs, self._states, self._p0, self._left = {}, {}, {}, {}
+        if self.stats is not None and not self.stats.finished_ts:
+            self.stats.finished_ts = timex.now()
+
     def shock_price(self, asset: str, base: float) -> float:
         proc = self._procs.get(asset)
         if proc is None or self._left.get(asset, 0) <= 0:
@@ -183,10 +189,9 @@ def run_gauntlet(
                                  seed=seed + 97 * k)
         for i in range(ticks + expiry_seconds + 5):
             ts = now + i * 60.0  # one bar per step — the generators are per-bar physics
-            engine._on_tick(Tick(asset=asset, price=1.10, ts=ts))
-            marked = engine.broker.last_price(asset)  # post-shock mark
-            if marked is not None:
-                feed_book.on_price(marked, ts)  # same storm, detector's pipe
+            price = engine.drill.shock_price(asset, 1.10)  # one explicit shock point
+            feed_book.on_price(price, ts)  # detector's pipe sees the same storm
+            engine._on_tick(Tick(asset=asset, price=price, ts=ts))
             try:
                 engine.cycle(now=ts)
             except Exception as exc:  # noqa: BLE001 — kill ends the round

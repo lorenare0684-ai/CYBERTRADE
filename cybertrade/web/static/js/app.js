@@ -88,6 +88,15 @@ function render(state) {
       de.className = (jd.decaying && jd.decaying.length) ? "mini bad" : "mini";
     }
   }
+  const dr = $("drill");
+  if (dr) {
+    const d = snap.drill;
+    dr.textContent = d
+      ? `DRILL ${String(d.name).toUpperCase()} · ${d.ticks} steps · floor ${d.posture_min}`
+        + ` · salv ${d.salvaged}${d.killed ? " · KILLED" : ""}`
+      : "drill idle";
+    dr.className = d ? "mini bad" : "mini";
+  }
 
   // meters
   const ddMax = (limits.max_total_drawdown_frac || 0.2) * 100;
@@ -321,6 +330,18 @@ $("btn-put").onclick = () => cmd({ cmd: "trade", side: "put", asset: currentAsse
 $("btn-news").onclick = () => cmd({ cmd: "news" });
 $("btn-lock").onclick = () => cmd({ cmd: "lockdown" });
 $("btn-clear").onclick = () => cmd({ cmd: "unlock" });
+const DRILLS = {
+  "btn-drill-crash": "flash_crash",
+  "btn-drill-gap": "gap_open",
+  "btn-drill-news": "news_spike",
+  "btn-drill-vac": "liquidity_vacuum",
+  "btn-drill-whip": "regime_whipsaw",
+};
+for (const [id, scenario] of Object.entries(DRILLS)) {
+  const el = $(id);
+  el && (el.onclick = () => cmd({ cmd: "drill", scenario }));
+}
+$("btn-drill-stop") && ($("btn-drill-stop").onclick = () => cmd({ cmd: "drill", scenario: "stop" }));
 $("btn-scenario") && ($("btn-scenario").onclick = async () => {
   const sel = $("scenario-select");
   if (!sel || !sel.value || !currentAsset) return;
