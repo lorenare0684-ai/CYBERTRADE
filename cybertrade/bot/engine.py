@@ -388,23 +388,24 @@ class TradingEngine:
             return False
 
         balance = self.oms.ledger.balance
-        wr = self.risk.strategy_win_rate(signal.strategy) or self.oms.ledger.win_rate()
+        payout = self.config.broker.payout_default
+
+        # Phase-4/6: calibrated P(win) — per-voter evidence, not marketing copy.
+        p_win = self.calibrator.p_win_for(
+            signal.strategy, signal.confidence, signal.meta.get("votes")
+        )
+        edge = edge_of(p_win, payout)
         sizing = self.risk.size_stake(
             balance=balance,
-            payout=self.config.broker.payout_default,
+            payout=payout,
             confidence=signal.confidence,
-            win_rate=wr,
+            win_rate=p_win,
             drawdown=self.risk.total_drawdown(),
             regime_scale=decision.stake_scale,
         )
         stake = sizing.stake
 
         # Phase-4: calibrated edge gate — never pay a structural tax.
-        # P(win) comes from the strategy's own ledger history (shrunk toward
-        # 0.5 while evidence is thin), not from its marketing copy.
-        payout = self.config.broker.payout_default
-        p_win = self.calibrator.p_for(signal.strategy, signal.confidence)
-        edge = edge_of(p_win, payout)
         gate_mode = self.config.risk.edge_gate
         if edge < 0:  # negative EV is ALWAYS wrong — even with the gate off
             self.edge_rejects += 1
@@ -489,6 +490,7 @@ class TradingEngine:
         self.calibrator.observe(
             record.strategy or (order.strategy if order else "manual"), claimed, won
         )
+        self.calibrator.observe_votes(order.meta.get("votes") if order else None, won)
         for vote in meta_votes:
             name = vote.get("strategy")
             if name:

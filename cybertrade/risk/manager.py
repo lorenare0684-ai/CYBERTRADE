@@ -368,9 +368,9 @@ class RiskManager:
                     balance,
                     win_rate,
                     payout,
-                    cfg.kelly_fraction,
                     cfg.min_stake,
                     cfg.max_stake,
+                    cfg.kelly_fraction,
                 )
             else:
                 decision = fixed_fraction(balance, cfg.stake_fraction, cfg.min_stake, cfg.max_stake)

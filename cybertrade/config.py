@@ -37,7 +37,7 @@ class RiskConfig:
     win_rate_floor: float = 0.40          # quarantine strategies below this
     min_payout: float = 0.75              # refuse trades under this payout
     edge_gate: str = "scale"              # off | scale | hard (calibrated edge gate)
-    min_edge: float = 0.02                # calibrated P(win) edge needed for full size
+    min_edge: float = 0.05                # calibrated P(win) edge needed for full size
     expiry_select: str = "signal"         # signal | adaptive (best_expiry chooser)
     expiry_candidates: List[int] = field(default_factory=lambda: [30, 60, 120, 300])
     max_correlated_exposure: int = 2      # open trades sharing quote currency

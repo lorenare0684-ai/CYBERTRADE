@@ -99,6 +99,51 @@ class CalibrationTracker:
         p = (n * post + RAW_BLEND * raw_shrunk) / (n + RAW_BLEND)
         return clamp(p, 0.0, 1.0)
 
+    def observe_votes(self, votes, won: bool) -> None:
+        """Teach every voter behind a blended signal (shared outcome).
+
+        Each subordinate strategy that voted 'called' this trade — its own
+        reliability table deserves the datapoint, not just the ensemble blob.
+        """
+        if not votes:
+            return
+        for v in votes:
+            try:
+                strat = str(v.get("strategy", ""))
+                conf = float(v.get("confidence", 0.5))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if strat:
+                self.observe(strat, conf, won)
+
+    def p_win_for(self, strategy: str, confidence: float, votes=None) -> float:
+        """Evidence-based P(win) for a blended signal.
+
+        Mean of per-voter posteriors, shrunk toward the blob-level estimate
+        (weight 2) so a lone opinionated voter cannot hijack the gate — then
+        taken as the MINIMUM of that blend and the blob estimate: voter
+        evidence may only *lower* the gate, never paper over a strategy the
+        ensemble's own record has discredited.
+        Falls back to :meth:`p_for` when no votes exist.
+        """
+        base = self.p_for(strategy, confidence)
+        if not votes:
+            return base
+        ps: List[float] = []
+        for v in votes:
+            try:
+                strat = str(v.get("strategy", ""))
+                conf = float(v.get("confidence", 0.5))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if strat:
+                ps.append(self.p_for(strat, conf))
+        if not ps:
+            return base
+        voter_p = sum(ps) / len(ps)
+        blend = (len(ps) * voter_p + 2.0 * base) / (len(ps) + 2.0)
+        return clamp(min(base, blend), 0.0, 1.0)
+
     def calibration_gap(self) -> float:
         """Mean |claimed - actual| across mature buckets (0 = perfectly honest)."""
         gaps: List[float] = []

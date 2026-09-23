@@ -99,6 +99,31 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 6 — per-voter calibration (and one honest negative result)
+
+A gauntlet truth: the ensemble blob erased strategy identity — one liar in
+the chorus paid no personal price. Phase 6 fixes the ledger:
+
+- **`CalibrationTracker.observe_votes` / `p_win_for`** — every voter behind a
+  blended signal gets its own reliability record; the gate reads
+  `min(blob, voter-blend)`: voter evidence may only *lower* the estimate,
+  never paper over a record the ensemble has discredited.
+- **Kelly on evidence** — `size_stake` now sizes on calibrated P(win), not
+  claimed confidence. This hunt also caught a real argument-order bug in
+  `kelly_scaled` wiring (caps/`kelly_fraction` shifted one slot — Kelly
+  stakes were clamped to ~1.0 whenever vol-targeting was off).
+- **`min_edge` default 0.02 → 0.05** — with per-voter granularity the band
+  finally engages (the old band was a 0.008-confidence sliver).
+
+Two gauntlet arms against the Phase-5 control (30 runs each). The naive
+per-voter *blend* diluted the loss-streak veto (grades A9 B20 **C1**); the
+`min()` gate restores it: **A10 B20 C0**, mean return **−0.57%** (best of
+all arms), tightest book (40.5 trades/run), 153.6 rejects/run. Pooled win
+rate stays ~50% in *every* arm — confidence claims simply don't predict
+outcomes well enough to find a 54%+ subset. What the quant layer buys is
+discipline and tail control, not clairvoyance. `tests/test_phase6.py`
+(11 tests); suite at **290 green**.
+
 ## Phase 5 — the gate under fire (gauntlet parity)
 
 The backtester now runs the **same calibrated edge gate** as the live engine,

@@ -83,7 +83,8 @@ class TestBacktestEdgeGate(unittest.TestCase):
 
     def test_calibrator_observes_settlements(self):
         bt, res = self._run("scale", 0.02)
-        self.assertEqual(bt.calibrator.observations, len(res.trades))
+        # blob + every voter observed per settlement (Phase-6 granularity)
+        self.assertGreaterEqual(bt.calibrator.observations, len(res.trades))
 
     def test_adaptive_expiry_runs(self):
         _, res = self._run("scale", 0.02, expiry_select="adaptive")

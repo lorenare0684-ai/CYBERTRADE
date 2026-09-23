@@ -139,7 +139,7 @@ class TestCalibration(unittest.TestCase):
     def test_edge_config_validation(self):
         cfg = AppConfig()
         self.assertEqual(cfg.risk.edge_gate, "scale")
-        self.assertAlmostEqual(cfg.risk.min_edge, 0.02)
+        self.assertAlmostEqual(cfg.risk.min_edge, 0.05)
         cfg.risk.edge_gate = "bogus"
         with self.assertRaises(ConfigError):
             cfg.validate()

@@ -44,6 +44,7 @@ class SimTrade:
     strategy: str
     regime: str
     confidence: float
+    votes: tuple = ()
 
     def settles_at(self, idx: int) -> bool:
         return idx >= self.expiry_idx
@@ -197,6 +198,7 @@ class Backtester:
                     self.calibrator.observe(
                         trade.strategy, trade.confidence, won and not refunded
                     )
+                    self.calibrator.observe_votes(trade.votes, won and not refunded)
                 else:
                     still_open.append(trade)
             open_trades = still_open
@@ -273,18 +275,20 @@ class Backtester:
                 equity_curve.append(balance)
                 continue
 
+            p_win = self.calibrator.p_win_for(
+                signal.strategy, signal.confidence, signal.meta.get("votes")
+            )
             sizing = risk.size_stake(
                 balance=balance,
                 payout=bt.payout,
                 confidence=signal.confidence,
-                win_rate=ensemble.win_rate or 0.55,
+                win_rate=p_win,
                 drawdown=(peak - balance) / peak if peak > 0 else 0.0,
                 regime_scale=stake_scale,
             )
             stake = clamp(sizing.stake, 0.0, balance * 0.5)
 
             # ---- Phase-5: calibrated edge gate (mirrors the live engine) ----
-            p_win = self.calibrator.p_for(signal.strategy, signal.confidence)
             edge = edge_of(p_win, bt.payout)
             if edge < 0:  # negative EV never passes — even with the gate off
                 edge_rejects += 1
@@ -337,6 +341,7 @@ class Backtester:
                 strategy=signal.strategy,
                 regime=reading.regime.value,
                 confidence=signal.confidence,
+                votes=tuple(signal.meta.get("votes") or ()),
             )
             balance -= stake
             open_trades.append(trade)

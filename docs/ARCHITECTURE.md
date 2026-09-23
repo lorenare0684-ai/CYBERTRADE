@@ -82,6 +82,9 @@ snapshots (`TickFlow`) ride in `StrategyContext.extra["flow"]`; the
 The backtester wires the identical gate (`backtest/engine.py`) with a fresh
 calibrator per run, and `RiskConfig.expiry_select="adaptive"` swaps the
 signal's horizon for the best modeled candidate (`quant/expiry.py`).
+Since Phase 6 the gate estimate is `p_win_for = min(blob, voter-blend)`
+(`observe_votes` gives every voter its own reliability table; Kelly sizing
+consumes the same calibrated P(win)).
 
 ## Testing strategy
 
