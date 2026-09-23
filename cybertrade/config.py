@@ -196,6 +196,7 @@ class DisplayConfig:
     log_level: str = "INFO"
     web_port: int = 8899
     web_host: str = "0.0.0.0"
+    fit_screen: bool = True             # Phase-31: resolution-aware desktop shell
 
     def validate(self) -> None:
         if self.theme not in {"neon_abyss", "magenta_hell", "ghost_cyan"}:

@@ -100,6 +100,13 @@ class NeonButton(tk.Canvas):
         if self.command:
             self.command()
 
+    def resize(self, width: int, height: int) -> None:
+        """Phase-31: re-fit the button to the layout plan."""
+        self.width = max(48, int(width))
+        self.height = max(22, int(height))
+        self.config(width=self.width, height=self.height)
+        self._draw()
+
     def set_label(self, text: str) -> None:
         self.label = text
         self._draw()
@@ -131,13 +138,20 @@ class Meter(tk.Canvas):
         self._suffix = suffix
         self._draw()
 
+    def resize(self, width: int) -> None:
+        """Phase-31: plan-driven width (label track scales with it)."""
+        self.width = max(140, int(width))
+        self.config(width=self.width)
+        self._draw()
+
     def _draw(self) -> None:
         self.delete("all")
         t = self.theme
         col = t[self.color] if self.color in t.colors else self.color
         self.create_text(2, self.height / 2, anchor="w", text=self.label.upper(),
                          fill=t["dim"], font=MONO_SMALL)
-        x0, x1 = 90, self.width - 52
+        x0 = max(64, int(self.width * 0.27))
+        x1 = self.width - 52
         y0, y1 = 10, self.height - 10
         self.create_rectangle(x0, y0, x1, y1, outline=dim(t["cyan"], 0.5))
         frac = max(0.0, min(1.0, self._value / self._max))
@@ -197,6 +211,10 @@ class LogConsole(tk.Frame):
         for level, color in self.LEVEL_COLORS.items():
             self.text.tag_config(level, foreground=theme[color])
 
+    def set_height(self, rows: int) -> None:
+        """Phase-31: plan-driven console line count."""
+        self.text.config(height=max(4, int(rows)))
+
     def append(self, msg: str, level: str = "INFO") -> None:
         self.text.config(state="normal")
         self.text.insert("end", msg + "\n", level.upper() if level.upper() in self.LEVEL_COLORS else "INFO")
@@ -228,6 +246,10 @@ class DataTable(tk.Frame):
         self.text.tag_config("refund", foreground=theme["yellow"])
         self._header = " | ".join(c[:10].ljust(10) for c in self.columns)
 
+    def set_height(self, rows: int) -> None:
+        """Phase-31: plan-driven visible row count."""
+        self.text.config(height=max(4, int(rows)))
+
     def rows(self, data: List[Tuple[str, ...]], tag_fn: Optional[Callable] = None) -> None:
         self.text.config(state="normal")
         self.text.delete("1.0", "end")
@@ -257,6 +279,12 @@ class Gauge(tk.Canvas):
     def set(self, frac: float, text: Optional[str] = None) -> None:
         self._frac = max(0.0, min(1.0, frac))
         self._text = text or f"{frac * 100:.0f}%"
+        self._draw()
+
+    def resize(self, size: int) -> None:
+        """Phase-31: plan-driven dial size."""
+        self.size = max(70, int(size))
+        self.config(width=self.size, height=int(self.size * 0.7))
         self._draw()
 
     def _draw(self) -> None:

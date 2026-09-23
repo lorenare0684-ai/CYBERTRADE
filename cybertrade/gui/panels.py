@@ -14,6 +14,33 @@ from .theme import MONO, MONO_BOLD, MONO_SMALL, BIG_NUM, Theme
 from .widgets import DataTable, Gauge, LogConsole, Meter, NeonButton, NeonPanel, StatBox
 
 
+def _reflow(parent, widgets, per_row: int, bg: str) -> None:
+    """Phase-31: re-pack ``widgets`` into wrapped rows of ``per_row``.
+
+    Previous generated row frames are destroyed first so repeated layout
+    passes (window resizes) never stack ghost rows.
+    """
+    for frame in getattr(parent, "_reflow_frames", []):
+        try:
+            frame.destroy()
+        except Exception:  # noqa: BLE001
+            pass
+    frames = []
+    row = None
+    per = max(1, int(per_row))
+    for i, w in enumerate(widgets):
+        if i % per == 0:
+            row = tk.Frame(parent, bg=bg)
+            row.pack(fill="x", padx=2, pady=2)
+            frames.append(row)
+        try:
+            w.pack_forget()
+        except Exception:  # noqa: BLE001
+            pass
+        w.pack(in_=row, side="left", padx=8, pady=2)
+    parent._reflow_frames = frames
+
+
 class DashboardPanel(tk.Frame):
     """HUD: account core, meters, gauges, survivor ladder, recent trades."""
 
@@ -29,6 +56,9 @@ class DashboardPanel(tk.Frame):
         self.trades = StatBox(top, theme, "trades"); self.trades.pack(side="left", padx=10)
         self.posture = StatBox(top, theme, "posture", color="yellow"); self.posture.pack(side="left", padx=10)
         self.regime = StatBox(top, theme, "regime", color="magenta"); self.regime.pack(side="left", padx=10)
+        self._stat_parent = top
+        self._stats = [self.balance, self.daily, self.winrate,
+                       self.trades, self.posture, self.regime]
 
         mid = tk.Frame(self, bg=theme["bg"])
         mid.pack(fill="x", padx=6, pady=4)
@@ -43,7 +73,8 @@ class DashboardPanel(tk.Frame):
         self.g_wr = Gauge(gauges, theme, "win rate", "green")
         self.g_stress = Gauge(gauges, theme, "stress", "red")
         self.g_dd = Gauge(gauges, theme, "drawdown", "magenta")
-        for g in (self.g_wr, self.g_stress, self.g_dd):
+        self._gauges = (self.g_wr, self.g_stress, self.g_dd)
+        for g in self._gauges:
             g.pack(side="left", padx=18)
 
         self.ladder = tk.Frame(self, bg=theme["bg"])
@@ -54,6 +85,7 @@ class DashboardPanel(tk.Frame):
                            bg=theme["bg2"], fg=theme["dim"], bd=1, relief="groove")
             lbl.pack(side="left", padx=4)
             self.rungs[name] = lbl
+        self._ladder_widgets = list(self.rungs.values())
 
         self.blotter = DataTable(
             self, theme,
@@ -61,6 +93,17 @@ class DashboardPanel(tk.Frame):
             height=10,
         )
         self.blotter.pack(fill="both", expand=True, padx=6, pady=4)
+
+    def apply_layout(self, plan) -> None:
+        """Phase-31: resolution-aware placement of stats/meters/gauges."""
+        _reflow(self._stat_parent, self._stats, plan.stat_cols, self.theme["bg"])
+        for m in (self.dd, self.dl, self.exp):
+            m.resize(plan.meter_width)
+        for g in self._gauges:
+            g.resize(plan.gauge_size)
+        _reflow(self.ladder, self._ladder_widgets, plan.ladder_per_row,
+                self.theme["bg"])
+        self.blotter.set_height(plan.blotter_rows)
 
     def update_state(self, state: Dict[str, Any]) -> None:
         t = self.theme
@@ -150,23 +193,29 @@ class TraderPanel(tk.Frame):
         tk.Entry(row, textvariable=self.expiry_var, width=6, font=MONO,
                  bg="#0a0c18", fg=theme["text"], insertbackground=theme["cyan"]).pack(side="left", padx=6)
 
-        NeonButton(row, theme, "▲ CALL", color=theme["green"],
-                   command=lambda: self._trade("call")).pack(side="left", padx=4)
-        NeonButton(row, theme, "▼ PUT", color=theme["red"],
-                   command=lambda: self._trade("put")).pack(side="left", padx=4)
+        self.call_btn = NeonButton(row, theme, "▲ CALL", color=theme["green"],
+                                   command=lambda: self._trade("call"))
+        self.call_btn.pack(side="left", padx=4)
+        self.put_btn = NeonButton(row, theme, "▼ PUT", color=theme["red"],
+                                  command=lambda: self._trade("put"))
+        self.put_btn.pack(side="left", padx=4)
 
         row2 = tk.Frame(self, bg=theme["bg"])
         row2.pack(fill="x", padx=6, pady=2)
-        NeonButton(row2, theme, "ARM ▶", color=theme["green"],
-                   command=lambda: self.command_cb({"cmd": "arm"}), width=110).pack(side="left", padx=4)
-        NeonButton(row2, theme, "DISARM", color=theme["cyan"],
-                   command=lambda: self.command_cb({"cmd": "disarm"}), width=110).pack(side="left", padx=4)
-        NeonButton(row2, theme, "KILL ✖", color=theme["red"],
-                   command=lambda: self.command_cb({"cmd": "kill"}), width=110).pack(side="left", padx=4)
-        NeonButton(row2, theme, "NEWS FLAG", color=theme["yellow"],
-                   command=lambda: self.command_cb({"cmd": "news"}), width=110).pack(side="left", padx=4)
-        NeonButton(row2, theme, "LOCKDOWN", color=theme["magenta"],
-                   command=lambda: self.command_cb({"cmd": "lockdown"}), width=110).pack(side="left", padx=4)
+        self._action_row = row2
+        self.fire_btns = []
+        for label, color, cmd in (
+            ("ARM ▶", "green", "arm"),
+            ("DISARM", "cyan", "disarm"),
+            ("KILL ✖", "red", "kill"),
+            ("NEWS FLAG", "yellow", "news"),
+            ("LOCKDOWN", "magenta", "lockdown"),
+        ):
+            btn = NeonButton(row2, theme, label, color=theme[color],
+                             width=110,
+                             command=lambda c=cmd: self.command_cb({"cmd": c}))
+            btn.pack(side="left", padx=4)
+            self.fire_btns.append(btn)
 
         # Phase-2: live scenario hot-swap
         row3 = tk.Frame(self, bg=theme["bg"])
@@ -188,6 +237,13 @@ class TraderPanel(tk.Frame):
         self.status = tk.Label(self, text="◈ paper mode", bg=theme["bg"],
                                fg=theme["dim"], font=MONO_SMALL, anchor="w")
         self.status.pack(fill="x", padx=8)
+
+    def apply_layout(self, plan) -> None:
+        """Phase-31: fire-control buttons re-wrap for the window class."""
+        for b in (self.call_btn, self.put_btn, *self.fire_btns):
+            b.resize(plan.button_w, plan.button_h)
+        _reflow(self._action_row, self.fire_btns, plan.fire_per_row,
+                self.theme["bg"])
 
     def _trade(self, side: str) -> None:
         self.command_cb({
@@ -232,6 +288,10 @@ class StrategiesPanel(tk.Frame):
         )
         self.table.pack(fill="both", expand=True, padx=6, pady=4)
 
+    def apply_layout(self, plan) -> None:
+        """Phase-31: deck table grows with real estate."""
+        self.table.set_height(max(10, plan.blotter_rows + 6))
+
     def update_state(self, state: Dict[str, Any]) -> None:
         strat = state.get("strategies") or state.get("snapshot", {}).get("strategies", {})
         members = strat.get("members", [])
@@ -264,6 +324,12 @@ class RiskPanel(tk.Frame):
             m.pack(anchor="w", pady=2)
         self.console = LogConsole(self, theme, height=20)
         self.console.pack(fill="both", expand=True, padx=6, pady=4)
+
+    def apply_layout(self, plan) -> None:
+        """Phase-31: risk meters and console track the plan."""
+        for m in (self.m_dd, self.m_dl, self.m_rate):
+            m.resize(plan.meter_width)
+        self.console.set_height(plan.console_lines)
 
     def update_state(self, state: Dict[str, Any]) -> None:
         risk = state.get("risk", {})
@@ -299,6 +365,10 @@ class BacktestPanel(tk.Frame):
         self.mc_cb = mc_cb
         self.out = LogConsole(self, theme, height=24)
         self.out.pack(fill="both", expand=True, padx=6, pady=4)
+
+    def apply_layout(self, plan) -> None:
+        """Phase-31: lab console scales with the plan."""
+        self.out.set_height(max(12, plan.console_lines))
 
     def _run(self) -> None:
         self.out.append("… running stress matrix (every market condition)", "INFO")

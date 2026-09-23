@@ -68,7 +68,7 @@ python -m unittest discover -s tests
 | **Execution** | Broker ABC → PaperBroker (payout/latency/slippage/ATM-refund modelling) → DryRunBroker → QuotexBroker; OMS + ledger + SQLite journal |
 | **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused; **ghost wire** (Phase-30): human-paced frames, jittered reconnects, subscription replay, gap-only backfill, portfolio reconcile |
 | **Backtest lab** | Event-driven binary-option simulator + 10-scenario gauntlet (bull/bear trend, range chop, low-vol grind, high-vol expansion, flash crash, gap open, news spike, liquidity vacuum, regime whipsaw), survival scoring, walk-forward optimizer |
-| **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) |
+| **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) — both **resolution-aware** (Phase-31: shared `gui/layout.py` breakpoints, plan-driven buttons/stat placement, explicit grid areas, DPR canvas fitting) |
 
 ## Architecture
 
@@ -98,6 +98,38 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
 Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
+
+## Phase 31 — the adaptive HUD (resolution-aware placement)
+
+The desktop shell opened a hardcoded `1280x800` on every machine and the
+browser twin had fixed columns — plus the OPEN POSITIONS panel had **no
+placement rule at all**. Both HUDs are now resolution-aware off one shared
+breakpoint table (`gui/layout.py`, pure stdlib — headless-testable;
+mirrored exactly in CSS media queries):
+
+| Class | Breakpoint | Placement behaviour |
+|---|---|---|
+| **compact** | `<1109px` wide **or** `<620px` tall (phones/tablets/short laptops) | single-column flow, page scrolls, stat cells 3/row, fire buttons wrap 3+2, meters 220px, gauges 90px, blotter 8 rows, **secondary labs hidden** (`risklab`, `equity`) — chart/fire/account/positions never leave |
+| **medium** | `<1600px` | baseline dashboard: side rail 300–340px, 4-col stats, 5 fire buttons one row |
+| **large** | `<2560px` | 2-column emphasis, stats 5/row, meters 420, gauges 150, blotter 14 |
+| **wide** | `≥2560px` |3-column: chart+positions above blotter, side rail right; stats 6/row, blotter 18 |
+
+**Desktop:** window opens at 92% of the real screen (centered, capped
+2200×1400, minsize never exceeds the display), OS DPI awareness +
+`tk scaling` follow the plan, a debounced `<Configure>` (250ms/40px
+buckets) re-flows tab rows, stat cells, fire-control buttons, meters,
+gauges and table heights on every breakpoint crossing; footer shows the
+live `describe()` line. `display.fit_screen=False` restores the legacy
+fixed shell.
+
+**Web:** explicit `grid-template-areas` for **every** panel (chart, side,
+**pos**, blotter, console, intel), wide/medium/compact/phone/short-height
+media queries, ≥44px touch targets on phones, and `ResizeObserver` +
+`devicePixelRatio` canvas fitting so the chart/MC/equity bitmaps track
+their CSS boxes on any resize (JS mirrors the class into
+`data-screen-class`).
+
+Suite at **520 green** (`tests/test_phase31.py` 21 tests).
 
 ## Phase 30 — the ghost wire (organic pacing + advanced venue continuity)
 

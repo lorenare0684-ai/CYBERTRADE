@@ -475,3 +475,42 @@ if ($("mc-chart")) mcChart = new window.NeonBands($("mc-chart"));
 loadScenarios();
 refreshMC();
 setInterval(refreshMC, 30000);
+
+/* ---------- Phase-31: resolution-aware canvases + screen class ---------- */
+function fitCanvas(cv) {
+  if (!cv) return false;
+  const holder = cv.parentElement;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  // Prefer the canvas's own CSS box (mc/equity canvases sit in taller panels);
+  // fall back to the holder for zero-size pre-layout canvases.
+  const cssW = Math.max(120, Math.round(cv.clientWidth || (holder && holder.clientWidth) || 300));
+  const cssH = Math.max(80, Math.round(cv.clientHeight || (holder && holder.clientHeight) || 140));
+  const w = Math.round(cssW * dpr);
+  const h = Math.round(cssH * dpr);
+  if (cv.width === w && cv.height === h) return false;
+  cv.width = w;
+  cv.height = h;
+  return true;
+}
+
+function fitAllCanvases() {
+  let changed = false;
+  if (fitCanvas($("chart"))) changed = true;
+  if (fitCanvas($("mc-chart")) && mcChart && mcChart.render) mcChart.render();
+  if (fitCanvas($("equity-chart")) && equityChart && equityChart.render) equityChart.render();
+  if (changed && chart && chart.render) chart.render();
+  // mirror gui/layout.py breakpoints for anything JS-side that cares
+  const w = window.innerWidth || document.documentElement.clientWidth;
+  const cls = (w < 1100 || window.innerHeight < 620) ? "compact"
+            : (w < 1600) ? "medium"
+            : (w < 2560) ? "large" : "wide";
+  document.documentElement.dataset.screenClass = cls;
+}
+
+window.addEventListener("resize", fitAllCanvases);
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(() => fitAllCanvases());
+  const deck = document.querySelector(".deck");
+  if (deck) ro.observe(deck);
+}
+fitAllCanvases();

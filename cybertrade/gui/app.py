@@ -1,14 +1,23 @@
-"""CYBERTRADE desktop terminal — the Tkinter application shell."""
+"""CYBERTRADE desktop terminal — the Tkinter application shell.
+
+Phase-31: **resolution-aware**. The window opens at 92% of the real screen
+(centered, capped, never larger than the display), Tk font scaling follows
+the layout plan's class, and a debounced ``<Configure>`` handler re-flows
+button rows, stat cells, meters, gauges, and table heights whenever the
+window crosses a breakpoint — same numbers the web twin uses in CSS
+(``gui/layout.py`` is pure stdlib and shared by tests).
+"""
 
 from __future__ import annotations
 
 import logging
 import queue
 import tkinter as tk
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ..config import AppConfig
 from ..events import Topic, default_bus
+from . import layout as layout_mod
 from .boot import BootScreen
 from .panels import (
     BacktestPanel,
@@ -23,6 +32,22 @@ from .theme import MONO_BOLD, MONO_SMALL, Theme
 
 log = logging.getLogger("cybertrade.gui")
 
+REFLOW_DEBOUNCE_MS = 250
+REFLOW_BUCKET_PX = 40   # ignore sub-breakpoint jitter
+
+
+def enable_dpi_awareness() -> None:
+    """Best-effort OS DPI awareness (Windows) before Tk starts."""
+    try:  # pragma: no cover - Windows only
+        import ctypes
+
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # per-monitor v1
+        except Exception:  # noqa: BLE001
+            ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:  # noqa: BLE001 - non-Windows / restricted
+        pass
+
 
 class CybertradeApp(tk.Tk):
     """Main window: tabbed neon console bound to a live TradingEngine."""
@@ -33,13 +58,43 @@ class CybertradeApp(tk.Tk):
         self.config = config or AppConfig()
         self.theme = Theme(self.config.display.theme)
         self.title("CYBERTRADE // NEON PROTOCOL")
-        self.geometry("1280x800")
         self.configure(bg=self.theme["bg"])
         self._ui_queue: "queue.Queue" = queue.Queue(maxsize=500)
+
+        self.fit_screen = bool(getattr(self.config.display, "fit_screen", True))
+        self._screen: Tuple[int, int] = (
+            self.winfo_screenwidth(), self.winfo_screenheight(),
+        )
+        dpi = self._dpi_scale()
+
+        if self.fit_screen:
+            # Initial geometry: plan against the real screen (window == 92%).
+            p = layout_mod.plan(
+                self._screen[0], self._screen[1],
+                dpi=dpi, screen_w=self._screen[0], screen_h=self._screen[1],
+            )
+            self.geometry(
+                f"{p.window_w}x{p.window_h}+{p.offset_x}+{p.offset_y}"
+            )
+            self.minsize(p.min_w, p.min_h)
+        else:
+            # Operator opted out: classic fixed shell.
+            self.geometry("1280x800")
+            self.minsize(960, 600)
+            p = layout_mod.plan(1280, 800, dpi=dpi)
+
+        self._plan = p
+        self._apply_font_scale(p)
+        self._last_size: Tuple[int, int] = (p.width, p.height)
+        self._reflow_job = None
 
         self._build_header()
         self._build_body()
         self._build_footer()
+        self._apply_plan()
+
+        if self.fit_screen:
+            self.bind("<Configure>", self._on_configure)
 
         # boot screen overlay
         self.boot = BootScreen(self, self.theme, on_done=self._drop_boot)
@@ -48,11 +103,86 @@ class CybertradeApp(tk.Tk):
         # telemetry marshaling (bus threads -> Tk main loop)
         default_bus.subscribe(Topic.LOG, self._bus_log)
         self._poll()
+        log.info("gui shell %s", layout_mod.describe(self._plan))
+
+    # -- resolution awareness ---------------------------------------------
+    def _dpi_scale(self) -> float:
+        try:
+            scaling = float(self.tk.call("tk", "scaling"))
+            return max(0.5, scaling * 72.0 / 96.0)
+        except Exception:  # noqa: BLE001
+            return 1.0
+
+    def _apply_font_scale(self, plan) -> None:
+        """Scale point fonts globally via Tk's scaling factor."""
+        try:
+            self.tk.call("tk", "scaling", (96.0 / 72.0) * plan.font_scale)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_configure(self, event) -> None:
+        if event.widget is not self:
+            return
+        w, h = int(event.width), int(event.height)
+        lw, lh = self._last_size
+        if abs(w - lw) < REFLOW_BUCKET_PX and abs(h - lh) < REFLOW_BUCKET_PX:
+            return
+        if self._reflow_job is not None:
+            try:
+                self.after_cancel(self._reflow_job)
+            except Exception:  # noqa: BLE001
+                pass
+        self._reflow_job = self.after(REFLOW_DEBOUNCE_MS, self._do_reflow, w, h)
+
+    def _do_reflow(self, w: int, h: int) -> None:
+        self._reflow_job = None
+        self._last_size = (w, h)
+        # Re-plan from the CONTENT size; the operator owns the window bounds.
+        self._plan = layout_mod.plan(
+            w, h, dpi=self._dpi_scale(),
+            screen_w=self._screen[0], screen_h=self._screen[1],
+        )
+        self._apply_font_scale(self._plan)
+        self._reflow_tabs()
+        self._apply_plan()
+        log.info("gui reflow %s", layout_mod.describe(self._plan))
+
+    def _apply_plan(self) -> None:
+        plan = self._plan
+        for pane in self._panes.values():
+            fn = getattr(pane, "apply_layout", None)
+            if callable(fn):
+                try:
+                    fn(plan)
+                except Exception:  # noqa: BLE001 — one panel never blocks rest
+                    log.exception("apply_layout failed on %s", type(pane).__name__)
+
+    def _reflow_tabs(self) -> None:
+        """Tab buttons wrap into rows per the plan (compact wraps 4/row)."""
+        for frame in getattr(self.tab_buttons, "_reflow_frames", []):
+            try:
+                frame.destroy()
+            except Exception:  # noqa: BLE001
+                pass
+        for lbl in self._tab_btns.values():
+            try:
+                lbl.pack_forget()
+            except Exception:  # noqa: BLE001
+                pass
+        frames = []
+        row = None
+        for i, name in enumerate(self._tab_names):
+            if i % max(1, self._plan.tab_per_row) == 0:
+                row = tk.Frame(self.tab_buttons, bg=self.theme["bg"])
+                row.pack(fill="x")
+                frames.append(row)
+            self._tab_btns[name].pack(in_=row, side="left", padx=3, pady=2)
+        self.tab_buttons._reflow_frames = frames
 
     # -- chrome ------------------------------------------------------------
     def _build_header(self) -> None:
         t = self.theme
-        head = tk.Frame(self, bg=t["bg2"], height=54)
+        head = tk.Frame(self, bg=t["bg2"], height=self._plan.header_h)
         head.pack(fill="x")
         tk.Label(head, text="◈ CYBERTRADE", bg=t["bg2"], fg=t["cyan"],
                  font=("Impact", 18)).pack(side="left", padx=10)
@@ -113,6 +243,11 @@ class CybertradeApp(tk.Tk):
         self.status_led = tk.Label(foot, text="◈ ready", bg=t["bg2"],
                                    fg=t["dim"], font=MONO_SMALL)
         self.status_led.pack(side="right", padx=10)
+        self.layout_led = tk.Label(
+            foot, text=layout_mod.describe(self._plan),
+            bg=t["bg2"], fg=t["cyan"], font=MONO_SMALL,
+        )
+        self.layout_led.pack(side="right", padx=10)
 
     def show_tab(self, name: str) -> None:
         for widget in self.panes.winfo_children():
@@ -282,8 +417,9 @@ class CybertradeApp(tk.Tk):
 
 
 def run_app(engine, config: Optional[AppConfig] = None) -> None:
+    enable_dpi_awareness()
     app = CybertradeApp(engine, config)
     app.mainloop()
 
 
-__all__ = ["CybertradeApp", "run_app"]
+__all__ = ["CybertradeApp", "run_app", "enable_dpi_awareness"]

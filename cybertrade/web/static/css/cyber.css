@@ -247,3 +247,110 @@ html, body {
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-thumb { background: rgba(0,255,249,.3); }
 ::-webkit-scrollbar-track { background: #0a0c18; }
+
+/* ============================================================
+   Phase-31: resolution-aware placement (mirrors gui/layout.py)
+   breakpoints: compact ≤1099/short · medium <1600 · large <2560 · wide ≥2560
+   ============================================================ */
+
+/* ---- explicit information placement (every panel gets an area) ---- */
+.deck {
+  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-rows: minmax(0, 1.5fr) minmax(110px, 0.9fr) minmax(130px, 1fr) auto;
+  grid-template-areas:
+    "chart    side"
+    "pos      side"
+    "blotter  console"
+    "intel    intel";
+}
+.chart-panel  { grid-area: chart; }
+.side         { grid-area: side; }
+.positions-panel { grid-area: pos; min-height: 0; display: flex; flex-direction: column; }
+.blotter-panel   { grid-area: blotter; width: auto; float: none; margin: 0; }
+.console-panel   { grid-area: console; width: auto; margin: 0; display: flex; }
+.intel-panel     { grid-area: intel; }
+.positions-panel .blotter { display: block; overflow-y: auto; flex: 1; }
+
+/* ---- wide: positions + blotter side by side, side rail stays right ---- */
+@media (min-width: 2560px) {
+  .deck {
+    grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr) 380px;
+    grid-template-rows: minmax(0, 1.4fr) minmax(150px, 1fr) auto;
+    grid-template-areas:
+      "chart    pos     side"
+      "blotter  console side"
+      "intel    intel   intel";
+  }
+  .side { grid-row: 1 / span 2; }
+  .stat .num { font-size: 24px; }
+}
+
+/* ---- large laptop: breathe (already base) — bump side rail slightly ---- */
+@media (min-width: 1600px) and (max-width: 2559px) {
+  .deck { grid-template-columns: minmax(0, 1fr) 360px; }
+}
+
+/* ---- medium: tighter side rail, more chart ---- */
+@media (max-width: 1400px) {
+  .deck { grid-template-columns: minmax(0, 1fr) 300px; }
+  .stat .num { font-size: 17px; }
+  .btn { font-size: 11px; letter-spacing: 1px; }
+}
+
+/* ---- compact/tablet: single-column flow, page scrolls ---- */
+@media (max-width: 1099px) {
+  html, body { overflow: auto; height: auto; }
+  body { padding-bottom: 36px; }
+  .deck {
+    height: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    grid-template-areas:
+      "chart"
+      "side"
+      "pos"
+      "blotter"
+      "console"
+      "intel";
+  }
+  .side {
+    grid-row: auto;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    align-content: start;
+  }
+  .chart-panel { min-height: 440px; }
+  .positions-panel .blotter, .blotter-panel .blotter { max-height: 260px; }
+  .console-panel .console { min-height: 160px; max-height: 300px; }
+}
+
+/* ---- phone: hide secondary labs, big touch targets, stacked stats ---- */
+@media (max-width: 760px) {
+  .risklab-panel, .equity-panel { display: none; }
+  .side { grid-template-columns: 1fr; }
+  .btn { padding: 14px 8px; font-size: 13px; min-height: 44px; }
+  .btn.sm { padding: 12px 8px; min-height: 44px; font-size: 12px; }
+  .ticker-row { flex-wrap: wrap; gap: 10px; row-gap: 8px; }
+  .brand .tag { display: none; }
+  .leds { gap: 8px; }
+  .price-tag { font-size: 16px; }
+  .intel-row { flex-direction: column; }
+  .cal-list { max-width: 100%; }
+  .statusline { flex-wrap: wrap; gap: 6px; font-size: 10px; }
+  .stat .num { font-size: 20px; }
+}
+@media (max-width: 520px) {
+  .acct-grid { grid-template-columns: 1fr; }
+  .leds .led:not(#led-state) { display: none; }
+  .brand h1 { font-size: 18px; letter-spacing: 2px; }
+}
+
+/* ---- short desktop windows: compress stacked rows, never scroll body ---- */
+@media (max-height: 700px) and (min-width: 1100px) {
+  .deck {
+    grid-template-rows: minmax(0, 1.35fr) minmax(90px, 0.7fr) minmax(110px, 0.85fr) auto;
+  }
+  .deck-panel #deck-body { max-height: 96px; }
+  .stat .num { font-size: 16px; }
+}
