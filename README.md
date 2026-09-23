@@ -99,6 +99,19 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 3 — defect burn-down + venue depth
+
+- **Crash-echo regime guard** — flash-crash bounces can no longer masquerade
+  as fresh bull trends; shock/gap detection now requires materiality (size),
+  not just N-sigma (which misfires on compressed-vol tapes).
+- **Ensemble consensus gates** — `unanimous` precedence fix (all-PUT never
+  fires CALL), `min_dominance=0.60`, corroboration discount on solo votes.
+- **Quotex depth** — live instrument catalog sync (`parse_instruments` +
+  `AssetCatalog`), history warm-start (`brokers/quotex/sync.py`), tolerant
+  tick/balance parsing, engine boot wiring for live quote streams.
+- Measured on the 30-run gauntlet: mean WR 48.5% → 49.3%, worst-case
+  flash_crash DD 7.2% → 4.0%, C-grades 1 → 0, grade-A rows 6 → 11.
+
 ## Phase 2 — intelligence layer
 
 | capability | module | surface |

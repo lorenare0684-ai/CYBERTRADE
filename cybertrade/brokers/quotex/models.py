@@ -19,6 +19,10 @@ class QXBalance:
 
     @classmethod
     def from_payload(cls, payload: Any) -> "QXBalance":
+        if isinstance(payload, (int, float)):
+            return cls(balance=float(payload))
+        if isinstance(payload, (list, tuple)) and payload and isinstance(payload[0], (int, float)):
+            return cls(balance=float(payload[0]))
         data = payload if isinstance(payload, dict) else {}
         kind = str(dig(data, "data.accountType", dig(data, "accountType", "PRACTICE")))
         return cls(
@@ -38,6 +42,7 @@ class QXAsset:
     open: bool = True
     is_otc: bool = False
     precision: int = 5
+    kind: str = ""
 
     @classmethod
     def from_payload(cls, name: str, payload: Any) -> "QXAsset":
@@ -52,6 +57,7 @@ class QXAsset:
             payout=payout,
             open=bool(dig(data, "open", dig(data, "isOpen", True))),
             is_otc=name.endswith("_otc") or bool(dig(data, "isOTC", False)),
+            kind=str(dig(data, "kind", dig(data, "type", "")) or ""),
         )
 
 

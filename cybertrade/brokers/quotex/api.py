@@ -65,6 +65,9 @@ class QuotexAPI:
 
         self.balance = QXBalance()
         self.assets: Dict[str, QXAsset] = {}
+        from .catalog import AssetCatalog
+
+        self.catalog = AssetCatalog.from_static()
         self._last_tick: Dict[str, Tick] = {}
         self._candles: Dict[Tuple[str, int], List[Candle]] = {}
         self._orders: Dict[str, QXOrderResult] = {}
@@ -181,10 +184,18 @@ class QuotexAPI:
         meta = self.assets.get(asset)
         if meta:
             return meta.payout
-        from ...constants import ASSET_CATALOG
+        return self.catalog.payout_for(asset, 0.85)
 
-        catalog = ASSET_CATALOG.get(asset)
-        return float(catalog["payout"]) if catalog else 0.85
+    def is_tradable(self, asset: str) -> bool:
+        with self._lock:
+            live = self.assets.get(asset)
+        if live is not None:
+            return bool(live.open)
+        return self.catalog.is_tradable(asset)
+
+    def request_instruments(self) -> None:
+        """Ask the venue to push its instrument listing (fills the catalog)."""
+        self._send(build_instruments())
 
     # -- account -----------------------------------------------------------
     def request_balance(self) -> QXBalance:
@@ -287,6 +298,17 @@ class QuotexAPI:
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
             self.balance = parse_balance(args)
             self._emit("balance", self.balance)
+
+        elif name in (C.EV_INSTRUMENT, "instruments", "assets", "asset_list"):
+            from .protocol import parse_instruments
+
+            listing = parse_instruments(args)
+            if listing:
+                with self._lock:
+                    for meta in listing:
+                        self.assets[meta.name] = meta
+                self.catalog.update(listing)
+                self._emit("instruments", listing)
 
         elif name in (C.SV_ORDER, C.SV_ORDERS, C.SV_ORDER_RESULT, "profit"):
             result = parse_order_result(args)

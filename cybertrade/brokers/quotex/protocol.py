@@ -14,7 +14,7 @@ from ...network.socketio import (
 )
 from ...utils.jsonx import dig
 from . import constants as C
-from .models import QXBalance, QXCandle, QXOrderRequest, QXOrderResult
+from .models import QXAsset, QXBalance, QXCandle, QXOrderRequest, QXOrderResult
 
 
 def make_request_id() -> str:
@@ -124,6 +124,44 @@ def parse_event(packet: SocketPacket) -> Tuple[Optional[str], List[Any]]:
     return name, event_args(packet)
 
 
+def parse_instruments(args: List[Any]) -> List[QXAsset]:
+    """Absorb the instrument listing — community payloads vary wildly:
+
+    - ``[{name: {payout…}, …}]``          mapping of names to descriptors
+    - ``[{asset/name: "EURUSD", …}, …]``  list of descriptor rows
+    - ``[[name, {…}], …]``                pair rows
+    - nested lists wrapping any of the above
+    """
+    out: List[QXAsset] = []
+
+    def _row(item: Any) -> None:
+        if isinstance(item, (list, tuple)):
+            if len(item) >= 2 and isinstance(item[1], dict):
+                out.append(QXAsset.from_payload(str(item[0]), item[1]))
+            else:
+                for sub in item:
+                    _row(sub)
+        elif isinstance(item, dict):
+            name_key = None
+            for key in ("asset", "name", "symbol"):
+                if key in item and isinstance(item[key], str):
+                    name_key = item[key]
+                    break
+            if name_key is not None:
+                out.append(QXAsset.from_payload(name_key, item))
+            else:
+                # mapping form: {EURUSD: {...}, GBPUSD: {...}}
+                for k, v in item.items():
+                    if isinstance(v, dict):
+                        out.append(QXAsset.from_payload(str(k), v))
+                    elif isinstance(v, (list, tuple)):
+                        _row(v)
+
+    for entry in args or []:
+        _row(entry)
+    return out
+
+
 def parse_candles(asset: str, args: List[Any], tf: int = 60) -> List[QXCandle]:
     """Extract candles from any known payload envelope."""
     out: List[QXCandle] = []
@@ -157,14 +195,24 @@ def parse_candles(asset: str, args: List[Any], tf: int = 60) -> List[QXCandle]:
 
 
 def parse_tick(args: List[Any], default_asset: str = "") -> Tuple[str, float, int]:
-    """(asset, price, ts_ms) from a tick/quote event."""
+    """(asset, price, ts_ms) from a tick/quote event.
+
+    Tolerated shapes: dict rows (``{asset, price, time}`` with short keys too),
+    bare price scalars, and ``[asset, price, ts?]`` rows.
+    """
     if not args:
         return default_asset, 0.0, 0
-    data = args[0] if not isinstance(args[0], (int, float)) else {}
-    if isinstance(args[0], (int, float)) and len(args) >= 2:
-        return default_asset, float(args[0]), int(time.time() * 1000)
-    if not isinstance(data, dict):
+    head = args[0]
+    if isinstance(head, (int, float)):
+        price = float(head)
+        ts_raw = args[1] if len(args) > 1 and isinstance(args[1], (int, float)) else 0
+        return default_asset, price, int(ts_raw or time.time() * 1000)
+    if isinstance(head, (list, tuple)):
+        if head and isinstance(head[0], str) and len(head) >= 2:
+            ts_raw = head[2] if len(head) > 2 and isinstance(head[2], (int, float)) else 0
+            return str(head[0]), float(head[1]), int(ts_raw or time.time() * 1000)
         return default_asset, 0.0, 0
+    data = head if isinstance(head, dict) else {}
     asset = str(dig(data, "asset", dig(data, "s", default_asset)))
     price = float(dig(data, "price", dig(data, "p", dig(data, "close", dig(data, "c", 0.0)))) or 0.0)
     ts = int(dig(data, "ts", dig(data, "time", dig(data, "t", time.time() * 1000))) or 0)

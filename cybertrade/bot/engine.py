@@ -126,6 +126,17 @@ class TradingEngine:
         if hasattr(self.feed, "warmup"):
             self.feed.warmup()
         self.broker.connect()
+        # live venue wiring: stream quotes into the same pipeline as the feed
+        # and pull the instrument catalog (both no-ops for paper).
+        api = getattr(self.broker, "api", None)
+        if api is not None:
+            if hasattr(api, "add_tick_handler"):
+                api.add_tick_handler(self._on_tick)
+            if hasattr(api, "request_instruments"):
+                try:
+                    api.request_instruments()
+                except Exception:  # noqa: BLE001
+                    log.exception("instrument catalog request failed")
         self.risk.reset_day(self.config.risk.starting_balance)
         for asset in self.feed.assets:
             self.detectors[asset] = RegimeDetector()

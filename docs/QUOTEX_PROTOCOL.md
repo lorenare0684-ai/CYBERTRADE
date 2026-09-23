@@ -129,6 +129,24 @@ Socket.IO packet grammar (`<type>[namespace,][ack-id,]<json>`):
 All parsers live in `cybertrade/brokers/quotex/protocol.py` and accept both
 dict and list envelope variants (`QXCandle.from_payload` etc.).
 
+## 6b. Instrument catalog + history sync (implemented)
+
+- `42["instrument",{}]` requests the instrument listing; the reply event
+  (`instrument` / `instruments` / `assets`) is absorbed by
+  `protocol.parse_instruments`, which tolerates four community shapes:
+  `{name: {…}}` mappings, `{asset|name|symbol, …}` rows, `[name, {…}]` pairs,
+  and nested lists wrapping any of them.  Payouts accept `payout`/`profit`
+  (fraction or percent), open state `open`/`isOpen`, and asset class via
+  `type`/`kind` into `AssetCatalog` (`brokers/quotex/catalog.py`).
+- `payout_for()` consults the live catalog first, then
+  `cybertrade.constants.ASSET_CATALOG` (offline/paper fallback).
+- History warm-start: `candleHistory` fills `QuotexAPI`'s cache;
+  `brokers/quotex/sync.py` pushes it into `CandleSeries`/`HistoryBuffer`
+  books (dupe-safe, failure-tolerant) so live strategies get indicator warmup
+  exactly like paper mode.
+- Ticks tolerate dict rows, bare price scalars, and `[asset, price, ts?]`
+  rows; balances tolerate scalar pushes.
+
 ## 7. Known gaps / drift risks
 
 1. **Cloudflare** — headless `api/signin` may return an HTML challenge; fall
