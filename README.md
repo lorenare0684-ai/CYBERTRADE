@@ -99,6 +99,29 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 15 — the live wire (`mode=quotex`, safety stack intact)
+
+`BrokerConfig.mode` declared `paper | quotex | dryrun` since Phase 1 and
+`dryrun` became real in Phase 9 — but **`quotex` was still just a comment**.
+The adapter was already a complete `Broker` (`submit` → `api.buy`, local
+`settle_due` at expiry via streamed quotes, venue-event reconciliation via
+`_reconcile`); the gap was the build path and its interlocks.
+
+The mode trilogy is now whole, with defense in depth:
+
+| `broker.mode` | without `--live` | with `--live` + `I UNDERSTAND` |
+|---|---|---|
+| `paper` | paper fills | **blocked** (`allow_live` default False + arm gate) |
+| `dryrun` | venue quotes, paper fills, `DRY_RUN` rail | same (rail is structural) |
+| `quotex` | **degrades to dry-run** and says so | **live wire** — real `api.buy` at the venue |
+
+`allow_orders` rides on `cfg.risk.allow_live`, and the I-UNDERSTAND gate
+(`_confirm_live`) now runs **before** the engine is built so the flag is
+already true at construction. `demo_account=True` (default) keeps the venue
+on demo money even then. Suite at **371 green** (`tests/test_phase15.py` 9
+tests: live submit reaches venue, rail still blocks, build wiring both
+directions, gate matrix).
+
 ## Phase 14 — the venue actually connects (SSID session + real warm)
 
 The dry-run harness built a `QuotexAPI` with **no session and no connect** —

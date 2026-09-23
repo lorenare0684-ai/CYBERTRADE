@@ -44,13 +44,14 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     return cfg
 
 
-def _build_venue(cfg: AppConfig, api_factory=None):
-    """Build an order-disabled QuotexBroker with a live session, or None.
+def _build_venue(cfg: AppConfig, api_factory=None, allow_orders: bool = False):
+    """Build a QuotexBroker with a live session, or None.
 
     Session sources (nothing is ever written to disk): in-memory
     ``cfg.broker.ssid`` / ``--ssid``, then the ``QX_SSID`` env var; else
     ``username``+``password`` via ``login()``.  Any failure degrades to
-    ``None`` — paper quotes, zero drama.
+    ``None`` — paper quotes, zero drama.  ``allow_orders`` is the dry-run
+    rail: leave it False for data-only venues.
     """
     import os
 
@@ -73,10 +74,29 @@ def _build_venue(cfg: AppConfig, api_factory=None):
             api.connect()
         from .brokers.quotex.adapter import QuotexBroker
 
-        return QuotexBroker(api, allow_orders=False)
+        return QuotexBroker(api, allow_orders=allow_orders)
     except Exception as exc:  # noqa: BLE001 — venue trouble degrades to paper
         print(f"  venue session unavailable ({exc}) — paper quotes")
         return None
+
+
+def _confirm_live(args: argparse.Namespace, cfg: AppConfig) -> bool:
+    """The I-UNDERSTAND gate.  Returns False to abort the run.
+
+    Runs BEFORE the engine is built — ``allow_orders`` rides on
+    ``cfg.risk.allow_live`` at construction time.
+    """
+    if not getattr(args, "live", False):
+        return True
+    print("  ⚠ LIVE TRADING REQUESTED — this uses real money if configured.")
+    print("  ⚠ Automated trading may violate Quotex's Terms of Service.")
+    if not getattr(args, "yes", False):
+        answer = input("  type 'I UNDERSTAND' to continue: ")
+        if answer.strip() != "I UNDERSTAND":
+            print("  aborted.")
+            return False
+    cfg.risk.allow_live = True
+    return True
 
 
 def cmd_quotex(args: argparse.Namespace) -> int:
@@ -152,6 +172,30 @@ def _build_engine(cfg: AppConfig, scenario: str = ""):
             latency_ms=cfg.broker.latency_ms,
             slippage_bps=cfg.broker.slippage_bps,
         )
+    elif cfg.broker.mode == "quotex":
+        # The live wire.  Defense in depth: allow_orders rides on
+        # cfg.risk.allow_live, which _confirm_live sets only after the
+        # 'I UNDERSTAND' gate — without it this degrades to dry-run
+        # (venue quotes, paper fills) and says so.
+        live_ok = bool(cfg.risk.allow_live)
+        venue = _build_venue(cfg, allow_orders=live_ok)
+        if venue is None:
+            print("  quotex mode: no venue session — paper broker")
+        elif not live_ok:
+            print("  ⚠ mode=quotex without --live — running as DRY-RUN "
+                  "(venue quotes, paper fills).")
+            from .execution.dryrun import DryRunBroker
+
+            broker = DryRunBroker(
+                venue=venue,
+                starting_balance=cfg.risk.starting_balance,
+                default_payout=cfg.broker.payout_default,
+                latency_ms=cfg.broker.latency_ms,
+                slippage_bps=cfg.broker.slippage_bps,
+            )
+        else:
+            print("  ⚠ QUOTEX LIVE — real orders enabled at the venue.")
+            broker = venue
     engine = TradingEngine(cfg, feed=feed, broker=broker)
     engine.boot()
     return engine
@@ -208,17 +252,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         cfg.broker.mode = "dryrun"
         print("  DRY RUN — venue quotes (if configured), paper fills, live orders disabled.")
     print(BANNER)
+    if not _confirm_live(args, cfg):
+        return 1
     engine = _build_engine(cfg, getattr(args, "scenario", ""))
     live = bool(args.live)
-    if live:
-        print("  ⚠ LIVE TRADING REQUESTED — this uses real money if configured.")
-        print("  ⚠ Automated trading may violate Quotex's Terms of Service.")
-        if not args.yes:
-            answer = input("  type 'I UNDERSTAND' to continue: ")
-            if answer.strip() != "I UNDERSTAND":
-                print("  aborted.")
-                return 1
-        cfg.risk.allow_live = True
     engine.arm(live=live)
     print(f"  engine ARMED ({'LIVE' if live else 'PAPER'}) — ctrl+c to stop\n")
     try:
