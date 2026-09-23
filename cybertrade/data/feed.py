@@ -22,7 +22,12 @@ class Feed:
 
     Implementations push ticks via :meth:`_emit_tick`; consumers subscribe on
     the event bus or register plain callbacks for engine-local speed.
+
+    ``is_synthetic`` marks generator-backed feeds: live broker modes
+    (quotex/dryrun) refuse them outright (Phase-29, live candles only).
     """
+
+    is_synthetic: bool = False
 
     def __init__(self, assets: Sequence[str]) -> None:
         self.assets = list(assets)
@@ -76,6 +81,7 @@ class SyntheticFeed(Feed):
     grinds, etc.).  Scenarios can be hot-swapped at runtime.
     """
 
+    is_synthetic = True
     def __init__(
         self,
         assets: Sequence[str] | None = None,
@@ -242,6 +248,9 @@ class SyntheticFeed(Feed):
 
 
 class ReplayFeed(Feed):
+    """Replays a recorded tape as ticks — still not live venue data."""
+
+    is_synthetic = True
     """Replay historical (or generated) candles at accelerated speed."""
 
     def __init__(

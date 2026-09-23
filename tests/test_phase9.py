@@ -127,11 +127,49 @@ class TestDryRunBroker(unittest.TestCase):
 
 class TestDryRunWiring(unittest.TestCase):
     def test_build_engine_dryrun_mode(self):
+        # Phase-29: live modes never degrade silently — no session raises.
+        from cybertrade.exceptions import ConfigError
+
         cfg = AppConfig()
-        cfg.broker.mode = "dryrun"   # no username → degrades to catalog quotes
-        eng = _build_engine(cfg)
+        cfg.broker.mode = "dryrun"
+        with self.assertRaises(ConfigError) as ctx:
+            _build_engine(cfg)
+        self.assertIn("quotex login", str(ctx.exception))
+
+        # With a connected API (as `quotex login` provides), dryrun wires
+        # venue quotes behind paper fills: PAPER-DRY.
+        from unittest import mock
+        from cybertrade.data.models import Candle
+
+        class Api:
+            connected = True
+            def connect(self, authorize=True):
+                return True
+            def get_candles(self, asset, tf=60, count=200, wait=3.0):
+                return [Candle(asset=asset, timeframe_seconds=60,
+                               open_ts=1_000_000.0 + i, open=1.0, high=1.1,
+                               low=0.9, close=1.05) for i in range(8)]
+            def last_price(self, asset):
+                return 1.05
+            def subscribe(self, asset, timeframe_seconds=60):
+                pass
+            def add_tick_handler(self, fn):
+                pass
+            def add_listener(self, fn):
+                pass
+            def remove_listener(self, fn):
+                pass
+            def payout_for(self, asset, expiry_seconds=60):
+                return 0.85
+            def sell_option(self, option_id):
+                return True
+
+        with mock.patch("cybertrade.cli._live_api",
+                        lambda c, api_factory=None: Api()):
+            eng = _build_engine(cfg)
         try:
             self.assertEqual(eng.broker.name, "PAPER-DRY")
+            self.assertIsNotNone(eng.broker.api)  # live quotes, not catalog
         finally:
             eng.shutdown()
 

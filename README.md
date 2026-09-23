@@ -66,7 +66,7 @@ python -m unittest discover -s tests
 | **SURVIVOR playbook** | Condition → response matrix on a 5-rung posture ladder (ATTACK → NORMAL → GUARD → DEFENSE → LOCKDOWN): stake scaling, confidence floors, expiry caps, forbidden strategy families, news blackouts, weekend/friday locks, spread/liquidity vetoes |
 | **Risk fortress** | Stake bands, fractional-Kelly + vol-target sizing, drawdown governor (daily lock + total kill), loss-streak cooldowns, per-asset / correlation-cluster caps, rate limits, payout floor, strategy win-rate floors |
 | **Execution** | Broker ABC → PaperBroker (payout/latency/slippage/ATM-refund modelling) → DryRunBroker → QuotexBroker; OMS + ledger + SQLite journal |
-| **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation |
+| **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused |
 | **Backtest lab** | Event-driven binary-option simulator + 10-scenario gauntlet (bull/bear trend, range chop, low-vol grind, high-vol expansion, flash crash, gap open, news spike, liquidity vacuum, regime whipsaw), survival scoring, walk-forward optimizer |
 | **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) |
 
@@ -98,6 +98,33 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
 Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
+
+## Phase 29 — the airlock (Chrome pairing + LIVE candles only)
+
+The CAPTCHA that defeated programmatic login gets the answer it deserves:
+**a human**. `cybertrade quotex login` opens standard Chrome with a
+persistent profile (`data/chrome-profile`, DevTools on
+`127.0.0.1:9333`); you log in and solve the CAPTCHA yourself; pairing
+polls `Storage.getCookies` over a stdlib websocket (with
+`Network.getAllCookies` as fallback) until the `sessionid` cookie for
+`qxbroker.com` appears, then persists it to `cfg.qx_session_path`
+(0600) and verifies via `set_ssid + connect + account_snapshot`. No
+Playwright, no headless browser, no CAPTCHA bypass.
+
+**Live modes refuse synthetic tape.** `broker.mode = quotex | dryrun`
+now wire `LiveQuotexFeed` (`is_synthetic=False`) from a strict
+`_live_api` resolver: `cfg.broker.ssid` → `QX_SSID` env → paired
+session file → username/password; nothing present → `ConfigError`
+naming `quotex login`. `TradingEngine.__init__` re-checks the contract
+— generator-backed feed + live mode = `ConfigError` — and warmup with
+zero venue candles raises `FeedError` instead of booting on empty
+books. The boot tick wiring skips the direct api handler when a live
+feed already forwards venue ticks (no double-count), and
+`quotex status/warm` pick the session file up too. Paper (the default)
+stays fully offline synthetic.
+
+Suite at **479 green** (`tests/test_phase29.py` 16 tests; phase9/15
+rewired to the no-silent-fallback contract).
 
 ## Phase 28 — the memory (operator decisions survive restart)
 
@@ -350,7 +377,7 @@ The mode trilogy is now whole, with defense in depth:
 |---|---|---|
 | `paper` | paper fills | **blocked** (`allow_live` default False + arm gate) |
 | `dryrun` | venue quotes, paper fills, `DRY_RUN` rail | same (rail is structural) |
-| `quotex` | **degrades to dry-run** and says so | **live wire** — real `api.buy` at the venue |
+| `quotex` | **dry-run** (venue candles, paper fills) and says so | **live wire** — real `api.buy` at the venue |
 
 `allow_orders` rides on `cfg.risk.allow_live`, and the I-UNDERSTAND gate
 (`_confirm_live`) now runs **before** the engine is built so the flag is
@@ -375,6 +402,7 @@ takes for granted. New `quotex` command surface:
 
 | Command | Does |
 |---|---|
+| `python3 -m cybertrade quotex login` | **Phase-29 pairing** — opens Chrome (persistent profile), you log in + solve the CAPTCHA, session saved 0600 and verified |
 | `python3 -m cybertrade quotex status` | connect, host/demo, balance, instrument count, sample payouts |
 | `python3 -m cybertrade quotex warm --bars 250` | `candleHistory` round-trip per asset, reports candles added |
 

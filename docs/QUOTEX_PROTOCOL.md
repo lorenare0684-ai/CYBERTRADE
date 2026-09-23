@@ -165,3 +165,28 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
   confirmation.  Even then, prefer `PRACTICE`.
 - You are responsible for compliance with Quotex's Terms of Service and with
   any law governing automated trading in your jurisdiction.
+
+## 9. Browser pairing (CAPTCHA-safe, Phase-29)
+
+Cloudflare's challenge defeats programmatic logins. The fix is **not** a
+headless browser or a CAPTCHA bypass — it is a human:
+
+```
+cybertrade quotex login
+  → Chrome opens qxbroker.com (--user-data-dir=data/chrome-profile,
+    --remote-debugging-port=9333, persistent profile: do this once)
+  → YOU log in and solve the CAPTCHA by hand
+  → pairing polls DevTools on 127.0.0.1:9333 (Storage.getCookies, with
+    Network.getAllCookies as fallback) for the `sessionid` cookie
+  → session persisted to cfg.qx_session_path (0600): {ssid, cookies, domain}
+  → QuotexAPI.set_ssid(ssid, cookies) → websocket authorization §4
+```
+
+- Standard library only: `urllib` + `cybertrade.network.websocket`.
+  No Playwright, no Selenium, no automation of the challenge itself.
+- **Live modes refuse synthetic data**: `broker.mode = quotex | dryrun`
+  wires `LiveQuotexFeed` (is_synthetic=False) from a strict session
+  resolver; `TradingEngine.__init__` raises `ConfigError` if handed any
+  generator-backed feed. Missing session → loud startup error naming
+  `quotex login` — never a silent paper/synthetic fallback.
+- Paper mode (the default) is unchanged: fully offline synthetic tape.

@@ -16,7 +16,7 @@ from ..constants import EngineState, Side, Timeframe
 from ..data.feed import Feed, QuoteBook, SyntheticFeed
 from ..data.models import Signal, TradeRecord
 from ..events import Topic, default_bus
-from ..exceptions import KillSwitchEngaged, RiskRejection
+from ..exceptions import ConfigError, KillSwitchEngaged, RiskRejection
 from ..execution.oms import OrderManager
 from ..execution.paper import PaperBroker
 from ..regime.detector import RegimeDetector, RegimeReading
@@ -73,6 +73,16 @@ class TradingEngine:
             timeframe_seconds=self.config.timeframe().seconds,
             tick_interval=0.5,
         )
+        # Phase-29: live venue modes consume LIVE candles only — a synthetic
+        # feed here is a wiring bug, not a fallback. Fail before boot.
+        if self.config.broker.mode in ("quotex", "dryrun") and getattr(
+            self.feed, "is_synthetic", False
+        ):
+            raise ConfigError(
+                f"broker.mode={self.config.broker.mode} requires live venue "
+                "candles — pair a browser session (`cybertrade quotex login`) "
+                "and rebuild; synthetic feeds are refused in live modes"
+            )
         self.ensemble = ensemble or build_all_weather(
             mode=self.config.strategy.ensemble_mode,
             adaptive=self.config.strategy.adaptive_weights,
@@ -317,7 +327,9 @@ class TradingEngine:
         # live venue wiring: stream quotes into the same pipeline as the feed
         # and pull the instrument catalog (both no-ops for paper).
         api = getattr(self.broker, "api", None)
-        if api is not None:
+        # Phase-29: a live feed already forwards venue ticks through its own
+        # listener — a second direct handler would double-count the stream.
+        if api is not None and getattr(self.feed, "is_synthetic", True):
             if hasattr(api, "add_tick_handler"):
                 api.add_tick_handler(self._on_tick)
             if hasattr(api, "request_instruments"):

@@ -65,8 +65,17 @@ def _build_venue(cfg: AppConfig, api_factory=None, allow_orders: bool = False):
 
         api = api_factory()
         ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
+        cookies = ""
+        if not ssid:
+            # Phase-29: paired browser session (Chrome + manual CAPTCHA).
+            from .brokers.quotex.pairing import load_session
+
+            paired = load_session(getattr(cfg, "qx_session_path", "") or "")
+            if paired:
+                ssid = paired.get("ssid", "")
+                cookies = paired.get("cookies", "")
         if ssid:
-            api.set_ssid(ssid)
+            api.set_ssid(ssid, cookies)
         elif cfg.broker.username and cfg.broker.password:
             api.login(cfg.broker.username, cfg.broker.password,
                       is_demo=cfg.broker.demo_account)
@@ -101,6 +110,8 @@ def _confirm_live(args: argparse.Namespace, cfg: AppConfig) -> bool:
 
 def cmd_quotex(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    if getattr(args, "action", "") == "login":
+        return cmd_quotex_login(args, cfg)
     if getattr(args, "ssid", ""):
         cfg.broker.ssid = args.ssid  # session-only: never written to disk
     venue = _build_venue(cfg)
@@ -136,8 +147,130 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     return 0 if total else 1
 
 
-def _build_engine(cfg: AppConfig, scenario: str = ""):
+def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """Phase-29: Chrome + your hands beat any headless login.
+
+    Opens a persistent Chrome profile on qxbroker.com; you sign in and solve
+    the CAPTCHA yourself; we detect the `sessionid` cookie over localhost
+    DevTools and persist it (0600) for the websocket wire.
+    """
+    import os
+
+    from .brokers.quotex.pairing import pair_session
+
+    profile = getattr(args, "profile", "") or os.path.join("data", "chrome-profile")
+    port = int(getattr(args, "cdp_port", 9333))
+    timeout = float(getattr(args, "timeout", 240.0))
+    chrome = getattr(args, "chrome", "")
+    session_path = cfg.qx_session_path
+    print(BANNER)
+    print("  Chrome will open Quotex — log in and solve the CAPTCHA YOURSELF.")
+    print("  This tool never bypasses the CAPTCHA; it only reads the session")
+    print("  cookie Chrome grants after YOU sign in (DevTools, localhost only).")
+    try:
+        sess = pair_session(
+            session_path=session_path,
+            profile_dir=profile,
+            port=port,
+            chrome=chrome,
+            timeout=timeout,
+        )
+    except (FileNotFoundError, TimeoutError, OSError) as exc:
+        print(f"  ✗ {exc}")
+        return 1
+    print(f"  ✓ session saved → {session_path} (0600)")
+    try:
+        from .brokers.quotex.api import QuotexAPI
+
+        api = QuotexAPI(demo=cfg.broker.demo_account)
+        api.set_ssid(sess["ssid"], sess.get("cookies", ""))
+        api.connect()
+        snap = api.account_snapshot()
+        print(f"  ✓ verified — balance {float(snap.balance):.2f}: live session ready")
+        api.close()
+        return 0
+    except Exception as exc:  # noqa: BLE001 — report, don't discard the cookie
+        print(f"  ⚠ captured, but venue verify failed: {exc}")
+        print("    (session kept — `cybertrade quotex status` will retry)")
+        return 1
+
+
+def _live_api(cfg: AppConfig, api_factory=None):
+    """Connected QuotexAPI for live modes — raises, never degrades.
+
+    Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
+    paired browser session (``quotex login``) → username/password login.
+    """
+    import os
+
+    from .exceptions import ConfigError
+
+    if api_factory is None:
+        from .brokers.quotex.api import QuotexAPI
+
+        def api_factory():
+            return QuotexAPI(demo=cfg.broker.demo_account)
+
+    api = api_factory()
+    ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
+    cookies = ""
+    if not ssid:
+        from .brokers.quotex.pairing import load_session
+
+        paired = load_session(getattr(cfg, "qx_session_path", "") or "")
+        if paired:
+            ssid = paired.get("ssid", "")
+            cookies = paired.get("cookies", "")
+    if ssid:
+        api.set_ssid(ssid, cookies)
+    elif cfg.broker.username and cfg.broker.password:
+        api.login(cfg.broker.username, cfg.broker.password,
+                  is_demo=cfg.broker.demo_account)
+    else:
+        raise ConfigError(
+            "no Quotex session — run `cybertrade quotex login` (Chrome opens; "
+            "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
+        )
+    api.connect()
+    return api
+
+
+def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None):
     from .bot.engine import TradingEngine
+
+    # Phase-29: live modes wire REAL venue candles only — synthetic is
+    # structurally impossible here (engine __init__ enforces it as gate two).
+    if cfg.broker.mode in ("dryrun", "quotex"):
+        from .brokers.quotex.adapter import QuotexBroker
+        from .data.livefeed import LiveQuotexFeed
+        from .execution.dryrun import DryRunBroker
+
+        api = _live_api(cfg, api_factory=api_factory)
+        feed = LiveQuotexFeed(
+            api,
+            assets=cfg.strategy.universe,
+            timeframe_seconds=cfg.timeframe().seconds,
+            warm_bars=400,
+        )
+        live_ok = cfg.broker.mode == "quotex" and bool(cfg.risk.allow_live)
+        if live_ok:
+            print("  ⚠ QUOTEX LIVE — real orders enabled at the venue.")
+            broker = QuotexBroker(api, allow_orders=True)
+        else:
+            if cfg.broker.mode == "quotex":
+                print("  ⚠ mode=quotex without --live — DRY-RUN "
+                      "(venue quotes, paper fills).")
+            broker = DryRunBroker(
+                venue=QuotexBroker(api, allow_orders=False),
+                starting_balance=cfg.risk.starting_balance,
+                default_payout=cfg.broker.payout_default,
+                latency_ms=cfg.broker.latency_ms,
+                slippage_bps=cfg.broker.slippage_bps,
+            )
+        engine = TradingEngine(cfg, feed=feed, broker=broker)
+        engine.boot()
+        return engine
+
     from .data.feed import SyntheticFeed
     from .data.synthetic import MarketParams
 
@@ -152,50 +285,7 @@ def _build_engine(cfg: AppConfig, scenario: str = ""):
         tick_interval=0.5,
         warmup_bars=400,
     )
-    broker = None
-    if cfg.broker.mode == "dryrun":
-        from .execution.dryrun import DryRunBroker
-
-        venue = None
-        import os
-        has_creds = bool(
-            cfg.broker.ssid or cfg.broker.username or os.environ.get("QX_SSID")
-        )
-        if has_creds:
-            venue = _build_venue(cfg)
-        if venue is None:
-            print("  dry-run: no venue session — catalog quotes, paper fills")
-        broker = DryRunBroker(
-            venue=venue,
-            starting_balance=cfg.risk.starting_balance,
-            default_payout=cfg.broker.payout_default,
-            latency_ms=cfg.broker.latency_ms,
-            slippage_bps=cfg.broker.slippage_bps,
-        )
-    elif cfg.broker.mode == "quotex":
-        # The live wire.  Defense in depth: allow_orders rides on
-        # cfg.risk.allow_live, which _confirm_live sets only after the
-        # 'I UNDERSTAND' gate — without it this degrades to dry-run
-        # (venue quotes, paper fills) and says so.
-        live_ok = bool(cfg.risk.allow_live)
-        venue = _build_venue(cfg, allow_orders=live_ok)
-        if venue is None:
-            print("  quotex mode: no venue session — paper broker")
-        elif not live_ok:
-            print("  ⚠ mode=quotex without --live — running as DRY-RUN "
-                  "(venue quotes, paper fills).")
-            from .execution.dryrun import DryRunBroker
-
-            broker = DryRunBroker(
-                venue=venue,
-                starting_balance=cfg.risk.starting_balance,
-                default_payout=cfg.broker.payout_default,
-                latency_ms=cfg.broker.latency_ms,
-                slippage_bps=cfg.broker.slippage_bps,
-            )
-        else:
-            print("  ⚠ QUOTEX LIVE — real orders enabled at the venue.")
-            broker = venue
+    broker = None  # paper path — TradingEngine builds the default PaperBroker
     engine = TradingEngine(cfg, feed=feed, broker=broker)
     engine.boot()
     return engine
@@ -229,8 +319,11 @@ def cmd_web(args: argparse.Namespace) -> int:
     hub = EngineHub(engine, cfg)
     web = WebTerminal(hub, host=host, port=port)
     web.start()
+    live_data = cfg.broker.mode in ("quotex", "dryrun")
+    mode_line = (f"LIVE VENUE CANDLES ({cfg.broker.mode})"
+                 if live_data else "PAPER (simulated market)")
     print(f"  ▸ web terminal : http://{host}:{port}")
-    print("  ▸ mode         : PAPER (simulated market)")
+    print(f"  ▸ mode         : {mode_line}")
     print("  ▸ ctrl+c to stop\n")
     try:
         if args.auto:
@@ -685,12 +778,20 @@ def build_parser() -> argparse.ArgumentParser:
     clb.add_argument("--payout", type=float, default=0.85,
                      help="payout hurdle for liar flags")
     clb.set_defaults(func=cmd_calibrate)
-    qx = sub.add_parser("quotex", help="venue session: status / warm history")
-    qx.add_argument("action", choices=["status", "warm"])
+    qx = sub.add_parser("quotex", help="venue session: login / status / warm")
+    qx.add_argument("action", choices=["status", "warm", "login"])
     qx.add_argument("--ssid", default="",
                     help="session cookie (session-only, never stored)")
     qx.add_argument("--bars", type=int, default=250,
                     help="candles per asset for warm")
+    qx.add_argument("--profile", default="",
+                    help="Chrome profile dir (default data/chrome-profile)")
+    qx.add_argument("--chrome", default="",
+                    help="Chrome binary (or set CYBERTRADE_CHROME)")
+    qx.add_argument("--cdp-port", type=int, default=9333,
+                    help="localhost DevTools port for pairing")
+    qx.add_argument("--timeout", type=float, default=240.0,
+                    help="seconds to wait for your manual login + CAPTCHA")
     qx.set_defaults(func=cmd_quotex)
 
     cal = sub.add_parser("calendar", help="economic calendar / news blackouts")

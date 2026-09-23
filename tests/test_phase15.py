@@ -6,6 +6,8 @@ was already a complete Broker (submit -> api.buy, local settle_due, venue
 reconciliation); this wires the build path and the interlocks: allow_orders
 rides on cfg.risk.allow_live, which the I-UNDERSTAND gate sets BEFORE the
 engine is built. Without --live, mode=quotex degrades to dry-run and says so.
+Phase-29: live modes now require LIVE venue candles (`_live_api` +
+LiveQuotexFeed) — synthetic feeds are refused outright.
 """
 
 from __future__ import annotations
@@ -18,9 +20,18 @@ from types import SimpleNamespace
 
 from cybertrade.brokers.quotex.adapter import QuotexBroker
 from cybertrade.config import AppConfig
-from cybertrade.data.models import Order
+from cybertrade.data.models import Candle, Order
 from cybertrade.constants import Side
 from cybertrade.exceptions import OrderRejected
+
+
+def _candles(asset: str, n: int = 8):
+    """Canned venue history for LiveQuotexFeed warmup (P29)."""
+    return [
+        Candle(asset=asset, timeframe_seconds=60, open_ts=1_000_000.0 + i,
+               open=1.0, high=1.1, low=0.9, close=1.05)
+        for i in range(n)
+    ]
 
 
 class FakeApi:
@@ -54,7 +65,7 @@ class FakeApi:
         pass
 
     def get_candles(self, asset, tf=60, count=200, wait=3.0):
-        return []
+        return _candles(asset, 8)
 
     def payout_for(self, asset, expiry_seconds=60):
         return 0.9
@@ -107,9 +118,10 @@ class TestBuildWiring(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            with mock.patch("cybertrade.cli._build_venue",
-                            lambda c, api_factory=None, allow_orders=False: QuotexBroker(
-                                FakeApi(), allow_orders=allow_orders)):
+            cfg.qx_session_path = os.path.join(tmp, "qx.json")
+            fake = FakeApi()
+            with mock.patch("cybertrade.cli._live_api",
+                            lambda c, api_factory=None: fake):
                 return _build_engine(cfg)
 
     def test_quotex_without_live_degrades_to_dryrun(self):
