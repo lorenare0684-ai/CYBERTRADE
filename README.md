@@ -99,6 +99,25 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 25 — the quarantine ward (decay flags now block trades)
+
+P18 *flagged* fading strategies and alerted — and nothing isolated them.
+Worse: live journal rows were keyed by the ensemble blob
+(`ensemble_all_weather`), so `strategy_decay`'s per-strategy buckets never
+fired outside rigged tests. Three fixes close the loop:
+
+- **attribution** — orders are named after the strongest same-side voter
+  (`_attributed_strategy`); the journal, decay watch, and calibration now
+  learn which edge is actually fading
+- **enforcement** — `_decay_alerted` (the set P18 already maintained) now
+  BLOCKS: `_try_execute` vetoes quarantined names (`quarantine veto …`),
+  the ensemble skips them as voters (`quarantined_votes`, synced every
+  check), and recovery publishes `release`
+- **visibility** — `state()["edge"].journal.quarantined` + HUD strip
+  `⛓ QUARANTINE: names`
+
+Suite at **445 green** (`tests/test_phase25.py` 9 tests).
+
 ## Phase 24 — fill realism (storms widen entries; the slip limit is real)
 
 Fills were never the price you saw in a crisis. `risk.slippage` estimates

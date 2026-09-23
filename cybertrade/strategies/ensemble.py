@@ -52,6 +52,7 @@ class AllWeatherEnsemble(Strategy):
         self.decay = decay
         self._weights: Dict[str, float] = {m.name: 1.0 for m in self.members}
         self._scores: Dict[str, float] = {m.name: 0.5 for m in self.members}
+        self.quarantined_votes = set()  # Phase-25: decay ward (engine-synced)
         self.vetoes = 0
         super().__init__(
             mode=mode,
@@ -73,6 +74,8 @@ class AllWeatherEnsemble(Strategy):
         for member in self.members:
             if not member.enabled or self._quarantined(member):
                 continue
+            if member.name in self.quarantined_votes:
+                continue  # Phase-25: decay ward — do not listen to the fading
             sig = member.generate(ctx)
             if sig is not None and sig.is_trade:
                 votes.append(sig)

@@ -254,6 +254,7 @@ class EngineHub:
                 "available": True,
                 "trades": j.count(),
                 "decaying": decaying[:5],
+                "quarantined": self.engine.quarantine_report(),
                 "watched": len(rows),
             }
         except Exception:  # noqa: BLE001

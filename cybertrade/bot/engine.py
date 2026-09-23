@@ -168,10 +168,33 @@ class TradingEngine:
                     )
                     default_bus.publish(Topic.ALERT, {"kind": "decay", **row},
                                         source="decay-watch")
+                    self.health.note_message(
+                        f"QUARANTINED {name} — decay isolation engaged"
+                    )
+                    default_bus.publish(
+                        Topic.ALERT,
+                        {"kind": "quarantine", "strategy": name},
+                        source="quarantine-ward",
+                    )
                 elif not row["decaying"] and name in self._decay_alerted:
                     self._decay_alerted.discard(name)  # recovered — arm again
+                    default_bus.publish(
+                        Topic.ALERT,
+                        {"kind": "release", "strategy": name},
+                        source="quarantine-ward",
+                    )
+                    self.health.note_message(
+                        f"RELEASED {name} — decay cleared"
+                    )
+            # Phase-25: keep the ensemble's voter skip in lockstep with the ward.
+            if hasattr(self.ensemble, "quarantined_votes"):
+                self.ensemble.quarantined_votes = set(self._decay_alerted)
         except Exception:  # noqa: BLE001
             log.exception("decay check failed")
+
+    def quarantine_report(self) -> List[str]:
+        """Phase-25: strategies currently isolated for decay (sorted names)."""
+        return sorted(self._decay_alerted)
 
     def _salvage_all(self, reason: str) -> None:
         """The lifeboat: liquidate every open contract at the salvage mark."""
@@ -494,6 +517,29 @@ class TradingEngine:
         )
         return self.ensemble.generate(ctx)
 
+    @staticmethod
+    def _attributed_strategy(signal: Signal) -> str:
+        """Phase-25: name the vote that actually earned the order.
+
+        Ensemble signals arrive as 'ensemble_all_weather' — journal rows
+        keyed by that blob blind the decay watch to WHICH edge is fading.
+        Attribute to the strongest same-side voter; manual/no-vote signals
+        keep their own name.
+        """
+        votes = signal.meta.get("votes") or []
+        best_name, best_conf = "", -1.0
+        for v in votes:
+            if not isinstance(v, dict) or v.get("side") != signal.side:
+                continue
+            try:
+                conf = float(v.get("confidence") or 0.0)
+            except (TypeError, ValueError):
+                conf = 0.0
+            name = str(v.get("strategy") or "")
+            if name and conf > best_conf:
+                best_name, best_conf = name, conf
+        return best_name or signal.strategy
+
     def _try_execute(self, signal: Signal, reading: RegimeReading) -> bool:
         cfg = self.config
         now = signal.ts or timex.now()
@@ -517,6 +563,24 @@ class TradingEngine:
                     "estimated": event.estimated,
                 },
                 source="calendar",
+            )
+            return False
+
+        # Phase-25: the quarantine ward — decay flags now BLOCK trades.
+        attributed = self._attributed_strategy(signal)
+        if attributed in self._decay_alerted:
+            self.vetoes += 1
+            self.health.note_message(
+                f"quarantine veto {attributed}: decaying edge isolated"
+            )
+            default_bus.publish(
+                Topic.RISK_REJECT,
+                {
+                    "asset": signal.asset,
+                    "strategy": attributed,
+                    "reason": "strategy quarantined (decay)",
+                },
+                source="quarantine",
             )
             return False
 
@@ -639,7 +703,7 @@ class TradingEngine:
             expiry_seconds=min(int(expiry), decision.max_expiry_seconds),
             payout=payout,
             confidence=signal.confidence,
-            strategy=signal.strategy,
+            strategy=attributed,
             tag=f"{decision.posture}:{signal.reason}",
             cluster=self.corr.cluster_of(signal.asset),
             regime=reading.regime.value,

@@ -81,11 +81,14 @@ function render(state) {
     const de = $("decay");
     if (de && jd) {
       de.textContent = jd.available
-        ? ((jd.decaying && jd.decaying.length)
+        ? ((jd.quarantined && jd.quarantined.length)
+            ? `⛓ QUARANTINE: ${jd.quarantined.join(", ")}`
+            : (jd.decaying && jd.decaying.length)
             ? `⚠ DECAY: ${jd.decaying.map((r) => r.strategy).join(", ")}`
             : `${jd.trades} journaled · edge stable`)
         : "decay watch idle";
-      de.className = (jd.decaying && jd.decaying.length) ? "mini bad" : "mini";
+      de.className = ((jd.quarantined && jd.quarantined.length)
+        || (jd.decaying && jd.decaying.length)) ? "mini bad" : "mini";
     }
   }
   const dr = $("drill");
