@@ -132,6 +132,38 @@ function render(state) {
       sc.style.display = "block";
     }
   }
+  // strategy deck (P26): live arsenal with ward badges + ON/OFF toggles
+  const stDeck = snap.strategies;
+  const deck = $("deck-body");
+  if (deck && stDeck && stDeck.members) {
+    const key = JSON.stringify([stDeck.members, stDeck.decay_ward]);
+    if (deck.dataset.key !== key) {
+      deck.dataset.key = key;
+      const ward = new Set(stDeck.decay_ward || []);
+      let live = 0;
+      deck.innerHTML = stDeck.members.map((m) => {
+        const badges = [];
+        if (m.decay_quarantined || ward.has(m.name)) badges.push("⛓");
+        if (m.winrate_quarantined) badges.push("⌂");
+        if (!m.enabled) badges.push("OFF");
+        else live++;
+        const w = (stDeck.weights && stDeck.weights[m.name] != null)
+          ? stDeck.weights[m.name] : (m.weight ?? 1);
+        return `<div style="display:flex;gap:6px;align-items:center;padding:1px 0;`
+          + `border-bottom:1px solid rgba(0,255,255,.08)">`
+          + `<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" `
+          + `title="${m.label || m.name}">${m.name} `
+          + `<span style="opacity:.5">${m.family || ""}</span></span>`
+          + `<span style="opacity:.8">${(m.win_rate * 100).toFixed(0)}%·${m.attempts}</span>`
+          + `<span style="opacity:.8">×${Number(w).toFixed(2)}</span>`
+          + `<span>${badges.join("")}</span>`
+          + `<button class="btn sm" data-strat="${m.name}" data-en="${m.enabled ? 0 : 1}">`
+          + `${m.enabled ? "ON" : "OFF"}</button></div>`;
+      }).join("");
+      const dc = $("deck-count");
+      if (dc) dc.textContent = `${live}/${stDeck.members.length} live`;
+    }
+  }
 
   // meters
   const ddMax = (limits.max_total_drawdown_frac || 0.2) * 100;
@@ -385,6 +417,13 @@ for (const [id, kind] of Object.entries(RUNS)) {
   const el = $(id);
   el && (el.onclick = () => cmd({ cmd: "run", kind }));
 }
+// strategy deck toggles (P26) — one delegated listener
+const deckEl = $("deck-body");
+deckEl && deckEl.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-strat]");
+  if (!b) return;
+  cmd({ cmd: "strategy", name: b.dataset.strat, enabled: b.dataset.en === "1" });
+});
 $("btn-scenario") && ($("btn-scenario").onclick = async () => {
   const sel = $("scenario-select");
   if (!sel || !sel.value || !currentAsset) return;

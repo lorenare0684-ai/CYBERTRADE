@@ -99,6 +99,20 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 26 — the strategy deck (40 strategies, visible and switchable)
+
+The arsenal already streamed into `state()["strategies"]` and
+`/api/strategies` — nothing rendered it, and nothing could stop a strategy
+from the console. The **STRATEGY DECK** panel lists all 40 members with
+live WR · attempts · adaptive weight, **ward badges** (⛓ decay quarantine,
+⌂ win-rate floor, OFF), a `N/40 live` counter, and per-member **ON/OFF
+toggles** (`{"cmd":"strategy","name":…,"enabled":…}` → `member.enabled`,
+health-noted as an operator action). Disabled members do not vote;
+describe() now carries `winrate_quarantined` / `decay_quarantined` /
+`decay_ward` per the P25 wards.
+
+Suite at **451 green** (`tests/test_phase26.py` 6 tests).
+
 ## Phase 25 — the quarantine ward (decay flags now block trades)
 
 P18 *flagged* fading strategies and alerted — and nothing isolated them.

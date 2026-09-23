@@ -533,6 +533,19 @@ class WebTerminal:
                 kind = str(body.get("kind") or "")
                 opts = body.get("opts") if isinstance(body.get("opts"), dict) else {}
                 return self.hub.start_job(kind, opts)
+            if cmd == "strategy":
+                name = str(body.get("name") or "")
+                enabled = bool(body.get("enabled", True))
+                members = getattr(engine.ensemble, "members", [])
+                member = next((m for m in members if m.name == name), None)
+                if member is None:
+                    return {"ok": False, "error": f"unknown strategy {name!r}"}
+                member.enabled = enabled
+                engine.health.note_message(
+                    f"strategy {name} {'ENABLED' if enabled else 'DISABLED'} "
+                    f"by operator"
+                )
+                return {"ok": True, "strategy": member.describe()}
             if cmd == "alerts":
                 return {"ok": True, "alerts": engine.alerts.recent(
                     int(body.get("limit") or 20))}

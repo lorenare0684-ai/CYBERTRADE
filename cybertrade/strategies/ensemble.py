@@ -213,7 +213,15 @@ class AllWeatherEnsemble(Strategy):
         data = super().describe()
         data["mode"] = self.mode
         data["vetoes"] = self.vetoes
-        data["members"] = [m.describe() for m in self.members]
+        data["members"] = [
+            {
+                **m.describe(),
+                "winrate_quarantined": self._quarantined(m),
+                "decay_quarantined": m.name in self.quarantined_votes,
+            }
+            for m in self.members
+        ]
+        data["decay_ward"] = sorted(self.quarantined_votes)
         data["weights"] = dict(self._weights)
         data["scores"] = {k: round(v, 3) for k, v in self._scores.items()}
         return data
