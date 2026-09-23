@@ -60,7 +60,29 @@ def _build_engine(cfg: AppConfig, scenario: str = ""):
         tick_interval=0.5,
         warmup_bars=400,
     )
-    engine = TradingEngine(cfg, feed=feed)
+    broker = None
+    if cfg.broker.mode == "dryrun":
+        from .execution.dryrun import DryRunBroker
+
+        venue = None
+        if cfg.broker.username:
+            try:
+                from .brokers.quotex.adapter import QuotexBroker
+                from .brokers.quotex.api import QuotexAPI
+
+                venue = QuotexBroker(QuotexAPI(), allow_orders=False)
+            except Exception as exc:  # noqa: BLE001 — dry-run degrades to paper
+                print(f"  dry-run: venue session unavailable ({exc}) — paper quotes")
+        if venue is None:
+            print("  dry-run: no venue session — catalog quotes, paper fills")
+        broker = DryRunBroker(
+            venue=venue,
+            starting_balance=cfg.risk.starting_balance,
+            default_payout=cfg.broker.payout_default,
+            latency_ms=cfg.broker.latency_ms,
+            slippage_bps=cfg.broker.slippage_bps,
+        )
+    engine = TradingEngine(cfg, feed=feed, broker=broker)
     engine.boot()
     return engine
 
@@ -112,6 +134,9 @@ def cmd_web(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    if getattr(args, "dry_run", False):
+        cfg.broker.mode = "dryrun"
+        print("  DRY RUN — venue quotes (if configured), paper fills, live orders disabled.")
     print(BANNER)
     engine = _build_engine(cfg, getattr(args, "scenario", ""))
     live = bool(args.live)
@@ -430,6 +455,8 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--live", action="store_true", help="DANGER: real order flow")
     r.add_argument("-y", "--yes", action="store_true", help="skip live confirmation")
     r.set_defaults(func=cmd_run)
+    r.add_argument("--dry-run", action="store_true",
+                   help="live venue quotes + paper fills; orders never reach the venue")
 
     b = sub.add_parser("backtest", help="run stress gauntlet")
     b.add_argument("--scenario", default="")

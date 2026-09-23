@@ -24,9 +24,10 @@ class QuotexBroker(Broker):
     its order events when they arrive).
     """
 
-    def __init__(self, api: QuotexAPI) -> None:
+    def __init__(self, api: QuotexAPI, allow_orders: bool = True) -> None:
         super().__init__()
         self.api = api
+        self.allow_orders = allow_orders  # dry-run rail: False = data only
         self._positions: Dict[str, Position] = {}
         self._fills: Dict[str, Fill] = {}
         self._by_request: Dict[str, str] = {}
@@ -64,6 +65,8 @@ class QuotexBroker(Broker):
 
     # -- trading -----------------------------------------------------------
     def submit(self, order: Order) -> Fill:
+        if not self.allow_orders:
+            raise OrderRejected("dry-run: live orders are disabled", code="DRY_RUN")
         if not self.connected:
             raise OrderRejected("not connected to Quotex", code="NO_CONN")
         price = self.last_price(order.asset)

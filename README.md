@@ -99,6 +99,26 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 9 — the dry-run harness (live quotes, paper fills, zero venue orders)
+
+The last mile of the original ask: observe what the terminal *would* do at
+a real venue — without ever placing a real order. `BrokerConfig.mode =
+"dryrun"` (long declared, now real):
+
+- **Adapter rail** — `QuotexBroker(api, allow_orders=False)` raises
+  `DRY_RUN` at `submit` before anything else touches the wire.
+- **`DryRunBroker`** (`execution/dryrun.py`) — paper fills and P&L locally;
+  hurdle quotes come from the live venue facade (clamped 0.5–0.95, catalog
+  fallback on quote failure). Exposes `.api` so engine boot streams live
+  ticks/instruments into the normal pipeline while execution stays local.
+- **CLI** — `python3 -m cybertrade run --dry-run` wires it (venue session
+  if credentials configured, clean catalog fallback otherwise).
+
+Pinned with stubs (no Quotex session here): rail blocks before any wire
+call, default-allow still fails only at the connection check, quotes flow
+from venue → gate → fill *at the venue quote*, venue `buy` counters stay
+zero. `tests/test_phase9.py` (8 tests); suite at **313 green**.
+
 ## Phase 8 — the runtime payout gate (the venue quotes the hurdle)
 
 Every previous gate computed EV against the **config default** payout (0.85)
