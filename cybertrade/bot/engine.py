@@ -34,6 +34,7 @@ from .calendar import EconomicCalendar, calendar_for_asset
 from ..risk.correlation import CorrelationMonitor
 from ..strategies.plugins import PluginRegistry
 from ..journal import TradeJournal
+from ..network.supervisor import ReconnectSupervisor
 from ..quant.calibration import CalibrationTracker
 from ..quant.binary import breakeven_winrate, edge_of
 from ..indicators.orderflow import TickFlow
@@ -119,6 +120,7 @@ class TradingEngine:
             log.exception("journal open failed — trade history will be in-memory only")
             self.journal = None
         self._journal_session = 0
+        self.supervisor: Optional[ReconnectSupervisor] = None
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -136,6 +138,11 @@ class TradingEngine:
         default_bus.subscribe(Topic.KILL, lambda e: self._enter_kill(str(e.payload)))
 
     # -- lifecycle ---------------------------------------------------------
+    def _on_connection_event(self, kind: str, payload: dict) -> None:
+        self.health.note_message(f"venue {kind}: {payload}")
+        default_bus.publish(Topic.CONNECTION, {"event": kind, **payload},
+                            source="network")
+
     def _restore_calibration(self) -> None:
         """Reload the honesty ledger so learning survives process death."""
         path = self.config.calibration_path
@@ -201,6 +208,17 @@ class TradingEngine:
                         log.info("venue warm: +%d candles into books", total)
                 except Exception:  # noqa: BLE001 — a slow venue never blocks boot
                     log.exception("venue warm failed — synthetic history stands")
+            # Phase-16: bounded reconnect supervision for the venue wire.
+            def _resubscribe(a):
+                if hasattr(a, "request_instruments"):
+                    a.request_instruments()
+
+            self.supervisor = ReconnectSupervisor(
+                api,
+                max_attempts=self.config.broker.reconnect_max,
+                resubscribe=_resubscribe,
+                on_event=self._on_connection_event,
+            )
         self.risk.reset_day(self.config.risk.starting_balance)
         for asset in self.feed.assets:
             self.detectors[asset] = RegimeDetector()
@@ -330,6 +348,8 @@ class TradingEngine:
                 summary["vetoes"] += 1
                 self.vetoes += 1
 
+        if self.supervisor is not None:
+            self.supervisor.sweep(now)
         self.watchdog.sweep(now)
         return summary
 

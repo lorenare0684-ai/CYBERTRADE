@@ -99,6 +99,25 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 16 — the wire heals (bounded reconnect supervision)
+
+`BrokerConfig.reconnect_max` sat unused since Phase 1 while a dropped venue
+socket meant silent starvation. The socket layer stays deliberately dumb
+(no hidden retry threads); recovery is now explicit, bounded, and
+observable. `network/supervisor.py::ReconnectSupervisor` polls link health
+every engine cycle:
+
+- **exponential backoff** (`base 1s → max 60s`) with a hard attempt cap
+  (`reconnect_max`, default 12) — then it **gives up loudly** instead of
+  retrying forever
+- **heals only links that were up** — a venue that never connected is not a
+  dropped wire (`standby`), and we do not hammer it
+- **resubscribes on success** (`request_instruments`) and every transition
+  lands in the health feed + `Topic.CONNECTION` bus events
+  (`retry` / `reconnect` / `giveup`)
+
+Suite at **376 green** (`tests/test_phase16.py` 5 tests).
+
 ## Phase 15 — the live wire (`mode=quotex`, safety stack intact)
 
 `BrokerConfig.mode` declared `paper | quotex | dryrun` since Phase 1 and
