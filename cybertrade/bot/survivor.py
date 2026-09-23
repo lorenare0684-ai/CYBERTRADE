@@ -147,15 +147,18 @@ class Survivor:
         self.regime_rotation = regime_rotation
         self._news_blackout_until = 0.0
         self._manual_lockdown = False
+        self.lockdown_reason: str = ""
         self._history: List[str] = []
 
     # -- manual overrides --------------------------------------------------
     def engage_lockdown(self, reason: str = "manual") -> None:
         self._manual_lockdown = True
+        self.lockdown_reason = reason
         log.critical("SURVIVOR LOCKDOWN: %s", reason)
 
     def clear_lockdown(self) -> None:
         self._manual_lockdown = False
+        self.lockdown_reason = ""
 
     def flag_news(self, now: Optional[float] = None) -> None:
         now = now if now is not None else time.time()

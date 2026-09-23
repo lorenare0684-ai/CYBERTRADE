@@ -556,9 +556,11 @@ class WebTerminal:
                 return {"ok": True, "msg": "news blackout armed"}
             if cmd == "lockdown":
                 engine.survivor.engage_lockdown("web console")
+                engine.save_operator_state()
                 return {"ok": True}
             if cmd == "unlock":
                 engine.survivor.clear_lockdown()
+                engine.save_operator_state()
                 return {"ok": True}
             if cmd == "scenario":
                 asset = str(body.get("asset") or "")
@@ -605,6 +607,7 @@ class WebTerminal:
                 if member is None:
                     return {"ok": False, "error": f"unknown strategy {name!r}"}
                 member.enabled = enabled
+                engine.save_operator_state()
                 engine.health.note_message(
                     f"strategy {name} {'ENABLED' if enabled else 'DISABLED'} "
                     f"by operator"

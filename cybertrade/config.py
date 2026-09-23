@@ -265,6 +265,7 @@ class AppConfig:
     tape_dir: str = os.path.join("data", "tapes")
     tape_enabled: bool = True
     calibration_path: str = os.path.join("data", "calibration.json")
+    operator_path: str = os.path.join("data", "operator.json")
     log_path: str = os.path.join("data", "cybertrade.log")
     config_path: str = DEFAULT_CONFIG_PATH
 
@@ -291,6 +292,7 @@ class AppConfig:
             "display": dataclasses.asdict(self.display),
             "backtest": dataclasses.asdict(self.backtest),
             "journal_path": self.journal_path,
+            "operator_path": self.operator_path,
             "log_path": self.log_path,
         }
         if not include_secrets:
@@ -309,6 +311,7 @@ class AppConfig:
                 display=DisplayConfig(**data.get("display", {})),
                 backtest=BacktestConfig(**data.get("backtest", {})),
                 journal_path=data.get("journal_path", cls.journal_path),
+                operator_path=data.get("operator_path", cls.operator_path),
                 log_path=data.get("log_path", cls.log_path),
             )
         except TypeError as exc:

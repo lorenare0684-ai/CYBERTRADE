@@ -99,6 +99,20 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 28 — the memory (operator decisions survive restart)
+
+A crisis lockdown and deck toggles were process memory: restart the
+engine and the lockdown silently lifts and disabled strategies trade
+again. `statestore` now persists both atomically (`data/operator.json`,
+gitignored, tmp+replace) and `boot()` restores them after the calibration
+ledger: `lockdown_reason` re-engaged with a `lockdown_restore` ALERT,
+disabled members stay off, health says what came back. Corrupt/missing
+files load as empty — a bad file never stops boot, and an engine that
+never hears an operator never writes one. Server lockdown/unlock/strategy
+commands and `clear_kill`'s programmatic unlock all persist.
+
+Suite at **463 green** (`tests/test_phase28.py` 7 tests).
+
 ## Phase 27 — the positions bay (open contracts, live marks, one-cut close)
 
 The ACCOUNT CORE showed an exposure *count*; nothing showed the contracts.

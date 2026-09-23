@@ -23,6 +23,7 @@ from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
 from ..risk.sessions import session_for, session_report as sessions_snapshot
 from ..risk.slippage import expected_slippage_bps
+from ..statestore import load_operator_state, save_operator_state as persist_operator_state
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
 from ..strategies.registry import build_all_weather
@@ -255,10 +256,54 @@ class TradingEngine:
         except Exception:  # noqa: BLE001
             log.exception("calibration ledger save failed")
 
+    def _restore_operator_state(self) -> None:
+        """Phase-28: operator decisions (lockdown, deck) survive restart."""
+        path = getattr(self.config, "operator_path", "") or ""
+        data = load_operator_state(path)
+        if not data:
+            return
+        if data.get("manual_lockdown"):
+            reason = str(data.get("lockdown_reason") or "restored from disk")
+            self.survivor.engage_lockdown(reason)
+            self.health.note_message(
+                f"operator state restored: LOCKDOWN ({reason})"
+            )
+            default_bus.publish(
+                Topic.ALERT,
+                {"kind": "lockdown_restore", "reason": reason},
+                source="operator-state",
+            )
+            log.info("operator state: LOCKDOWN restored (%s)", reason)
+        disabled = {str(n) for n in (data.get("disabled_strategies") or [])}
+        known = 0
+        for m in self.ensemble.members:
+            if m.name in disabled:
+                m.enabled = False
+                known += 1
+        if known:
+            self.health.note_message(
+                f"operator state restored: {known} strategy(ies) stay disabled"
+            )
+            log.info("operator state: %d strategy(ies) disabled", known)
+
+    def save_operator_state(self) -> bool:
+        """Phase-28: persist lockdown + deck toggles (never raises)."""
+        path = getattr(self.config, "operator_path", "") or ""
+        if not path:
+            return False
+        return persist_operator_state(path, {
+            "manual_lockdown": bool(self.survivor._manual_lockdown),
+            "lockdown_reason": self.survivor.lockdown_reason,
+            "disabled_strategies": sorted(
+                m.name for m in self.ensemble.members if not m.enabled
+            ),
+        })
+
     def boot(self) -> None:
         """Connect everything but keep trading disarmed."""
         self.state = EngineState.BOOT
         self._restore_calibration()
+        self._restore_operator_state()
         if self.journal is not None:
             try:
                 self._journal_session = self.journal.start_session(
@@ -372,6 +417,7 @@ class TradingEngine:
     def clear_kill(self) -> None:
         self.risk.release_kill()
         self.survivor.clear_lockdown()
+        self.save_operator_state()   # Phase-28: disk must match the unlock
         self.state = EngineState.DISARMED
         self.health.note_message("kill switch cleared — disarmed")
 
