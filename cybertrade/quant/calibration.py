@@ -341,6 +341,61 @@ class CalibrationTracker:
         blend = (len(ps) * voter_p + 2.0 * base) / (len(ps) + 2.0)
         return clamp(min(base, blend), 0.0, 1.0)
 
+    def p_win_lower(
+        self, strategy: str, confidence: float, votes=None, regime: str = "",
+        quantile: float = 0.05,
+    ) -> float:
+        """Pessimistic P(win) for SIZING — bet against the liar.
+
+        Where evidence exists, the bucket posterior becomes its Beta lower
+        quantile and the raw-confidence blend is dropped: opinions do not get
+        a vote in sizing.  A lucky thin record therefore sizes like what it
+        might really be.  Cold start (no evidence anywhere) falls back to the
+        shrunk opinion so sizer and gate stay coherent.  ``quantile<=0`` is
+        the mean path (:meth:`p_win_for`) — pessimism is optional, honesty is
+        not.
+        """
+        if quantile <= 0:
+            return self.p_win_for(strategy, confidence, votes=votes, regime=regime)
+        raw_shrunk = 0.5 + RAW_SHRINK * (clamp(confidence, 0.0, 1.0) - 0.5)
+        idx = bucket_index(confidence)
+        n_buckets = len(BUCKET_EDGES) - 1
+        with self._lock:
+            own = self._by_strategy.get(strategy, [None] * n_buckets)[idx] \
+                if strategy in self._by_strategy else None
+            glob = self._global[idx]
+            rtable = self._by_regime.get(f"{strategy}|{regime}") if regime else None
+            rb = rtable[idx] if rtable else None
+
+        def _q(bucket: ReliabilityBucket) -> float:
+            return beta_quantile(bucket.wins, bucket.total - bucket.wins, quantile)
+
+        if own is not None and own.total > 0:
+            base = _q(own)
+        elif glob.total > 0:
+            base = _q(glob)
+        else:
+            base = raw_shrunk
+        if regime and rb is not None and rb.total >= REGIME_MIN_N:
+            base = (rb.total * _q(rb) + REGIME_PRIOR_N * base) / (rb.total + REGIME_PRIOR_N)
+        base = clamp(base, 0.0, 1.0)
+        if not votes:
+            return base
+        ps: List[float] = []
+        for v in votes:
+            try:
+                strat = str(v.get("strategy", ""))
+                conf = float(v.get("confidence", 0.5))
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if strat:
+                ps.append(self.p_win_lower(strat, conf, None, regime, quantile))
+        if not ps:
+            return base
+        voter_p = sum(ps) / len(ps)
+        blend = (len(ps) * voter_p + 2.0 * base) / (len(ps) + 2.0)
+        return clamp(min(base, blend), 0.0, 1.0)
+
     def calibration_gap(self) -> float:
         """Mean |claimed - actual| across mature buckets (0 = perfectly honest)."""
         gaps: List[float] = []
@@ -381,4 +436,41 @@ class CalibrationTracker:
         return self._observed
 
 
-__all__ = ["CalibrationTracker", "ReliabilityBucket", "bucket_index", "BUCKET_EDGES"]
+def beta_quantile(
+    wins: int, losses: int, q: float, draws: int = 2000, seed: int = 1337
+) -> float:
+    """Sampled Beta(wins+2, losses+2) quantile — the pessimist's P(win).
+
+    Same epistemic stance as ``simulate_posterior``/``honesty()``: the mean
+    of the posterior is what the record claims; the lower quantile is what
+    the record deserves while it might be lying.  Deterministic under
+    ``seed`` and cached — same evidence, same pessimism.  ``q <= 0``
+    returns the posterior mean.
+    """
+    import random as _random
+
+    wins = max(0, int(wins))
+    losses = max(0, int(losses))
+    if q <= 0.0:
+        return (wins + 2.0) / (wins + losses + 4.0)
+    q = min(1.0, max(0.0, float(q)))
+    key = (wins, losses, round(q, 6), int(draws), int(seed))
+    hit = _BQ_CACHE.get(key)
+    if hit is not None:
+        return hit
+    rng = _random.Random(seed)
+    xs = sorted(
+        rng.betavariate(wins + 2.0, losses + 2.0) for _ in range(max(50, int(draws)))
+    )
+    idx = min(len(xs) - 1, max(0, int(round(q * (len(xs) - 1)))))
+    out = xs[idx]
+    if len(_BQ_CACHE) < 4096:
+        _BQ_CACHE[key] = out
+    return out
+
+
+_BQ_CACHE: Dict[tuple, float] = {}
+
+
+__all__ = ["CalibrationTracker", "ReliabilityBucket", "bucket_index", "BUCKET_EDGES",
+           "beta_quantile"]

@@ -203,7 +203,8 @@ let mcChart = null, equityChart = null;
 
 async function refreshMC() {
   try {
-    const r = await fetch("/api/montecarlo?runs=300&horizon=200");
+    const pm = ($("mc-posterior") && $("mc-posterior").checked) ? "&mode=posterior" : "";
+    const r = await fetch(`/api/montecarlo?runs=300&horizon=200${pm}`);
     const rep = await r.json();
     if (mcChart) mcChart.setData(rep.bands || [], rep.starting_balance);
     const v = $("mc-verdict");

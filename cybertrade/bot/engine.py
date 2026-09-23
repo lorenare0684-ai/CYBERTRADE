@@ -423,12 +423,22 @@ class TradingEngine:
             signal.strategy, signal.confidence, signal.meta.get("votes"),
             regime=reading.regime.value if cfg.risk.regime_cal else "",
         )
+        # Phase-12: the gate judges expected value (mean); the SIZE is what
+        # the record deserves if it is lying (pessimistic Beta quantile).
+        p_size = (
+            self.calibrator.p_win_lower(
+                signal.strategy, signal.confidence, signal.meta.get("votes"),
+                regime=reading.regime.value if cfg.risk.regime_cal else "",
+                quantile=cfg.risk.kelly_quantile,
+            )
+            if cfg.risk.kelly_quantile > 0 else p_win
+        )
         edge = edge_of(p_win, payout)
         sizing = self.risk.size_stake(
             balance=balance,
             payout=payout,
             confidence=signal.confidence,
-            win_rate=p_win,
+            win_rate=p_size,
             drawdown=self.risk.total_drawdown(),
             regime_scale=decision.stake_scale,
         )

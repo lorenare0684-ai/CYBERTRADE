@@ -49,6 +49,7 @@ class RiskConfig:
     vol_target_enabled: bool = True
     vol_target_annual: float = 0.15
     kelly_fraction: float = 0.25          # fractional Kelly ceiling
+    kelly_quantile: float = 0.05          # Kelly sizes on this Beta quantile (0 = mean)
     crisis_stake_scale: float = 0.5       # cut size in crisis regime
     allow_live: bool = False              # must be flipped consciously
 
@@ -71,6 +72,8 @@ class RiskConfig:
             raise ConfigError("martingale_cap must be >= 1.0")
         if not 0.0 < self.kelly_fraction <= 1.0:
             raise ConfigError("kelly_fraction must be in (0, 1]")
+        if not 0.0 <= self.kelly_quantile < 0.5:
+            raise ConfigError("kelly_quantile must be in [0, 0.5)")
         if self.edge_gate not in {"off", "scale", "hard"}:
             raise ConfigError("edge_gate must be off | scale | hard")
         if not -1.0 < self.min_edge < 1.0:

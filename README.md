@@ -99,6 +99,33 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 12 — bet against the liar (posterior-pessimistic sizing)
+
+Kelly on a lucky thin record is how accounts die politely. Since Phase 6 the
+gate used the blended posterior *mean* — which a 5–3 record flatters to ~0.63.
+`CalibrationTracker.p_win_lower()` now feeds the **sizer** the Beta lower
+quantile of the evidence (`RiskConfig.kelly_quantile=0.05`, sampled via
+`beta_quantile()` — same epistemic stance as the P10 lab and P11 ledger):
+
+| Record | mean (gate) | p05 (sizing) | Sizing |
+|---|---|---|---|
+| 5W/3L | ~0.63 → Kelly unlocks | ~0.35 | **fixed fraction** — thin records don't Kelly |
+| 80W/20L | ~0.78 | ~0.72 | Kelly at the pessimist's price |
+| cold start | shrunk opinion | same | unchanged (opinions can't be quantiled) |
+
+The design split is deliberate: **the gate judges expected value (mean), the
+size is what the record deserves while it might be lying (quantile)**. Raw
+confidence gets no vote in sizing — opinions never raise the estimate, and
+the `min(blob, voter-blend)` rule survives so discredited voters can only
+lower it. `kelly_quantile=0.0` restores the mean path. Live engine and
+backtester both size this way (gauntlets stay honest), `vol_target_enabled`
+still preempts Kelly as before.
+
+Bonus: the MC LAB panel gains a **posterior mode** toggle (hits
+`/api/montecarlo?mode=posterior` on the existing display).
+
+Suite at **347 green** (`tests/test_phase12.py` 12 tests).
+
 ## Phase 11 — the calibrator that survives its process (honesty ledger)
 
 Learning that evaporates on restart is a demo, not a survivor. The calibration

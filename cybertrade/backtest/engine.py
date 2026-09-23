@@ -282,11 +282,20 @@ class Backtester:
                 signal.strategy, signal.confidence, signal.meta.get("votes"),
                 regime=reading.regime.value if cfg.risk.regime_cal else "",
             )
+            # Phase-12: size against the liar (mirror the live engine).
+            p_size = (
+                self.calibrator.p_win_lower(
+                    signal.strategy, signal.confidence, signal.meta.get("votes"),
+                    regime=reading.regime.value if cfg.risk.regime_cal else "",
+                    quantile=cfg.risk.kelly_quantile,
+                )
+                if cfg.risk.kelly_quantile > 0 else p_win
+            )
             sizing = risk.size_stake(
                 balance=balance,
                 payout=bt.payout,
                 confidence=signal.confidence,
-                win_rate=p_win,
+                win_rate=p_size,
                 drawdown=(peak - balance) / peak if peak > 0 else 0.0,
                 regime_scale=stake_scale,
             )
