@@ -51,6 +51,11 @@ class EngineHub:
         self.config = config
         self.started = timex.now()
         self._log_lines: List[dict] = []
+        # Phase-23: score-bay jobs (one at a time) + bus mute while a temp
+        # gauntlet engine runs so its ticks never flicker the live chart.
+        self._job: Dict[str, Any] = {"state": "idle"}
+        self._job_lock = threading.Lock()
+        self._mute = threading.Event()
         default_bus.subscribe(Topic.LOG, self._on_log)
         for topic in (Topic.TICK, Topic.SIGNAL, Topic.SETTLE, Topic.REGIME,
                       Topic.ENGINE_STATE, Topic.RISK_REJECT, Topic.KILL,
@@ -60,6 +65,8 @@ class EngineHub:
 
     def _make_forwarder(self, name: str):
         def _forward(event) -> None:
+            if self._mute.is_set():  # temp gauntlet engine — do not cross-wire
+                return
             payload = event.payload
             if hasattr(payload, "to_dict"):
                 payload = payload.to_dict()
@@ -76,6 +83,8 @@ class EngineHub:
         return _forward
 
     def _on_log(self, event) -> None:
+        if self._mute.is_set():
+            return
         rec = dict(event.payload)
         self._log_lines.append(rec)
         if len(self._log_lines) > 400:
@@ -141,7 +150,91 @@ class EngineHub:
             "tape": self.engine.tape.stats(),
             "drill": self.engine.drill_report(),
             "session": self.engine.session_report(),
+            "job": self.job_report(),
         }
+
+    def job_report(self) -> Dict[str, Any]:
+        """Phase-23: async score-bay job status (idle/running/done/error)."""
+        with self._job_lock:
+            return dict(self._job)
+
+    def start_job(self, kind: str, opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Launch a backtest/gauntlet off the request thread (one at a time)."""
+        if kind not in ("backtest", "gauntlet"):
+            return {"ok": False, "error": f"unknown job {kind!r}"}
+        opts = dict(opts or {})
+        with self._job_lock:
+            if self._job.get("state") == "running":
+                return {"ok": False, "error": "a job is already running",
+                        "job": dict(self._job)}
+            self._job = {"state": "running", "kind": kind,
+                         "started": timex.now(), "opts": opts}
+        threading.Thread(target=self._run_job, args=(kind, opts),
+                         daemon=True, name=f"score-{kind}").start()
+        return {"ok": True, "job": dict(self._job)}
+
+    def _run_job(self, kind: str, opts: Dict[str, Any]) -> None:
+        """Worker: the live engine is never touched — gauntlet gets a temp one."""
+        import os
+        import tempfile
+
+        from ..config import AppConfig
+
+        started = timex.now()
+        try:
+            if kind == "backtest":
+                from ..backtest import Backtester, matrix_card, matrix_table
+
+                cfg = self.engine.config or AppConfig()
+                bt = Backtester(cfg)
+                results = bt.run_matrix(
+                    scenarios=list(opts["scenarios"]) if opts.get("scenarios") else None,
+                    bars=int(opts.get("bars") or 200),
+                    seeds=tuple(opts.get("seeds") or (1, 7, 42)),
+                )
+                payload = {
+                    "table": matrix_table(results),
+                    "card": matrix_card(results, payout=cfg.broker.payout_default),
+                    "runs": len(results),
+                    "alive": sum(1 for r in results if r.survived),
+                }
+            else:  # gauntlet — isolated temp engine, live stack untouched
+                from ..bot.drills import CRISIS_SCENARIOS, run_gauntlet
+                from ..bot.engine import TradingEngine
+                from ..data.feed import SyntheticFeed
+                from ..execution.paper import PaperBroker
+
+                names = tuple(opts.get("scenarios") or CRISIS_SCENARIOS)
+                cfg = AppConfig()
+                self._mute.set()  # its bus traffic must not reach the HUD
+                try:
+                    with tempfile.TemporaryDirectory() as tmp:
+                        cfg.journal_path = os.path.join(tmp, "score-journal.db")
+                        cfg.calibration_path = os.path.join(tmp, "score-cal.json")
+                        eng = TradingEngine(
+                            cfg, feed=SyntheticFeed(),
+                            broker=PaperBroker(starting_balance=1000.0),
+                        )
+                        eng.boot()
+                        try:
+                            rows = run_gauntlet(
+                                eng, scenarios=names,
+                                ticks=int(opts.get("ticks") or 150),
+                                seed=int(opts.get("seed") or 1337),
+                            )
+                        finally:
+                            eng.shutdown()
+                finally:
+                    self._mute.clear()
+                payload = {"rows": rows, "runs": len(rows)}
+            with self._job_lock:
+                self._job = {"state": "done", "kind": kind, "started": started,
+                             "finished": timex.now(), "result": payload}
+        except Exception as exc:  # noqa: BLE001 — surface, never crash the hub
+            self._mute.clear()
+            with self._job_lock:
+                self._job = {"state": "error", "kind": kind, "started": started,
+                             "finished": timex.now(), "error": str(exc)}
 
     def worst_payout(self) -> float:
         """The binding hurdle: the lowest venue quote across the universe."""
@@ -435,6 +528,10 @@ class WebTerminal:
 
                 default_bus.publish(_T.SCENARIO, {"drill": scenario}, source="web")
                 return {"ok": True, "drill": engine.drill_report()}
+            if cmd == "run":
+                kind = str(body.get("kind") or "")
+                opts = body.get("opts") if isinstance(body.get("opts"), dict) else {}
+                return self.hub.start_job(kind, opts)
             if cmd == "alerts":
                 return {"ok": True, "alerts": engine.alerts.recent(
                     int(body.get("limit") or 20))}

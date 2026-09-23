@@ -97,6 +97,38 @@ function render(state) {
       : "drill idle";
     dr.className = d ? "mini bad" : "mini";
   }
+  // score bay (P23)
+  const job = snap.job;
+  const jobEl = $("job");
+  if (jobEl && job) {
+    jobEl.textContent = job.state === "running"
+      ? `JOB ${String(job.kind || "?").toUpperCase()} RUNNING…`
+      : `JOB ${String(job.state || "idle").toUpperCase()}`;
+    jobEl.className = (job.state === "running" || job.state === "error") ? "mini bad" : "mini";
+  }
+  const sc = $("scorecard");
+  if (sc && job && (job.state === "done" || job.state === "error")) {
+    const key = `${job.kind}:${job.state}:${job.finished || job.started}`;
+    if (sc.dataset.key !== key) {
+      sc.dataset.key = key;
+      if (job.state === "error") {
+        sc.textContent = "JOB ERROR: " + (job.error || "unknown");
+      } else {
+        const r = job.result || {};
+        const rows = (r.rows || []).map(x =>
+          `${String(x.name).padEnd(20)} ${String(x.posture_min).padEnd(14)} `
+          + `salv ${x.salvaged} pnl ${(Number(x.pnl) || 0).toFixed(2)}  ${x.verdict}`
+        ).join("\n");
+        sc.textContent = [
+          r.table || "",
+          rows,
+          r.card || "",
+          r.runs ? `runs ${r.runs}${r.alive != null ? ` · alive ${r.alive}` : ""}` : "",
+        ].filter(Boolean).join("\n\n");
+      }
+      sc.style.display = "block";
+    }
+  }
 
   // meters
   const ddMax = (limits.max_total_drawdown_frac || 0.2) * 100;
@@ -345,6 +377,11 @@ for (const [id, scenario] of Object.entries(DRILLS)) {
   el && (el.onclick = () => cmd({ cmd: "drill", scenario }));
 }
 $("btn-drill-stop") && ($("btn-drill-stop").onclick = () => cmd({ cmd: "drill", scenario: "stop" }));
+const RUNS = { "btn-run-bt": "backtest", "btn-run-gauntlet": "gauntlet" };
+for (const [id, kind] of Object.entries(RUNS)) {
+  const el = $(id);
+  el && (el.onclick = () => cmd({ cmd: "run", kind }));
+}
 $("btn-scenario") && ($("btn-scenario").onclick = async () => {
   const sel = $("scenario-select");
   if (!sel || !sel.value || !currentAsset) return;

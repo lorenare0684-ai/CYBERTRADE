@@ -99,6 +99,20 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 23 — the score bay (backtests & gauntlets from the cockpit)
+
+`RUN BACKTEST` and `RUN GAUNTLET` buttons in the terminal launch **score
+jobs** on a worker thread — one at a time, status in `state()["job"]`,
+results rendered into a console-styled `#scorecard` panel (stress-matrix
+table + posterior card, or the five-storm survival table). The live engine
+is never touched: gauntlets boot a **temp engine** (own journal/calibration
+under `/tmp`) and the hub **mutes bus forwarding** while it runs, so the
+temp engine's ticks cannot flicker the live chart. Web defaults are sized
+for interactivity (backtest `bars=200`, gauntlet `ticks=150` ≈ 11s);
+tests use tiny overrides.
+
+Suite at **428 green** (`tests/test_phase23.py` 6 tests).
+
 ## Phase 22 — the session clock (when you trade is a market condition)
 
 The clock on the wall is part of the market. `risk.sessions` classifies
