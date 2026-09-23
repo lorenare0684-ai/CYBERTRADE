@@ -175,6 +175,17 @@ class CalibrationTracker:
             total += b.total
         return wins, total - wins
 
+    def strategy_evidence(self):
+        """{strategy: (wins, losses)} across each own table — the raw
+        record behind the honesty ledger (matrix pooling, report cards)."""
+        with self._lock:
+            out: Dict[str, tuple] = {}
+            for name, table in self._by_strategy.items():
+                w = sum(b.wins for b in table)
+                t = sum(b.total for b in table)
+                out[name] = (w, t - w)
+            return out
+
     # -- persistence -------------------------------------------------------
     def to_dict(self) -> Dict[str, Any]:
         with self._lock:

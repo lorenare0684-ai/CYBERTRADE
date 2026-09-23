@@ -99,6 +99,26 @@ Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
 ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
 
+## Phase 17 — the report card (gauntlet × posterior)
+
+A stress run is not a track record — pooled WR ≈ 50% everywhere in the
+gauntlets, and any single row can be luck wearing a strategy's clothes.
+Every `backtest` now ends by asking the P10 question of its own record:
+`matrix_card` pools per-strategy evidence across **every** scenario×seed run
+(`BacktestResult.strategy_evidence`) and reports each row's posterior mass
+below breakeven — **LIAR past 50%** — plus the pooled honesty of the whole
+harness (`BacktestReport.evidence` + `p_edge_negative` per run).
+
+```
+  ── report card · pooled 614W/601L · P(edge<0) 53.8% · breakeven 0.5405 @ payout 0.85 ──
+  strategy                        W    L   hit%  P(edge<0)  flag
+  bollinger_fade                 38   62  38.0%     99.7%  LIAR
+  ...
+```
+
+The table sorts worst-first; `--out` JSON carries `strategy_evidence` per run
+for offline pooling. Suite at **382 green** (`tests/test_phase17.py` 6 tests).
+
 ## Phase 16 — the wire heals (bounded reconnect supervision)
 
 `BrokerConfig.reconnect_max` sat unused since Phase 1 while a dropped venue

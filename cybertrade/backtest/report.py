@@ -36,6 +36,8 @@ class BacktestReport:
     ulcer_index: float
     recovery_factor: float
     survival_score: float
+    evidence: List[int] = field(default_factory=lambda: [0, 0])
+    p_edge_negative: float = 0.0
     notes: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -66,6 +68,8 @@ class BacktestReport:
             "ulcer_index": round(self.ulcer_index, 3),
             "recovery_factor": round(self.recovery_factor, 3),
             "survival_score": round(self.survival_score, 3),
+            "evidence": list(self.evidence),
+            "p_edge_negative": round(self.p_edge_negative, 4),
             "notes": self.notes,
         }
 
@@ -169,6 +173,63 @@ def build_report(
         survival_score=max(0.0, min(1.0, score)),
         notes=notes,
     )
+
+
+def matrix_card(results: Sequence[BacktestResultLike], payout: float = 0.85) -> str:
+    """Gauntlet×posterior report card — which rows earned their numbers?
+
+    Pools per-strategy evidence across every run and asks the P10 question
+    of each record: posterior mass below breakeven.  LIAR fires past 50% —
+    a stress record is not a track record until this says otherwise.
+    """
+    from ..quant.calibration import CalibrationTracker
+
+    merged: Dict[str, List[int]] = {}
+    for r in results:
+        for name, (w, l) in (getattr(r, "strategy_evidence", {}) or {}).items():
+            cur = merged.setdefault(str(name), [0, 0])
+            cur[0] += int(w)
+            cur[1] += int(l)
+    if not merged:
+        return "  report card: no evidence collected"
+    t = CalibrationTracker()
+    t.update_from({
+        "observed": sum(w + l for w, l in merged.values()),
+        "global": [],
+        "by_strategy": {
+            name: [{"wins": w, "total": w + l}] + [{"wins": 0, "total": 0}] * 9
+            for name, (w, l) in merged.items()
+        },
+        "by_regime": {},
+    })
+    rows = t.honesty(payout, runs=2000)
+    tw = sum(w for w, _ in merged.values())
+    tl = sum(l for _, l in merged.values())
+    pooled = 0.0
+    if tw + tl:
+        from ..risk.montecarlo import simulate_posterior
+
+        pooled = simulate_posterior(
+            tw, tl, payout=payout, runs=200, horizon=30
+        ).p_edge_negative
+    breakeven = 1.0 / (1.0 + payout)
+    liars = sum(1 for r in rows if r["liar"])
+    lines = [
+        f"  ── report card · pooled {tw}W/{tl}L · P(edge<0) {pooled * 100:.1f}%"
+        f" · breakeven {breakeven:.4f} @ payout {payout:.2f} ──",
+        f"  {'strategy':<28} {'W':>4} {'L':>4} {'hit%':>6} {'P(edge<0)':>9}  flag",
+    ]
+    for r in rows[:25]:
+        flag = "LIAR" if r["liar"] else ""
+        lines.append(
+            f"  {r['strategy']:<28} {r['wins']:>4} {r['losses']:>4} "
+            f"{r['hit_rate'] * 100:>5.1f}% {r['p_edge_negative'] * 100:>8.1f}%  {flag}"
+        )
+    lines.append(
+        f"  {len(rows)} strategies · {liars} flagged · liar = "
+        f"P(true edge < breakeven) > 50%"
+    )
+    return "\n".join(lines)
 
 
 def matrix_table(results: Sequence[BacktestResultLike]) -> str:

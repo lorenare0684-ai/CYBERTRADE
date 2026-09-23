@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from .engine import Backtester, BacktestResult, SimTrade
 from .optimize import OptimizationResult, Trial, WalkForwardOptimizer
-from .report import BacktestReport, build_report, matrix_table
+from .report import BacktestReport, build_report, matrix_card, matrix_table
 from .scenarios import GAUNTLET, describe_all, generate_gauntlet, scenario_names
 
 __all__ = [
@@ -13,6 +13,7 @@ __all__ = [
     "SimTrade",
     "BacktestReport",
     "build_report",
+    "matrix_card",
     "matrix_table",
     "GAUNTLET",
     "scenario_names",

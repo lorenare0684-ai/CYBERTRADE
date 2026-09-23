@@ -60,6 +60,7 @@ class BacktestResult:
     regime_path: List[str] = field(default_factory=list)
     events: List[str] = field(default_factory=list)
     edge_rejects: int = 0
+    strategy_evidence: Dict[str, Any] = field(default_factory=dict)
     config_snapshot: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -73,6 +74,7 @@ class BacktestResult:
             "seed": self.seed,
             "survived": self.survived,
             "edge_rejects": self.edge_rejects,
+            "strategy_evidence": {k: list(v) for k, v in self.strategy_evidence.items()},
             **self.report.to_dict(),
         }
 
@@ -378,6 +380,16 @@ class Backtester:
             signals_total=signals_total,
             vetoes=vetoes,
         )
+        # Phase-17: the gauntlet asks the P10 question of its own record.
+        ev_w, ev_l = self.calibrator.evidence()
+        report.evidence = [ev_w, ev_l]
+        if ev_w + ev_l >= 5:
+            from ..risk.montecarlo import simulate_posterior
+
+            report.p_edge_negative = simulate_posterior(
+                ev_w, ev_l, payout=bt.payout, runs=200, horizon=30,
+                starting_balance=bt.starting_balance,
+            ).p_edge_negative
         return BacktestResult(
             scenario=scenario,
             seed=seed,
@@ -387,6 +399,7 @@ class Backtester:
             regime_path=regime_path,
             events=events,
             edge_rejects=edge_rejects,
+            strategy_evidence=self.calibrator.strategy_evidence(),
         )
 
     def run_matrix(

@@ -308,7 +308,7 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 def cmd_backtest(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
-    from .backtest import Backtester, matrix_table
+    from .backtest import Backtester, matrix_card, matrix_table
 
     bt = Backtester(cfg)
     scenarios = [args.scenario] if args.scenario else None
@@ -316,6 +316,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     print("  … running all-weather gauntlet (every market condition)\n")
     results = bt.run_matrix(scenarios=scenarios, bars=args.bars, seeds=(1, 7, 42))
     print(matrix_table(results))
+    print(matrix_card(results, payout=cfg.broker.payout_default))
     alive = sum(1 for r in results if r.survived)
     print(f"\n  survival: {alive}/{len(results)} scenario-seed pairs ended alive")
     avg = sum(r.report.survival_score for r in results) / max(1, len(results))
