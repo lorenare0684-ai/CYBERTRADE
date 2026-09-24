@@ -355,6 +355,8 @@ class WebTerminal:
                 for k, v in (extra or {}).items():
                     self.send_header(k, v)
                 self.end_headers()
+                if getattr(self, "_head_only", False):
+                    return
                 try:
                     self.wfile.write(body)
                 except (BrokenPipeError, ConnectionResetError):
@@ -362,6 +364,20 @@ class WebTerminal:
 
             def _json(self, code: int, data: Any) -> None:
                 self._send(code, dumps(data).encode("utf-8"))
+
+            def do_HEAD(self) -> None:  # noqa: N802
+                """Same routing as GET, headers only, no body.
+
+                Without this the base handler answers 501, and plenty of
+                legitimate clients lead with HEAD — health checks, uptime
+                probes, some browsers prefetching. A 501 on / looks like the
+                server is broken when it is only the method that is.
+                """
+                self._head_only = True
+                try:
+                    self.do_GET()
+                finally:
+                    self._head_only = False
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)

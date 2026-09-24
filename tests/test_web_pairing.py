@@ -26,6 +26,7 @@ import urllib.error
 import urllib.request
 
 from cybertrade.config import AppConfig
+from cybertrade.web.server import WebTerminal
 from cybertrade.exceptions import ConfigError
 
 from tests.venue_stubs import VenueFeed, VenueStub
@@ -450,6 +451,49 @@ class TestReseatSession(unittest.TestCase):
         del eng.feed.api
         with self.assertRaises(ConfigError):
             self.cli._reseat_session(eng, "QX.new")
+
+
+class TestHeadRequests(unittest.TestCase):
+    """A HEAD must not answer 501: probes and browsers lead with it."""
+
+    def setUp(self):
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cfg = _cfg(self.tmp.name)
+        hub = EngineHub(_StubEngine(), cfg)
+        self.web = WebTerminal(hub, host="127.0.0.1", port=next(_PORT))
+        self.web.start()
+
+    def tearDown(self):
+        self.web.stop()
+
+    def _head(self, path):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.web.port}{path}", method="HEAD")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status, r.headers.get("Content-Type"), r.read()
+
+    def test_static_head_reports_its_type_and_no_body(self):
+        for path, want in (("/", "text/html"),
+                           ("/static/js/app.js", "text/javascript"),
+                           ("/static/css/cyber.css", "text/css")):
+            status, ctype, body = self._head(path)
+            self.assertEqual(status, 200, path)
+            self.assertIn(want, ctype or "")
+            self.assertIn("charset=utf-8", ctype or "")
+            self.assertEqual(body, b"", path)      # headers only
+
+    def test_api_head_works_too(self):
+        status, _ctype, body = self._head("/api/state")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"")
+
+    def test_an_unknown_path_still_404s(self):
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            self._head("/nope")
+        self.assertEqual(ctx.exception.code, 404)
 
 
 if __name__ == "__main__":
