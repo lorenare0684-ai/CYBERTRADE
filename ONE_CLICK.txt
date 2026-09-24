@@ -1,0 +1,69 @@
+CYBERTRADE — ONE CLICK START (Windows, Miniconda, no Anaconda Prompt)
+======================================================================
+You said: "i don't wanna open it with anaconda prompt just a click"
+This is the fix — just double-click.
+
+ONE-CLICK FILES:
+----------------
+CYBERTRADE.bat      -> Double-click = auto-finds Miniconda, creates env cybertrade if needed, runs web HUD at http://localhost:8899
+CYBERTRADE_GUI.bat  -> Double-click = same but runs desktop GUI (needs tk)
+click_to_run.bat    -> Same as CYBERTRADE.bat (ultra simple name)
+
+HOW IT WORKS (no Anaconda Prompt needed):
+------------------------------------------
+1. Searches for Miniconda in common locations even if conda not in PATH:
+   %USERPROFILE%\miniconda3\Scripts\conda.exe
+   %USERPROFILE%\Miniconda3\Scripts\conda.exe
+   %LOCALAPPDATA%\miniconda3\...
+   C:\ProgramData\miniconda3\...
+   Also checks PATH as fallback
+
+2. If env cybertrade doesn't exist, creates it:
+   conda env create -f environment.yml
+   (first time takes 1-2 minutes)
+
+3. Activates env WITHOUT conda activate (which needs Anaconda Prompt):
+   Sets PATH directly to:
+     miniconda3\envs\cybertrade
+     miniconda3\envs\cybertrade\Scripts
+     miniconda3\envs\cybertrade\Library\bin
+
+4. Runs:
+   python -m cybertrade doctor
+   python -m cybertrade web --port 8899 --auto
+   (opens browser automatically)
+
+REQUIREMENTS (one time):
+-------------------------
+- Install Miniconda (normal):
+  https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe
+  Run installer, choose "Just Me", keep defaults.
+  You do NOT need to check "Add to PATH" — this one-click finds it anyway.
+
+AFTER THAT:
+-----------
+- Just double-click CYBERTRADE.bat any time
+- No Anaconda Prompt, no CMD typing, just click
+
+TROUBLESHOOTING:
+----------------
+- If double-click does nothing or flashes and closes:
+  Right-click CYBERTRADE.bat -> Edit -> add "pause" at end (already has pause)
+  Or run from CMD to see error: open CMD, cd to folder, run CYBERTRADE.bat
+
+- If says "Miniconda NOT found":
+  Install Miniconda from link above, then double-click again
+
+- If env creation fails:
+  Delete env and retry:
+    In Anaconda Prompt: conda env remove -n cybertrade
+    Then double-click CYBERTRADE.bat again
+  Or: conda clean --all
+
+- If browser doesn't open:
+  Manually open http://localhost:8899 in Chrome
+
+- If you want GUI not web:
+  Double-click CYBERTRADE_GUI.bat instead
+
+THAT'S IT — ONE CLICK.

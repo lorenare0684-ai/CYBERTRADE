@@ -1,23 +1,43 @@
-# CYBERTRADE — Conda Env `cybertrade` (Normal Miniconda Only)
+# CYBERTRADE — Conda Env `cybertrade` (Normal Miniconda Only) — ONE CLICK
 
-This project uses **normal Miniconda** — no Miniforge, no mamba, no micromamba. Just official Miniconda from Anaconda.
+## ONE-CLICK START (Windows) — Just double-click, no Anaconda Prompt needed
 
-## Windows Quick Start (Miniconda Only)
+**You said you don't want Anaconda Prompt — just a click. Here it is:**
+
+1. Install Miniconda **once** (if not installed):
+   - Download: **https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe**
+   - Run installer → **Just Me** → keep defaults (no need to check Add to PATH)
+
+2. **Double-click `CYBERTRADE.bat`** in Explorer — that's it.
+
+What it does automatically (no typing):
+- Searches Miniconda in 9 common locations even if `conda` not in PATH
+- If env `cybertrade` doesn't exist, creates it from `environment.yml` (first time 1-2 min)
+- Activates env by setting PATH directly (no `conda activate` needed, so no Anaconda Prompt needed)
+- Runs `python -m cybertrade doctor` (10/10 checks)
+- Runs `python -m cybertrade web --port 8899 --auto` and opens browser at http://localhost:8899
+
+Other one-click files:
+- `CYBERTRADE_GUI.bat` → same but launches desktop GUI (`run_gui.py`)
+- `click_to_run.bat` → ultra simple name, same as `CYBERTRADE.bat`
+
+**If double-click flashes and closes:** Right-click → Edit, see error, or open CMD and run `CYBERTRADE.bat` to see log. If says "Miniconda NOT found", install Miniconda from link above.
+
+---
+
+## Normal Miniconda Setup (if you prefer typing)
 
 ### 1. Install Miniconda (Windows)
 
 Official docs: **https://docs.anaconda.com/miniconda/install/**
 
 1. Download: **https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe**
-2. Run installer:
-   - **Install for Just Me** (goes to `%USERPROFILE%\miniconda3`, no admin needed)
-   - Leave "Add Miniconda3 to PATH" **unchecked** (recommended) and use **Anaconda Prompt** from Start Menu
-3. After install, open **Anaconda Prompt** from Start Menu (search "Anaconda Prompt")
+2. Run installer → **Just Me** (`%USERPROFILE%\miniconda3`)
+3. Open **Anaconda Prompt** from Start Menu (search "Anaconda Prompt")
 
-Verify in Anaconda Prompt:
+Verify:
 ```bat
 conda --version
-REM Should show: conda 23.x.x or 24.x.x
 ```
 
 ### 2. Get CYBERTRADE
@@ -29,173 +49,73 @@ git clone https://github.com/lorenare0684-ai/CYBERTRADE.git
 cd CYBERTRADE
 ```
 
-### 3. Create the env (Miniconda only)
+### 3. Create env
 
-**Option A — Anaconda Prompt (RECOMMENDED, always works):**
 ```bat
-cd /d C:\path\to\CYBERTRADE
+REM In Anaconda Prompt (recommended)
 conda env create -f environment.yml
+
+REM Or double-click setup_conda.bat (now auto-searches Miniconda even if not in PATH)
 ```
 
-**Option B — Double-click (fixed, auto-searches Miniconda):**
-- In Explorer, double-click `setup_conda.bat`
-- New version auto-searches Miniconda in:
-  `%USERPROFILE%\miniconda3\Scripts\conda.exe`
-  `%USERPROFILE%\Miniconda3\Scripts\conda.exe`
-  etc., even if conda not in PATH
+### 4. Activate & Verify
 
-**Option C — PowerShell (Miniconda only):**
-```powershell
-cd C:\path\to\CYBERTRADE
-.\setup_conda.ps1
-# If blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
-
-What `environment.yml` does (Miniconda):
-- Creates env `cybertrade` with Python 3.11
-- Installs `tk` (tkinter for desktop GUI)
-- Installs `pytest>=7`
-- Installs CYBERTRADE in editable mode (`pip -e .[dev]`) — runtime is 100% stdlib
-
-### 4. Activate & Verify (Windows, Miniconda)
-
-**In Anaconda Prompt:**
 ```bat
 conda activate cybertrade
-
 python -m cybertrade doctor
-python -m cybertrade strategies
-python -m cybertrade scenarios
-python -m cybertrade backtest --bars 200
 python -m unittest discover -s tests
 ```
 
-**Browser HUD (recommended on Windows):**
+### 5. Run
+
 ```bat
 run_web.bat
 REM or: python -m cybertrade web --port 8899 --auto
-REM Opens http://localhost:8899
-```
 
-**Desktop HUD:**
-```bat
 run_gui.bat
 REM or: python run_gui.py
 ```
 
 ## FIX FOR: [!] conda not found in PATH
 
-If you see this error when double-clicking `setup_conda.bat` in normal CMD:
+If you see this in normal CMD when running `setup_conda.bat`:
 ```
 [!] conda not found in PATH
-    Install Miniconda for Windows:
-    https://docs.anaconda.com/miniconda/install/
 ```
 
-**This is NORMAL Miniconda behavior** — Miniconda does NOT add itself to PATH in normal CMD by default. Anaconda Prompt has conda in PATH automatically.
+**This is NORMAL Miniconda** — it doesn't add to PATH in normal CMD. Anaconda Prompt has it.
 
-### FIX 1 (Recommended, 10 seconds):
-1. Press Windows key, type **"Anaconda Prompt"**, open it
-2. In Anaconda Prompt:
-```bat
-cd /d C:\path\to\CYBERTRADE
-conda env create -f environment.yml
-conda activate cybertrade
-python -m cybertrade doctor
-```
+**FIX 1 (10 sec, recommended):** Use Anaconda Prompt from Start Menu
 
-### FIX 2: Use fixed setup_conda.bat (now auto-searches):
-- New `setup_conda.bat` searches common Miniconda locations even if not in PATH:
-  - `%USERPROFILE%\miniconda3\Scripts\conda.exe`
-  - `%USERPROFILE%\Miniconda3\Scripts\conda.exe`
-  - `%LOCALAPPDATA%\miniconda3\Scripts\conda.exe`
-  - `C:\ProgramData\miniconda3\Scripts\conda.exe`
-  - `%USERPROFILE%\miniconda3\condabin\conda.bat`
-- Just double-click `setup_conda.bat` again — it should now find conda
+**FIX 2:** Use new **one-click `CYBERTRADE.bat`** — it auto-searches Miniconda in common locations even if not in PATH, no Anaconda Prompt needed
 
-### FIX 3: Run fix_conda_path.bat
-- Double-click `fix_conda_path.bat`
-- It finds Miniconda and adds to PATH for current session
-- Then run `setup_conda.bat`
+**FIX 3:** Double-click `fix_conda_path.bat` — finds Miniconda and adds to PATH for current session
 
-### FIX 4: Init conda for future CMD/PowerShell
-- Open **Anaconda Prompt**
-- Run:
+**FIX 4:** In Anaconda Prompt:
 ```bat
 conda init cmd.exe
 conda init powershell
 ```
-- Close and reopen CMD/PowerShell — `conda` will now work there too
-
-### FIX 5: Manually add to PATH
-Add these 3 folders to System Environment Variables → PATH:
-```
-C:\Users\YourName\miniconda3
-C:\Users\YourName\miniconda3\Scripts
-C:\Users\YourName\miniconda3\condabin
-```
-Then restart CMD.
-
-## Daily Usage (Windows, Miniconda)
-
-```bat
-REM Open Anaconda Prompt
-conda activate cybertrade
-
-REM Paper trading (default, safe)
-python -m cybertrade run
-
-REM Bounded crash recovery — PAPER ONLY
-python -m cybertrade supervise --max-restarts 5 --restart-window 600
-
-REM All-weather gauntlet
-python -m cybertrade backtest --bars 600
-
-REM Journal analytics
-python -m cybertrade journal
-
-REM Deactivate
-conda deactivate
-
-REM Remove env
-conda env remove -n cybertrade
-```
-
-## Linux / macOS (Miniconda Only)
-
-```bash
-# Install Miniconda: https://docs.anaconda.com/miniconda/install/
-curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh
-bash miniconda.sh -b -p $HOME/miniconda3
-source $HOME/miniconda3/bin/activate
-
-conda env create -f environment.yml
-conda activate cybertrade
-python -m cybertrade doctor
-```
-
-Or:
-```bash
-chmod +x setup_conda.sh
-./setup_conda.sh
-```
+Restart CMD/PowerShell — conda will work there too
 
 ## Files (Miniconda Only)
 
 | File | Purpose |
 |------|---------|
-| `environment.yml` | Main env — `name: cybertrade`, `python=3.11`, `tk`, `pytest`, `pip -e .[dev]` (Miniconda) |
-| `environment-dev.yml` | Dev env with `black`, `ruff`, `mypy`, `pytest-cov` |
-| `setup_conda.bat` | Windows CMD — **fixed** to auto-search Miniconda even if not in PATH |
-| `setup_conda.ps1` | PowerShell — fixed to auto-search Miniconda |
-| `setup_conda.sh` | Linux/macOS/Git Bash — Miniconda only |
-| `fix_conda_path.bat` | **NEW** — Fixes "conda not found" by finding Miniconda and adding to PATH |
-| `activate_cybertrade.bat` | Windows activation — checks Miniconda paths only |
-| `activate_cybertrade.ps1` | PowerShell activation — Miniconda only |
-| `run_gui.bat` / `run_web.bat` | Launch GUIs (Miniconda env) |
-| `WINDOWS_SETUP.txt` | Plain-text Windows guide with PATH fix |
+| `CYBERTRADE.bat` | **ONE-CLICK** — finds Miniconda, creates env if needed, runs web HUD, no Anaconda Prompt needed |
+| `CYBERTRADE_GUI.bat` | ONE-CLICK GUI — same but desktop GUI |
+| `click_to_run.bat` | ONE-CLICK — ultra simple name, calls CYBERTRADE.bat |
+| `environment.yml` | Env def — `name: cybertrade`, `python=3.11`, `tk`, `pytest`, `pip -e .[dev]` |
+| `environment-dev.yml` | Dev env with black, ruff, mypy |
+| `setup_conda.bat` | Creates env (now auto-searches Miniconda even if not in PATH) |
+| `setup_conda.ps1` | PowerShell — auto-searches Miniconda |
+| `fix_conda_path.bat` | Fixes "conda not found" by finding Miniconda |
+| `activate_cybertrade.bat` | Activation helper (Miniconda paths) |
+| `run_gui.bat` / `run_web.bat` | Launch GUIs (Miniconda) |
+| `ONE_CLICK.txt` | Plain-text one-click guide |
+| `WINDOWS_SETUP.txt` | Full Windows guide with PATH fix |
 
-## `environment.yml` (Miniconda)
+## `environment.yml`
 
 ```yaml
 name: cybertrade
@@ -211,24 +131,10 @@ dependencies:
     - -e .[dev]
 ```
 
-No Miniforge, no mamba — just normal Miniconda.
+## Why Miniconda + One-Click?
 
-## Troubleshooting (Miniconda on Windows)
-
-| Issue | Fix (Miniconda) |
-|-------|-----------------|
-| `[!] conda not found in PATH` in normal CMD | **Use Anaconda Prompt** from Start Menu (conda is always in PATH there). Or run fixed `setup_conda.bat` which now auto-searches. Or run `fix_conda_path.bat` |
-| `conda` not recognized in normal CMD | Normal Miniconda behavior — use Anaconda Prompt. Or `conda init cmd.exe` then restart CMD |
-| PowerShell blocks `.ps1` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` then `.\setup_conda.ps1` |
-| `conda env create` fails | `conda clean --all` then `conda env create -f environment.yml --force` |
-| `tkinter unavailable` | `conda install -n cybertrade tk` |
-| Port 8899 busy | `python -m cybertrade web --port 0 --auto` |
-| Want to add conda to normal CMD permanently | In Anaconda Prompt: `conda init cmd.exe` + `conda init powershell`, restart shell |
-
-## Why Miniconda?
-
-- **Official**: From Anaconda (https://docs.anaconda.com/miniconda/)
-- **No admin needed**: Installs to `%USERPROFILE%\miniconda3`
-- **Anaconda Prompt**: Solves PATH issues — conda always works there
-- **Isolation**: Keeps CYBERTRADE separate from system Python
-- **Zero compiled runtime deps**: Project is 100% stdlib + `tk` + `pytest`
+- **Official Miniconda**: https://docs.anaconda.com/miniconda/
+- **One-click**: `CYBERTRADE.bat` sets PATH directly to `miniconda3\envs\cybertrade\Scripts` — no `conda activate` needed, so no Anaconda Prompt needed
+- **Auto-search**: Finds Miniconda in 9 locations even if not in PATH
+- **Auto-create**: Creates env if missing
+- **No admin**: Installs to `%USERPROFILE%\miniconda3`
