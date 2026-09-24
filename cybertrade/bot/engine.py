@@ -1,7 +1,14 @@
-"""The TradingEngine — orchestrates feed → regime → strategies → risk → venue.
+"""The TradingEngine — orchestrates venue feed → regime → strategies → risk → venue.
 
-Thread model: a single engine loop thread owns decision-making; feeds deliver
-ticks through thread-safe books; the OMS settles expirations every cycle.
+Thread model: a single engine loop thread owns decision-making; the live feed
+delivers ticks through thread-safe books; the OMS settles expirations every
+cycle.
+
+**Live only.**  There is no paper broker, no dry-run broker and no synthetic
+feed in this build: the engine is constructed with a venue broker and a venue
+feed, ``arm()`` always arms live trading (gated by the CLI's I-UNDERSTAND
+confirmation and the durable risk governor), and any non-venue feed is
+refused at construction time.
 """
 
 from __future__ import annotations
@@ -15,12 +22,11 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from ..config import AppConfig
 from ..constants import EngineState, Side, Timeframe
-from ..data.feed import Feed, QuoteBook, SyntheticFeed
+from ..data.feed import Feed, QuoteBook
 from ..data.models import Signal, TradeRecord
 from ..events import Topic, default_bus
 from ..exceptions import ConfigError, KillSwitchEngaged, RiskRejection
 from ..execution.oms import OrderManager
-from ..execution.paper import PaperBroker
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
 from ..risk.sessions import session_for, session_report as sessions_snapshot
@@ -35,7 +41,6 @@ from ..utils.mathx import clamp
 from .health import HealthMonitor, HealthSnapshot
 from .survivor import Posture, Survivor
 from .watchdog import Watchdog
-from .drills import StressDrill
 from .alerts import AlertCenter
 from .calendar import EconomicCalendar, calendar_for_asset
 from ..risk.correlation import CorrelationMonitor
@@ -64,29 +69,33 @@ class TradingEngine:
     ) -> None:
         self.config = config or AppConfig()
         self.config.validate()
+        if self.config.broker.mode != "quotex":
+            raise ConfigError(
+                f"broker.mode={self.config.broker.mode!r} is not supported — this "
+                "build trades LIVE at Quotex only"
+            )
+        if broker is None:
+            raise ConfigError(
+                "a venue broker is required — this build has no paper/dry-run "
+                "fallback; connect a Quotex session (`cybertrade quotex login`)"
+            )
+        if feed is None:
+            raise ConfigError(
+                "a venue feed is required — this build has no synthetic market; "
+                "wire LiveQuotexFeed from a live session"
+            )
 
         self.risk = RiskManager(self.config.risk)
-        self.broker = broker or PaperBroker(
-            starting_balance=self.config.risk.starting_balance,
-            default_payout=self.config.broker.payout_default,
-            latency_ms=self.config.broker.latency_ms,
-            slippage_bps=self.config.broker.slippage_bps,
-        )
+        self.broker = broker
         self.oms = OrderManager(self.broker, self.risk)
-        self.feed = feed or SyntheticFeed(
-            assets=self.config.strategy.universe,
-            timeframe_seconds=self.config.timeframe().seconds,
-            tick_interval=0.5,
-        )
-        # Phase-29: live venue modes consume LIVE candles only — a synthetic
-        # feed here is a wiring bug, not a fallback. Fail before boot.
-        if self.config.broker.mode in ("quotex", "dryrun") and getattr(
-            self.feed, "is_synthetic", False
-        ):
+        self.feed = feed
+        # Live trading consumes venue candles only — a non-venue feed here is
+        # a wiring bug, not a fallback. Fail before boot.
+        if getattr(self.feed, "is_synthetic", False):
             raise ConfigError(
-                f"broker.mode={self.config.broker.mode} requires live venue "
-                "candles — pair a browser session (`cybertrade quotex login`) "
-                "and rebuild; synthetic feeds are refused in live modes"
+                "live trading requires live venue candles — pair a browser "
+                "session (`cybertrade quotex login`) and rebuild; replay and "
+                "synthetic feeds are refused"
             )
         self.ensemble = ensemble or build_all_weather(
             mode=self.config.strategy.ensemble_mode,
@@ -146,10 +155,6 @@ class TradingEngine:
         self._journal_session = 0
         self.supervisor: Optional[ReconnectSupervisor] = None
         self._decay_alerted: set = set()
-        # Phase-20: crisis drills (chaos engineering for the defense stack)
-        self.drill = StressDrill(seed=1337)
-        if hasattr(self.feed, "price_filter"):  # live shocks enter at the source
-            self.feed.price_filter = self.drill.shock_price
         self.edge_rejects = 0
         try:
             self.calendar = EconomicCalendar.load(
@@ -232,8 +237,6 @@ class TradingEngine:
                     closed += 1
             except Exception:  # noqa: BLE001
                 log.exception("salvage failed for %s", pos.id)
-        if closed and self.drill.stats is not None:
-            self.drill.stats.salvaged += closed
         if closed:
             self.health.note_message(
                 f"LIFEBOAT: salvaged {closed} position(s) — {reason}"
@@ -243,15 +246,6 @@ class TradingEngine:
                 {"kind": "salvage", "count": closed, "reason": reason},
                 source="lifeboat",
             )
-
-    def drill_report(self) -> Optional[Dict[str, Any]]:
-        """Current (or last) drill stats — scored from what happened (P20)."""
-        stats = self.drill.stats
-        if stats is None:
-            return None
-        if not self.drill.active() and not stats.finished_ts:
-            stats.finished_ts = timex.now()
-        return stats.to_dict()
 
     def session_report(self) -> Dict[str, Any]:
         """Phase-22: wall-clock session + per-asset stake scales (HUD)."""
@@ -347,7 +341,7 @@ class TradingEngine:
             self.feed.warmup()
         self.broker.connect()
         # live venue wiring: stream quotes into the same pipeline as the feed
-        # and pull the instrument catalog (both no-ops for paper).
+        # and pull the instrument catalog (no-ops for a broker with no api).
         api = getattr(self.broker, "api", None)
         # Phase-29: a live feed already forwards venue ticks through its own
         # listener — a second direct handler would double-count the stream.
@@ -360,7 +354,7 @@ class TradingEngine:
                 except Exception:  # noqa: BLE001
                     log.exception("instrument catalog request failed")
             # Phase-14: pull real venue history into the books before trading —
-            # live strategies deserve the same indicator warmup as paper.
+            # every strategy needs warm indicators, whatever the venue.
             if hasattr(api, "get_candles") and callable(getattr(self.feed, "book", None)):
                 try:
                     from ..brokers.quotex.sync import warm_book
@@ -373,8 +367,10 @@ class TradingEngine:
                     if total:
                         log.info("venue warm: +%d candles into books", total)
                 except Exception:  # noqa: BLE001 — a slow venue never blocks boot
-                    log.exception("venue warm failed — synthetic history stands")
-            # Phase-16: bounded reconnect supervision for the venue wire.
+                    log.exception("venue warm failed — books keep warmup candles")
+        # Phase-16: bounded reconnect supervision for the venue wire — every
+        # live engine heals its own broker wire, whatever feed it runs on.
+        if api is not None:
             def _resubscribe(a):
                 if hasattr(a, "request_instruments"):
                     a.request_instruments()
@@ -422,28 +418,29 @@ class TradingEngine:
         self.health.note_message(f"engine booted ({self.state.value})")
         log.info("engine booted state=%s assets=%s", self.state.value, self.feed.assets)
 
-    def arm(self, live: bool = False) -> None:
-        with self._lock:  # concurrent ARM requests cannot create duplicate loops
-            self._arm(live)
+    def arm(self) -> None:
+        """Arm LIVE trading — there is no paper arming in this build.
 
-    def _arm(self, live: bool = False) -> None:
-        """Permit trading.  ``live=True`` requires config.allow_live AND is
-        gated behind an explicit second confirmation in the CLI/GUI."""
+        The human gate lives one level up (the CLI's ``I UNDERSTAND``
+        confirmation plus ``risk.allow_live``); everything below it is
+        machinery: kill latch, recovery hold, and the durable governor.
+        """
+        with self._lock:  # concurrent ARM requests cannot create duplicate loops
+            self._arm()
+
+    def _arm(self) -> None:
         if self.risk.state.kill or self.state is EngineState.KILL:
             raise KillSwitchEngaged(self.risk.state.kill_reason or "kill is latched")
         if self.continuity is not None:
             self.continuity.assert_ready()
             if self.continuity.status()["blocked"]:
                 raise KillSwitchEngaged(self.continuity.status()["reason"])
-        if not isinstance(self.broker, PaperBroker) and not live:
-            raise KillSwitchEngaged("a live broker requires explicit live arming")
-        if live and not self.config.risk.allow_live:
+        if not self.config.risk.allow_live:
             raise KillSwitchEngaged(
-                "live trading disabled in config (risk.allow_live=false) — "
-                "paper mode protects you from yourself"
+                "live trading disabled in config (risk.allow_live=false)"
             )
         if self._running:
-            self.state = EngineState.LIVE if live else EngineState.ARMED
+            self.state = EngineState.LIVE
             default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
             return  # repeat ARM does not spawn a second decision thread
         if self._thread and self._thread.is_alive():
@@ -451,7 +448,7 @@ class TradingEngine:
                 self._thread.join(timeout=3.0)
             if self._thread.is_alive():
                 raise KillSwitchEngaged("previous engine loop is still stopping")
-        self.state = EngineState.LIVE if live else EngineState.ARMED
+        self.state = EngineState.LIVE
         default_bus.publish(Topic.ENGINE_STATE, self.state.value, source="engine")
         self._running = True
         self._stop_event.clear()
@@ -459,8 +456,8 @@ class TradingEngine:
         self.watchdog.start()
         self._thread = threading.Thread(target=self._run_loop, daemon=True, name="engine")
         self._thread.start()
-        self.health.note_message(f"engine ARMED mode={'LIVE' if live else 'PAPER'}")
-        log.warning("engine ARMED mode=%s", "LIVE" if live else "PAPER")
+        self.health.note_message("engine ARMED mode=LIVE (real order flow)")
+        log.warning("engine ARMED mode=LIVE — real order flow at the venue")
 
     def disarm(self) -> None:
         self.state = EngineState.DISARMED
@@ -586,15 +583,12 @@ class TradingEngine:
                 self.vetoes += 1
 
         # Phase-19: the lifeboat — salvage open risk before the storm takes it.
-        # Phase-20: the same seam records the posture floor while a drill runs.
         try:
             reading = self.regime_of.get(self.feed.assets[0])
             if reading is None:  # first cycles — self-heal the seam
                 reading = self._update_regime(self.feed.assets[0])
             posture = (self.survivor.posture_for(reading)
                        if reading is not None else Posture.NORMAL)
-            if self.drill.stats is not None:
-                self.drill.stats.note_posture(posture)
             if (self.config.risk.crisis_salvage and posture == "LOCKDOWN"
                     and self.broker.open_positions()):
                 self._salvage_all("survivor LOCKDOWN")
@@ -748,7 +742,6 @@ class TradingEngine:
         slip_bps = expected_slippage_bps(
             stress=reading.stress,
             session_liquidity=session_for(signal.asset, signal.ts).liquidity,
-            drill=bool(self.drill.active()),
             base=self.config.broker.slippage_bps,
         )
         decision = self.survivor.evaluate(
@@ -916,8 +909,6 @@ class TradingEngine:
             self._stop_event.set()
             self._running = False
             self.state = EngineState.KILL
-            if self.drill.stats is not None:
-                self.drill.stats.killed = True
 
     # -- introspection -----------------------------------------------------
     def snapshot(self) -> Dict[str, Any]:

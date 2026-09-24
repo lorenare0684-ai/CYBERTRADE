@@ -21,6 +21,7 @@ from cybertrade.network.socketio import (
 )
 from cybertrade.network.websocket import encode_frame, OP_TEXT, OP_CLOSE
 from cybertrade.network.http_client import CookieJar, _dechunk, _parse_response
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 class TestWebSocketFrames(unittest.TestCase):
@@ -157,7 +158,8 @@ class TestWebTerminal(unittest.TestCase):
 
         cfg = AppConfig()
         cfg.strategy.universe = ["EURUSD_otc"]
-        cls.engine = TradingEngine(cfg)
+        cls.engine = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD_otc"]),
+                                   broker=VenueStub())
         cls.engine.boot()
         hub = EngineHub(cls.engine)
         cls.web = WebTerminal(hub, host="127.0.0.1", port=8911)

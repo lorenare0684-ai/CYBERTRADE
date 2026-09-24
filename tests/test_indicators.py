@@ -5,7 +5,6 @@ from __future__ import annotations
 import math
 import unittest
 
-from cybertrade.data.synthetic import generate_candles
 from cybertrade.indicators import (
     adx,
     atr,
@@ -30,9 +29,10 @@ from cybertrade.indicators.volatility import (
 )
 from cybertrade.indicators.volume import obv, vwap, chaikin_money_flow
 
+from tests.venue_stubs import VenueFeed, VenueStub, venue_candles
 
 def _ohlc(n=300, seed=5):
-    cs = generate_candles("bull_trend", bars=n, seed=seed)
+    cs = venue_candles(n=n, shape="trend_up", seed=seed)
     return (
         [c.open for c in cs],
         [c.high for c in cs],
@@ -215,7 +215,7 @@ class TestPatterns(unittest.TestCase):
         self.assertEqual(marks[0], 1)
 
     def test_score_patterns_runs(self):
-        cs = generate_candles("range_chop", bars=80)
+        cs = venue_candles(n=80, shape="range")
         o = [c.open for c in cs]
         h = [c.high for c in cs]
         l = [c.low for c in cs]

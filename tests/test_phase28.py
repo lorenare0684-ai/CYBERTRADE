@@ -16,10 +16,9 @@ import unittest
 
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
-from cybertrade.data.feed import SyntheticFeed
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.statestore import load_operator_state, save_operator_state
 from cybertrade.web.server import EngineHub, WebTerminal
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _engine(tmp: str, tag: str) -> TradingEngine:
@@ -28,8 +27,8 @@ def _engine(tmp: str, tag: str) -> TradingEngine:
     cfg.calibration_path = os.path.join(tmp, f"{tag}-c.json")
     cfg.operator_path = os.path.join(tmp, f"{tag}-op.json")
     return TradingEngine(
-        cfg, feed=SyntheticFeed(tick_interval=60.0),
-        broker=PaperBroker(starting_balance=1000.0),
+        cfg, feed=VenueFeed(),
+        broker=VenueStub(balance=1000.0),
     )
 
 

@@ -39,11 +39,9 @@ class Topic(str, Enum):
     KILL = "kill"
     GUI_ACTION = "gui.action"
     WEB_ACTION = "web.action"
-    BACKTEST = "backtest"
     HEALTH = "health"
     NEWS = "news"
     ALERT = "alert"
-    SCENARIO = "scenario"
 
 
 @dataclass(frozen=True)

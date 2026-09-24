@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import unittest
 
-from cybertrade.backtest.engine import Backtester
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
 from cybertrade.constants import MarketRegime, Side
@@ -19,6 +18,7 @@ from cybertrade.data.models import Settlement, Signal, Tick, TradeRecord
 from cybertrade.quant.calibration import CalibrationTracker
 from cybertrade.regime.detector import RegimeReading
 from cybertrade.utils import timex
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _vote(name, conf=0.8):
@@ -73,9 +73,9 @@ class TestRegimeGate(unittest.TestCase):
         cfg = AppConfig()
         cfg.risk.regime_cal = regime_cal
         cfg.risk.win_rate_floor = 0.0
-        eng = TradingEngine(cfg)
+        eng = TradingEngine(cfg, feed=VenueFeed(), broker=VenueStub())
         eng.broker.connect()
-        eng._on_tick(Tick(asset=eng.feed.assets[0], price=1.0))
+        eng.broker.on_tick(Tick(asset=eng.feed.assets[0], price=1.0))
         for _ in range(25):
             eng.calibrator.observe("mix", 0.8, True, regime="bull_trend")
             eng.calibrator.observe("mix", 0.8, False, regime="range")
@@ -117,9 +117,9 @@ class TestRegimeGate(unittest.TestCase):
 
 class TestVotesPassthrough(unittest.TestCase):
     def test_submit_carries_votes_and_settle_learns_them(self):
-        eng = TradingEngine(AppConfig())
+        eng = TradingEngine(AppConfig(), feed=VenueFeed(), broker=VenueStub())
         eng.broker.connect()
-        eng._on_tick(Tick(asset=eng.feed.assets[0], price=1.0))
+        eng.broker.on_tick(Tick(asset=eng.feed.assets[0], price=1.0))
         order = eng.oms.submit(
             asset=eng.feed.assets[0],
             side=Side.CALL,
@@ -140,14 +140,6 @@ class TestVotesPassthrough(unittest.TestCase):
                                    regime="range"))
         names = {s["strategy"] for s in eng.calibrator.summary()["strategies"]}
         self.assertIn("chorus_kid", names)  # the vote reached its own table
-
-
-class TestBacktestRegimeRows(unittest.TestCase):
-    def test_backtest_learns_regime_rows(self):
-        bt = Backtester(AppConfig())
-        res = bt.run_scenario("bull_trend", bars=300, seed=3)
-        self.assertGreater(len(res.trades), 0)
-        self.assertGreater(bt.calibrator.regime_rows(), 0)
 
 
 if __name__ == "__main__":

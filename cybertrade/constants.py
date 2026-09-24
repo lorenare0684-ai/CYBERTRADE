@@ -105,7 +105,7 @@ class MarketRegime(str, Enum):
 class EngineState(str, Enum):
     BOOT = "boot"
     DISARMED = "disarmed"      # wired up, refuses to trade
-    ARMED = "armed"            # paper trading permitted
+    ARMED = "armed"            # live order flow permitted (gate passed)
     LIVE = "live"              # real order flow (danger zone)
     DRAWDOWN_LOCK = "drawdown_lock"
     KILL = "kill"              # emergency stop

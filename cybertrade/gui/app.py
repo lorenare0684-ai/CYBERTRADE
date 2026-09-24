@@ -20,9 +20,9 @@ from ..events import Topic, default_bus
 from . import layout as layout_mod
 from .boot import BootScreen
 from .panels import (
-    BacktestPanel,
     ConnectionPanel,
     DashboardPanel,
+    RiskLabPanel,
     RiskPanel,
     SettingsPanel,
     StrategiesPanel,
@@ -224,7 +224,7 @@ class CybertradeApp(tk.Tk):
         self.trader = TraderPanel(self.panes, t, command_cb=self._command)
         self.strat = StrategiesPanel(self.panes, t)
         self.risk_p = RiskPanel(self.panes, t)
-        self.bt_p = BacktestPanel(self.panes, t, run_cb=self._run_backtest,
+        self.bt_p = RiskLabPanel(self.panes, t, run_cb=self._mc_summary,
                                  mc_cb=self._mc_summary)
         self.link = ConnectionPanel(self.panes, t, connect_cb=self._connect)
         self.cfg_p = SettingsPanel(self.panes, t, save_cb=self._save_config)
@@ -242,7 +242,7 @@ class CybertradeApp(tk.Tk):
         foot.pack(fill="x", side="bottom")
         tk.Label(
             foot,
-            text="PAPER BY DEFAULT · UNOFFICIAL QUOTEX BRIDGE · "
+            text="LIVE ONLY · REAL ORDER FLOW · UNOFFICIAL QUOTEX BRIDGE · "
                  "NO SYSTEM SURVIVES EVERY MARKET · SEE DISCLAIMER.md",
             bg=t["bg2"], fg=t["yellow"], font=MONO_SMALL,
         ).pack(side="left", padx=10)
@@ -275,7 +275,7 @@ class CybertradeApp(tk.Tk):
         engine = self.engine
         try:
             if cmd == "arm":
-                engine.arm(live=False)
+                engine.arm()
             elif cmd == "disarm":
                 engine.disarm()
             elif cmd == "kill":
@@ -284,13 +284,6 @@ class CybertradeApp(tk.Tk):
                 engine.survivor.flag_news()
             elif cmd == "lockdown":
                 engine.survivor.engage_lockdown("desktop GUI")
-            elif cmd == "scenario":
-                # Phase-2: hot-swap one asset's market regime
-                feed = engine.feed
-                setter = getattr(feed, "set_scenario", None)
-                if not callable(setter):
-                    raise RuntimeError("feed does not support scenario swaps")
-                setter(body.get("asset", ""), body.get("scenario", "gbm"))
             elif cmd == "trade":
                 from ..constants import Side
                 from ..data.models import Signal
@@ -316,7 +309,7 @@ class CybertradeApp(tk.Tk):
 
         trades = self.engine.oms.ledger.trades
         if not trades:
-            return "no settled trades yet — run the gauntlet or arm the engine first"
+            return "no settled trades yet — trade live first; the risk lab never invents samples"
         report = simulate_from_records(
             trades,
             starting_balance=self.engine.config.risk.starting_balance,
@@ -326,13 +319,7 @@ class CybertradeApp(tk.Tk):
         return report.summary_text()
 
     def _connect(self, body: Dict[str, Any]) -> None:
-        mode = body.get("mode", "paper")
-        if mode == "paper":
-            self.link.set_status("paper venue ready", "green")
-            return
-        if mode == "dryrun":
-            self.link.set_status("dry-run venue ready", "yellow")
-            return
+        """Re-pair the venue session in place — Quotex is the only venue."""
         ssid = body.get("ssid", "")
         if not ssid:
             self.link.set_status("ssid required (browser session)", "red")
@@ -340,24 +327,21 @@ class CybertradeApp(tk.Tk):
         try:
             from ..brokers.quotex import QuotexAPI, QuotexBroker
 
-            api = QuotexAPI(demo=bool(body.get("demo", True)))
+            demo = body.get("demo")
+            if demo is None:
+                self.link.set_status("pick a purse: PRACTICE or REAL", "yellow")
+                return
+            api = QuotexAPI(demo=bool(demo))
             api.set_ssid(ssid)
             api.connect()
             self.engine.broker.disconnect()
-            self.engine.broker = QuotexBroker(api)
+            self.engine.broker = QuotexBroker(api, allow_orders=True)
             self.engine.broker.connect()
             self.engine.oms.broker = self.engine.broker
             self.link.set_status("quotex session live (PRACTICE)" if api.demo
                                  else "quotex session live (REAL!)", "green" if api.demo else "red")
         except Exception as exc:  # noqa: BLE001
             self.link.set_status(f"connect failed: {exc}", "red")
-
-    def _run_backtest(self) -> str:
-        from ..backtest import Backtester, matrix_table
-
-        bt = Backtester(self.config)
-        results = bt.run_matrix(bars=350, seeds=(1,))
-        return matrix_table(results)
 
     def _save_config(self, form: Dict[str, Dict[str, str]]) -> None:
         import dataclasses

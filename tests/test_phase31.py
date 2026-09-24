@@ -28,6 +28,7 @@ from cybertrade.gui.layout import (
     tab_grid,
     wrap_items,
 )
+from tests.venue_stubs import VenueFeed, VenueStub
 
 ROOT = Path(__file__).resolve().parents[1]
 APP_PY = (ROOT / "cybertrade" / "gui" / "app.py").read_text()

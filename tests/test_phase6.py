@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import unittest
 
-from cybertrade.backtest.engine import Backtester
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
 from cybertrade.constants import MarketRegime, Side
@@ -18,6 +17,7 @@ from cybertrade.quant.calibration import CalibrationTracker
 from cybertrade.regime.detector import RegimeReading
 from cybertrade.risk.manager import RiskManager
 from cybertrade.utils import timex
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _votes(names, conf=0.9):
@@ -113,7 +113,7 @@ class TestEngineGateUsesVotes(unittest.TestCase):
 
     def test_liar_chorus_vetoes_high_claim(self):
         cfg = AppConfig()
-        eng = TradingEngine(cfg)
+        eng = TradingEngine(cfg, feed=VenueFeed(), broker=VenueStub())
         for name in ("liar1", "liar2", "liar3"):
             for _ in range(30):
                 eng.calibrator.observe(name, 0.9, False)
@@ -124,9 +124,9 @@ class TestEngineGateUsesVotes(unittest.TestCase):
     def test_winner_chorus_passes_the_gate(self):
         cfg = AppConfig()
         cfg.risk.win_rate_floor = 0.0
-        eng = TradingEngine(cfg)
-        eng.broker.connect()  # engine not booted in this unit test — plug in the paper broker
-        eng._on_tick(Tick(asset=eng.feed.assets[0], price=1.0))  # paper fills need a quote
+        eng = TradingEngine(cfg, feed=VenueFeed(), broker=VenueStub())
+        eng.broker.connect()  # engine not booted in this unit test
+        eng.broker.on_tick(Tick(asset=eng.feed.assets[0], price=1.0))  # a venue quote
         for name in ("pro1", "pro2", "pro3"):
             for _ in range(30):
                 eng.calibrator.observe(name, 0.9, True)
@@ -134,17 +134,6 @@ class TestEngineGateUsesVotes(unittest.TestCase):
         ok = eng._try_execute(self._signal(eng, ["pro1", "pro2", "pro3"]), _reading())
         self.assertTrue(ok)
         self.assertEqual(eng.edge_rejects, before)
-
-
-class TestBacktestVoteLearning(unittest.TestCase):
-    def test_backtest_learns_voter_names(self):
-        cfg = AppConfig()
-        bt = Backtester(cfg)
-        res = bt.run_scenario("bull_trend", bars=300, seed=3)
-        self.assertGreater(len(res.trades), 0)
-        names = {s["strategy"] for s in bt.calibrator.summary()["strategies"]}
-        self.assertTrue(any(n != "ensemble_all_weather" for n in names),
-                        f"no per-voter buckets learned: {names}")
 
 
 def _reading() -> RegimeReading:

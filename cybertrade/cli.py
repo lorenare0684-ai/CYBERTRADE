@@ -1,16 +1,23 @@
 """CYBERTRADE command-line interface.
 
-    python -m cybertrade gui             desktop terminal
-    python -m cybertrade web             browser terminal (live preview)
-    python -m cybertrade run             paper-trade headless
-    python -m cybertrade supervise       bounded paper-engine restarts
-    python -m cybertrade backtest        run the all-weather gauntlet
-    python -m cybertrade edge            binary-options edge calculator
-    python -m cybertrade optimize        walk-forward parameter search
+    python -m cybertrade quotex login    pair a browser session (Chrome + your CAPTCHA)
+    python -m cybertrade quotex status   venue session / balance / payouts
+    python -m cybertrade quotex warm     pre-pull venue candles for the universe
+    python -m cybertrade run             LIVE headless trading at the venue
+    python -m cybertrade web             LIVE browser terminal
+    python -m cybertrade gui             LIVE desktop terminal
     python -m cybertrade journal         trade journal analytics
     python -m cybertrade strategies      list the strategy matrix
-    python -m cybertrade scenarios       list stress scenarios
+    python -m cybertrade calibrate       calibration honesty ledger
+    python -m cybertrade edge            binary-options edge calculator
+    python -m cybertrade montecarlo      Monte Carlo risk lab (real records only)
+    python -m cybertrade calendar        news blackouts
     python -m cybertrade doctor          environment self-test
+
+**LIVE ONLY.**  There is no paper mode, no dry-run mode and no synthetic
+market in this build.  Every trading command connects to the real venue and
+places real orders; the two things standing between you and that are a valid
+venue session and the ``I UNDERSTAND`` confirmation.
 """
 
 from __future__ import annotations
@@ -23,6 +30,7 @@ from typing import List, Optional
 
 from . import __version__
 from .config import AppConfig
+from .exceptions import ConfigError
 from .logging_setup import setup_logging
 from .quant.binary import breakeven_winrate, edge_of, kelly_fraction_for, kelly_stake
 
@@ -33,9 +41,9 @@ BANNER = r"""
 ██╔════╝╚██╗ ██╔╝██╔══██╗██╔════╝██╔══██╗╚══██╔══╝██╔══██╗██╔══██╗██╔══██╗██╔════╝
 ██║      ╚████╔╝ ██████╔╝█████╗  ██████╔╝   ██║   ██████╔╝███████║██║  ██║█████╗
 ██║       ╚██╔╝  ██╔══██╗██╔══╝  ██╔══██╗   ██║   ██╔══██╗██╔══██║██║  ██║██╔══╝
-╚██████╗   ██║   ██████╔╝███████╗██████╔╝   ██║   ██║  ██║██║  ██║██████╔╝███████╗
- ╚═════╝   ╚═╝   ╚═════╝ ╚══════╝╚═════╝    ╚═╝   ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ ╚══════╝
-                        // NEON PROTOCOL — ALL-WEATHER OPS
+╚██████╗   ██║   ██████╔╝███████╗██████╔╝   ██║   ██████╔╝███████║██║  ██║█████╔╝
+ ╚═════╝   ╚═╝  ╚══════╝╚═════╝    ╚═════╝    ╚═╝   ╚═════╝ ╚══════╝ ╚═════╝
+              // NEON PROTOCOL — LIVE ONLY, REAL ORDER FLOW
 """
 
 
@@ -45,12 +53,19 @@ def _load_config(args: argparse.Namespace) -> AppConfig:
     return cfg
 
 
-def _qx_api(cfg: AppConfig):
-    """Configured venue facade — ghost wire timings ride the construction."""
+def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
+    """Configured venue facade — ghost wire timings ride the construction.
+
+    ``demo`` defaults to the configured purse; when no purse has been chosen
+    yet, session tooling (login/status/warm) falls back to PRACTICE — data
+    commands must never need a money decision.
+    """
     from .brokers.quotex.api import QuotexAPI
 
+    if demo is None:
+        demo = cfg.broker.demo_account if cfg.broker.demo_account is not None else True
     return QuotexAPI(
-        demo=cfg.broker.demo_account,
+        demo=bool(demo),
         ghost=cfg.broker.ghost_pace,
         order_think_ms=cfg.broker.order_think_ms,
         order_min_gap_ms=cfg.broker.order_min_gap_ms,
@@ -58,60 +73,82 @@ def _qx_api(cfg: AppConfig):
     )
 
 
-def _build_venue(cfg: AppConfig, api_factory=None, allow_orders: bool = False):
-    """Build a QuotexBroker with a live session, or None.
+def _live_api(cfg: AppConfig, api_factory=None):
+    """Connected QuotexAPI for the live build — raises, never degrades.
 
-    Session sources (nothing is ever written to disk): in-memory
-    ``cfg.broker.ssid`` / ``--ssid``, then the ``QX_SSID`` env var; else
-    ``username``+``password`` via ``login()``.  Any failure degrades to
-    ``None`` — paper quotes, zero drama.  ``allow_orders`` is the dry-run
-    rail: leave it False for data-only venues.
+    Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
+    paired browser session (``quotex login``) → username/password login.
     """
     import os
 
-    try:
-        if api_factory is None:
-            from .brokers.quotex.adapter import QuotexBroker
-            from .brokers.quotex.api import QuotexAPI
+    if api_factory is None:
+        api_factory = lambda: _qx_api(cfg)  # noqa: E731
 
-            def api_factory() -> Any:
-                return _qx_api(cfg)
+    api = api_factory()
+    ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
+    cookies = ""
+    if not ssid:
+        from .brokers.quotex.pairing import load_session
 
-        api = api_factory()
-        ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
-        cookies = ""
-        if not ssid:
-            # Phase-29: paired browser session (Chrome + manual CAPTCHA).
-            from .brokers.quotex.pairing import load_session
+        paired = load_session(getattr(cfg, "qx_session_path", "") or "")
+        if paired:
+            ssid = paired.get("ssid", "")
+            cookies = paired.get("cookies", "")
+    if ssid:
+        api.set_ssid(ssid, cookies)
+    elif cfg.broker.username and cfg.broker.password:
+        api.login(cfg.broker.username, cfg.broker.password,
+                  is_demo=bool(cfg.broker.demo_account))
+    else:
+        raise ConfigError(
+            "no Quotex session — run `cybertrade quotex login` (Chrome opens; "
+            "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
+        )
+    api.connect()
+    return api
 
-            paired = load_session(getattr(cfg, "qx_session_path", "") or "")
-            if paired:
-                ssid = paired.get("ssid", "")
-                cookies = paired.get("cookies", "")
-        if ssid:
-            api.set_ssid(ssid, cookies)
-        elif cfg.broker.username and cfg.broker.password:
-            api.login(cfg.broker.username, cfg.broker.password,
-                      is_demo=cfg.broker.demo_account)
-        if hasattr(api, "connect"):
-            api.connect()
-        from .brokers.quotex.adapter import QuotexBroker
 
-        return QuotexBroker(api, allow_orders=allow_orders)
-    except Exception as exc:  # noqa: BLE001 — venue trouble degrades to paper
-        print(f"  venue session unavailable ({exc}) — paper quotes")
-        return None
+def _resolve_purse(cfg: AppConfig, args: argparse.Namespace) -> None:
+    """Choose PRACTICE vs REAL — the one decision this build never defaults.
+
+    ``--demo`` / ``--real`` on the command line, ``broker.demo_account`` in
+    config, or an interactive prompt.  A non-interactive shell with no
+    configured purse fails loudly rather than guessing with your money.
+    """
+    if getattr(args, "demo", False) and getattr(args, "real", False):
+        raise ConfigError("pick one purse: --demo (practice) or --real (real money)")
+    if getattr(args, "demo", False):
+        cfg.broker.demo_account = True
+    elif getattr(args, "real", False):
+        cfg.broker.demo_account = False
+    if cfg.broker.purse_chosen:
+        return
+    if not sys.stdin or not sys.stdin.isatty():
+        raise ConfigError(
+            "no purse chosen — pass --demo (PRACTICE balance) or --real (REAL "
+            "money), or set broker.demo_account in the config file"
+        )
+    print("  ── WHICH PURSE? ─────────────────────────────────────────────")
+    print("  [p] PRACTICE — real order flow, broker demo balance (no real money)")
+    print("  [r] REAL     — real order flow, real account balance (REAL MONEY)")
+    answer = input("  purse [p/r]: ").strip().lower()
+    if answer in ("p", "practice", "demo"):
+        cfg.broker.demo_account = True
+    elif answer in ("r", "real", "money"):
+        cfg.broker.demo_account = False
+    else:
+        raise ConfigError(f"no purse chosen (got {answer!r}) — pass --demo or --real")
+    cfg.require_purse()
 
 
 def _confirm_live(args: argparse.Namespace, cfg: AppConfig) -> bool:
-    """The I-UNDERSTAND gate.  Returns False to abort the run.
+    """The I-UNDERSTAND gate — the one human check this build keeps.
 
-    Runs BEFORE the engine is built — ``allow_orders`` rides on
-    ``cfg.risk.allow_live`` at construction time.
+    Every trading command runs it, because every trading command is live.
+    ``--yes`` skips the typing for scripted operators who already know.
     """
-    if not getattr(args, "live", False):
-        return True
-    print("  ⚠ LIVE TRADING REQUESTED — this uses real money if configured.")
+    print("  ⚠ LIVE TRADING — this places REAL orders at Quotex.")
+    print(f"  ⚠ purse        : {cfg.broker.purse_label}")
     print("  ⚠ Automated trading may violate Quotex's Terms of Service.")
     if not getattr(args, "yes", False):
         answer = input("  type 'I UNDERSTAND' to continue: ")
@@ -122,18 +159,146 @@ def _confirm_live(args: argparse.Namespace, cfg: AppConfig) -> bool:
     return True
 
 
+def _build_engine(cfg: AppConfig, api_factory=None, *, durable=False):
+    """Build the LIVE engine: venue session → venue candles → real orders.
+
+    No paper fallback exists.  A missing/dead session, an empty venue
+    history, or an unchosen purse all raise instead of silently degrading.
+    """
+    from .bot.engine import TradingEngine
+    from .brokers.quotex.adapter import QuotexBroker
+    from .data.livefeed import LiveQuotexFeed
+
+    cfg.require_purse()  # the purse is never defaulted
+    api = _live_api(cfg, api_factory=api_factory)
+    feed = LiveQuotexFeed(
+        api,
+        assets=cfg.strategy.universe,
+        timeframe_seconds=cfg.timeframe().seconds,
+        warm_bars=400,
+    )
+    venue = QuotexBroker(api, allow_orders=True)
+    try:
+        adopted = venue.reconcile_venue()
+        if adopted:
+            print(f"  ⚠ reconciled {adopted} venue-open contract(s) "
+                  "from a previous session.")
+    except Exception:  # noqa: BLE001 — reconcile never blocks boot
+        pass
+    print(f"  ⚠ QUOTEX LIVE — real orders enabled · purse {cfg.broker.purse_label}")
+    engine = TradingEngine(cfg, feed=feed, broker=venue, durable=durable)
+    engine.boot()
+    return engine
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    _resolve_purse(cfg, args)
+    from .gui import GUI_AVAILABLE, run_app
+
+    if not GUI_AVAILABLE:
+        print("tkinter unavailable — install python3-tk or use `python -m cybertrade web`",
+              file=sys.stderr)
+        return 2
+    print(BANNER)
+    if not _confirm_live(args, cfg):
+        return 1
+    engine = _build_engine(cfg, durable=True)
+    try:
+        run_app(engine, cfg)
+    finally:
+        engine.shutdown()
+    return 0
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    _resolve_purse(cfg, args)
+    print(BANNER)
+    if not _confirm_live(args, cfg):
+        return 1
+    host = args.host or cfg.display.web_host
+    port = args.port or cfg.display.web_port
+    engine = _build_engine(cfg, durable=True)
+    from .web.server import EngineHub, WebTerminal
+
+    hub = EngineHub(engine, cfg)
+    web = WebTerminal(hub, host=host, port=port)
+    web.start()
+    print(f"  ▸ web terminal : http://{host}:{port}")
+    print(f"  ▸ mode         : LIVE VENUE CANDLES · purse {cfg.broker.purse_label}")
+    print("  ▸ ctrl+c to stop\n")
+    try:
+        if args.auto:
+            engine.arm()
+            print("  ▸ engine ARMED (LIVE — real order flow)\n")
+        while True:
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        print("\n  shutting down…")
+    finally:
+        web.stop()
+        engine.shutdown()
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    from .constants import EngineState
+    from .exceptions import KillSwitchEngaged
+    from .shutdown import SAFETY_HOLD_EXIT, stop_on_sigterm
+    from .statestore import StateError
+
+    engine = None
+    with stop_on_sigterm():
+        try:
+            cfg = _load_config(args)
+            _resolve_purse(cfg, args)
+            print(BANNER)
+            if not _confirm_live(args, cfg):
+                return 1
+            engine = _build_engine(cfg, durable=True)
+            engine.arm()
+            print("  engine ARMED (LIVE — real order flow) — ctrl+c to stop\n")
+            while True:
+                time.sleep(5.0)
+                if engine.state is EngineState.KILL or not engine._running:
+                    print("  SAFETY HOLD — " + (engine.risk.state.kill_reason or engine.last_error))
+                    return SAFETY_HOLD_EXIT
+                snap = engine.snapshot()
+                h, a = snap["health"], snap["account"]
+                print(
+                    f"  [{h['engine_state']:^8}] posture {h['posture']:<8} "
+                    f"bal {a['balance']:>8.2f} wr {h['win_rate'] * 100:4.1f}% "
+                    f"trades {h['trades_total']} open {a['open_positions']} "
+                    f"dd {a['drawdown'] * 100:.1f}%"
+                )
+        except (ConfigError, KillSwitchEngaged, StateError) as exc:
+            print(f"  SAFETY HOLD — {exc}", file=sys.stderr)
+            return SAFETY_HOLD_EXIT
+        except KeyboardInterrupt:
+            print("\n  disarming…")
+        finally:
+            if engine is not None:
+                engine.shutdown()
+    return 0
+
+
 def cmd_quotex(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     if getattr(args, "action", "") == "login":
         return cmd_quotex_login(args, cfg)
     if getattr(args, "ssid", ""):
         cfg.broker.ssid = args.ssid  # session-only: never written to disk
-    venue = _build_venue(cfg)
-    if venue is None:
-        print("  no venue session — set QX_SSID, pass --ssid, or configure "
-              "broker.username/password")
+    try:
+        api = _live_api(cfg)
+    except Exception as exc:  # noqa: BLE001 — session trouble is a CLI error
+        print(f"  venue session unavailable ({exc})")
+        print("  no venue session — set QX_SSID, pass --ssid, run "
+              "`cybertrade quotex login`, or configure broker.username/password")
         return 1
-    api = venue.api
+    from .brokers.quotex.adapter import QuotexBroker
+
+    venue = QuotexBroker(api, allow_orders=False)
     if args.action == "status":
         try:
             api.request_instruments()
@@ -162,7 +327,7 @@ def cmd_quotex(args: argparse.Namespace) -> int:
 
 
 def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
-    """Phase-29: Chrome + your hands beat any headless login.
+    """Chrome + your hands beat any headless login.
 
     Opens a persistent Chrome profile on qxbroker.com; you sign in and solve
     the CAPTCHA yourself; we detect the `sessionid` cookie over localhost
@@ -207,245 +372,6 @@ def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
         return 1
 
 
-def _live_api(cfg: AppConfig, api_factory=None):
-    """Connected QuotexAPI for live modes — raises, never degrades.
-
-    Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
-    paired browser session (``quotex login``) → username/password login.
-    """
-    import os
-
-    from .exceptions import ConfigError
-
-    if api_factory is None:
-        api_factory = lambda: _qx_api(cfg)  # noqa: E731
-
-    api = api_factory()
-    ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
-    cookies = ""
-    if not ssid:
-        from .brokers.quotex.pairing import load_session
-
-        paired = load_session(getattr(cfg, "qx_session_path", "") or "")
-        if paired:
-            ssid = paired.get("ssid", "")
-            cookies = paired.get("cookies", "")
-    if ssid:
-        api.set_ssid(ssid, cookies)
-    elif cfg.broker.username and cfg.broker.password:
-        api.login(cfg.broker.username, cfg.broker.password,
-                  is_demo=cfg.broker.demo_account)
-    else:
-        raise ConfigError(
-            "no Quotex session — run `cybertrade quotex login` (Chrome opens; "
-            "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
-        )
-    api.connect()
-    return api
-
-
-def _build_engine(cfg: AppConfig, scenario: str = "", api_factory=None, *, durable=False):
-    from .bot.engine import TradingEngine
-
-    # Phase-29: live modes wire REAL venue candles only — synthetic is
-    # structurally impossible here (engine __init__ enforces it as gate two).
-    if cfg.broker.mode in ("dryrun", "quotex"):
-        from .brokers.quotex.adapter import QuotexBroker
-        from .data.livefeed import LiveQuotexFeed
-        from .execution.dryrun import DryRunBroker
-
-        api = _live_api(cfg, api_factory=api_factory)
-        feed = LiveQuotexFeed(
-            api,
-            assets=cfg.strategy.universe,
-            timeframe_seconds=cfg.timeframe().seconds,
-            warm_bars=400,
-        )
-        live_ok = cfg.broker.mode == "quotex" and bool(cfg.risk.allow_live)
-        venue = QuotexBroker(api, allow_orders=live_ok)
-        try:
-            adopted = venue.reconcile_venue()
-            if adopted:
-                print(f"  ⚠ reconciled {adopted} venue-open contract(s) "
-                      "from a previous session.")
-        except Exception:  # noqa: BLE001 — reconcile never blocks boot
-            pass
-        if live_ok:
-            print("  ⚠ QUOTEX LIVE — real orders enabled at the venue.")
-            broker = venue
-        else:
-            if cfg.broker.mode == "quotex":
-                print("  ⚠ mode=quotex without --live — DRY-RUN "
-                      "(venue quotes, paper fills).")
-            broker = DryRunBroker(
-                venue=venue,
-                starting_balance=cfg.risk.starting_balance,
-                default_payout=cfg.broker.payout_default,
-                latency_ms=cfg.broker.latency_ms,
-                slippage_bps=cfg.broker.slippage_bps,
-            )
-        engine = TradingEngine(cfg, feed=feed, broker=broker, durable=durable)
-        engine.boot()
-        return engine
-
-    from .data.feed import SyntheticFeed
-    from .data.synthetic import MarketParams
-
-    scenarios = {}
-    names = ("bull_trend", "range_chop", "flash_crash", "bear_trend")
-    for i, asset in enumerate(cfg.strategy.universe):
-        scenarios[asset] = scenario or names[i % len(names)]
-    feed = SyntheticFeed(
-        assets=cfg.strategy.universe,
-        scenarios=scenarios,
-        timeframe_seconds=cfg.timeframe().seconds,
-        tick_interval=0.5,
-        warmup_bars=400,
-    )
-    broker = None  # paper path — TradingEngine builds the default PaperBroker
-    engine = TradingEngine(cfg, feed=feed, broker=broker, durable=durable)
-    engine.boot()
-    return engine
-
-
-def cmd_gui(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    cfg.risk.allow_live = False  # a saved permission never arms a new process
-    from .gui import GUI_AVAILABLE, run_app
-
-    if not GUI_AVAILABLE:
-        print("tkinter unavailable — install python3-tk or use `python -m cybertrade web`",
-              file=sys.stderr)
-        return 2
-    print(BANNER)
-    engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
-    try:
-        run_app(engine, cfg)
-    finally:
-        engine.shutdown()
-    return 0
-
-
-def cmd_web(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    cfg.risk.allow_live = False
-    print(BANNER)
-    host = args.host or cfg.display.web_host
-    port = args.port or cfg.display.web_port
-    engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
-    from .web.server import EngineHub, WebTerminal
-
-    hub = EngineHub(engine, cfg)
-    web = WebTerminal(hub, host=host, port=port)
-    web.start()
-    live_data = cfg.broker.mode in ("quotex", "dryrun")
-    mode_line = (f"LIVE VENUE CANDLES ({cfg.broker.mode})"
-                 if live_data else "PAPER (simulated market)")
-    print(f"  ▸ web terminal : http://{host}:{port}")
-    print(f"  ▸ mode         : {mode_line}")
-    print("  ▸ ctrl+c to stop\n")
-    try:
-        if args.auto:
-            engine.arm(live=False)
-            print("  ▸ engine ARMED (paper)\n")
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        print("\n  shutting down…")
-    finally:
-        web.stop()
-        engine.shutdown()
-    return 0
-
-
-def cmd_run(args: argparse.Namespace) -> int:
-    from .constants import EngineState
-    from .exceptions import ConfigError, KillSwitchEngaged
-    from .statestore import StateError
-    from .watchdog import SAFETY_HOLD_EXIT, stop_on_sigterm
-
-    engine = None
-    with stop_on_sigterm():
-        try:
-            cfg = _load_config(args)
-            live = bool(getattr(args, "live", False))
-            supervised = bool(getattr(args, "supervised", False))
-            if supervised and (live or getattr(args, "dry_run", False)
-                               or cfg.broker.mode != "paper"):
-                raise ConfigError("supervised children are PAPER ONLY; live restart is manual")
-            if not live:
-                cfg.risk.allow_live = False
-            if getattr(args, "dry_run", False):
-                cfg.broker.mode = "dryrun"
-                print("  DRY RUN — venue quotes, paper fills; live orders disabled.")
-            if supervised and (not cfg.continuity_path or not cfg.heartbeat_path):
-                raise ConfigError("supervision requires continuity and heartbeat paths")
-            print(BANNER)
-            if not _confirm_live(args, cfg):
-                return 1
-            engine = _build_engine(cfg, getattr(args, "scenario", ""), durable=True)
-            engine.arm(live=live)
-            print(f"  engine ARMED ({'LIVE' if live else 'PAPER'}) — ctrl+c to stop\n")
-            while True:
-                time.sleep(5.0)
-                if engine.state is EngineState.KILL or not engine._running:
-                    print("  SAFETY HOLD — " + (engine.risk.state.kill_reason or engine.last_error))
-                    return SAFETY_HOLD_EXIT
-                snap = engine.snapshot()
-                h, a = snap["health"], snap["account"]
-                print(
-                    f"  [{h['engine_state']:^8}] posture {h['posture']:<8} "
-                    f"bal {a['balance']:>8.2f} wr {h['win_rate'] * 100:4.1f}% "
-                    f"trades {h['trades_total']} open {a['open_positions']} "
-                    f"dd {a['drawdown'] * 100:.1f}%"
-                )
-        except (ConfigError, KillSwitchEngaged, StateError) as exc:
-            print(f"  SAFETY HOLD — {exc}", file=sys.stderr)
-            return SAFETY_HOLD_EXIT
-        except KeyboardInterrupt:
-            print("\n  disarming…")
-        finally:
-            if engine is not None:
-                engine.shutdown()
-    return 0
-
-
-def cmd_supervise(args: argparse.Namespace) -> int:
-    """An intentionally narrow launcher: never supervises live executions."""
-    import os
-    from .watchdog import RestartBudget, Supervisor
-
-    cfg = _load_config(args)
-    if cfg.broker.mode != "paper":
-        print("  supervise is PAPER ONLY — live/dry-run restarts stay manual", file=sys.stderr)
-        return 2
-    if not cfg.continuity_path or not cfg.heartbeat_path:
-        print("  supervision requires continuity_path and heartbeat_path", file=sys.stderr)
-        return 2
-    cmd = [sys.executable, "-u", "-m", "cybertrade"]
-    if args.config:
-        cmd += ["--config", os.path.abspath(os.path.expanduser(args.config))]
-    cmd += ["run", "--supervised"]
-    if args.scenario:
-        cmd += ["--scenario", args.scenario]
-    interval = max(0.25, cfg.timeframe().seconds / 6.0)
-    stale = args.stale_seconds if args.stale_seconds is not None else max(45.0, interval * 2 + 15)
-    try:
-        if stale <= interval:
-            raise ValueError("stale-seconds must exceed the configured decision interval")
-        supervisor = Supervisor(
-            cmd, heartbeat_path=os.path.abspath(os.path.expanduser(cfg.heartbeat_path)),
-            crash_dir=args.crash_dir, max_stale=stale, startup_grace=args.startup_grace,
-            budget=RestartBudget(args.max_restarts, args.restart_window),
-        )
-    except ValueError as exc:
-        print(f"  invalid supervision settings: {exc}", file=sys.stderr)
-        return 2
-    print(f"  PAPER supervisor — at most {args.max_restarts} restarts / "
-          f"{args.restart_window:g}s; stale {stale:g}s; ctrl+c to stop")
-    return supervisor.run()
-
-
 def cmd_calibrate(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     from .quant.calibration import CalibrationTracker
@@ -469,58 +395,19 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     for r in rows[:40]:
         flag = "LIAR" if r["liar"] else ""
         print(f"  {r['strategy']:<28} {r['wins']:>4} {r['losses']:>4} "
-              f"{r['hit_rate'] * 100:>5.1f}% {r['p_edge_negative'] * 100:>8.1f}%  {flag}")
+              f"{r['hit_rate'] * 100:>5.1f}% {r['p_edge_negative'] * 100:>8.1f}%  "
+              f"{flag}")
     print(f"  {len(rows)} strategies · {liars} flagged · liar = "
           f"P(true edge < breakeven) > 50%")
     return 0
 
 
-def cmd_backtest(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    from .backtest import Backtester, matrix_card, matrix_table
-
-    bt = Backtester(cfg)
-    scenarios = [args.scenario] if args.scenario else None
-    print(BANNER)
-    print("  … running all-weather gauntlet (every market condition)\n")
-    results = bt.run_matrix(scenarios=scenarios, bars=args.bars, seeds=(1, 7, 42))
-    print(matrix_table(results))
-    print(matrix_card(results, payout=cfg.broker.payout_default))
-    alive = sum(1 for r in results if r.survived)
-    print(f"\n  survival: {alive}/{len(results)} scenario-seed pairs ended alive")
-    avg = sum(r.report.survival_score for r in results) / max(1, len(results))
-    print(f"  mean survival score: {avg:.3f}")
-    if args.out:
-        import json
-
-        with open(args.out, "w", encoding="utf-8") as fh:
-            json.dump([r.to_dict() for r in results], fh, indent=2)
-        print(f"  report written to {args.out}")
-    return 0
-
-
-def cmd_optimize(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    from .backtest.optimize import WalkForwardOptimizer
-
-    print(BANNER)
-    opt = WalkForwardOptimizer(scenario=args.scenario)
-    print(f"  … walk-forward search on {args.scenario}\n")
-    result = opt.search(seed=args.seed)
-    for trial in result.leaderboard():
-        print(
-            f"  test {trial.test_score:.3f} train {trial.train_score:.3f} "
-            f"gap {trial.overfit_gap:+.3f}  {trial.params}"
-        )
-    if result.best:
-        print(f"\n  best honest params: {result.best.params}")
-        if result.best.overfit_gap > opt.max_overfit_gap:
-            print("  ⚠ all candidates look overfit — distrust this leaderboard")
-    return 0
-
-
 def cmd_montecarlo(args: argparse.Namespace) -> int:
-    """Bootstrap a P&L sample forward and report survivability honestly."""
+    """Bootstrap a real P&L sample forward and report survivability honestly.
+
+    There is no synthetic sample in this build: pass your own settled P&L
+    (``--pnl``) or the record's win/loss counts (``--wins`` / ``--losses``).
+    """
     from .risk.montecarlo import simulate
 
     print(BANNER)
@@ -539,22 +426,12 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
         for n in report.notes:
             print(f"  note: {n}")
         return 0
-    if args.pnl:
-        pnls = [float(x) for x in args.pnl.split(",") if x.strip()]
-        label = f"custom sample ({len(pnls)} P&L points)"
-    else:
-        # deterministic synthetic sample: wins +stake*payout, losses -stake
-        stake = 10.0
-        breakeven_wr = 1.0 / (1.0 + payout)
-        wr = min(0.95, max(0.05, breakeven_wr + float(args.edge)))
-        n = 200
-        wins = int(round(n * wr))
-        pnls = [stake * payout] * wins + [-stake] * (n - wins)
-        # deterministic shuffle so equal seeds give equal paths
-        step = 7
-        order = sorted(range(n), key=lambda i: (i * step) % n)
-        pnls = [pnls[i] for i in order]
-        label = f"synthetic wr={wr:.1%} payout={payout:.2f} n={n}"
+    if not args.pnl:
+        print("  no sample given — this build will not invent one.", file=sys.stderr)
+        print("  pass --pnl \"+8.5,-10,+8.5,...\" (settled trades) or "
+              "--wins/--losses from your journal.", file=sys.stderr)
+        return 2
+    pnls = [float(x) for x in args.pnl.split(",") if x.strip()]
     report = simulate(
         pnls,
         starting_balance=float(args.starting_balance),
@@ -568,15 +445,14 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
         data["verdict"] = report.verdict()
         print(json.dumps(data, indent=2))
         return 0
-    print(f"  … Monte Carlo risk lab — {label}\n")
+    print(f"  … Monte Carlo risk lab — custom sample ({len(pnls)} P&L points)\n")
     print(report.summary_text())
     print(f"\n  verdict: {report.verdict()}")
     print("  (ruin line = 50% of start — fixed-fraction sizing never hits literal zero)")
     return 0
 
 
-def cmd_calendar(args: argparse.Namespace) -> int:
-    """Show news blackouts from the calendar file or estimated releases."""
+def cmd_calendar(args: argparse.Namespace) -> None:
     from .bot.calendar import EconomicCalendar
     from .utils import timex
 
@@ -591,13 +467,11 @@ def cmd_calendar(args: argparse.Namespace) -> int:
     horizon = float(args.days) * 86400.0
     events = cal.upcoming(now, horizon)
     if args.json:
-        import json
-
-        print(json.dumps({
+        print(json_dumps({
             "now": now,
             "blackout": cal.is_blackout(now),
             "events": [e.to_dict() for e in events],
-        }, indent=2))
+        }))
         return 0
     if cal.is_blackout(now):
         print("  ⚠ BLACKOUT ACTIVE RIGHT NOW — entries frozen\n")
@@ -615,10 +489,10 @@ def cmd_calendar(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_journal(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    from .analytics import journal_report  # may not exist; use package path
-    return 0
+def json_dumps(obj) -> str:
+    import json
+
+    return json.dumps(obj, indent=2)
 
 
 def cmd_journal_real(args: argparse.Namespace) -> int:
@@ -654,52 +528,6 @@ def cmd_strategies(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_scenarios(args: argparse.Namespace) -> int:
-    from .backtest.scenarios import describe_all
-
-    print(BANNER)
-    for row in describe_all():
-        print(f"  {row['name']:<20} {row.get('description', '')}")
-        print(f"  {'':<20} expect: {row.get('expect', '')}")
-    return 0
-
-
-def cmd_drill(args: argparse.Namespace) -> int:
-    """Crisis drills — shock the live defense stack and score what it did."""
-    import os
-    import tempfile
-
-    from .bot.drills import CRISIS_SCENARIOS, run_gauntlet
-    from .bot.engine import TradingEngine
-    from .data.feed import SyntheticFeed
-    from .execution.paper import PaperBroker
-
-    print(BANNER)
-    names = tuple(args.scenario) or CRISIS_SCENARIOS
-    cfg = AppConfig()
-    with tempfile.TemporaryDirectory() as tmp:
-        cfg.journal_path = os.path.join(tmp, "drill-journal.db")
-        cfg.calibration_path = os.path.join(tmp, "drill-cal.json")
-        eng = TradingEngine(cfg, feed=SyntheticFeed(),
-                            broker=PaperBroker(starting_balance=1000.0))
-        eng.boot()
-        rows = run_gauntlet(eng, scenarios=names, ticks=args.ticks, seed=args.seed)
-        eng.shutdown()
-    print(f"  SURVIVAL GAUNTLET — live defense stack (PAPER)  seed={args.seed}")
-    print(f"  {'scenario':<20} {'posture floor':<14} {'book':>4} {'salv':>4} "
-          f"{'kill':>5} {'pnl':>8}  verdict")
-    for row in rows:
-        print(f"  {row['name']:<20} {row['posture_min']:<14} "
-              f"{row.get('booked', 0):>4} {row['salvaged']:>4} "
-              f"{('YES' if row['killed'] else 'no'):>5} {row.get('pnl', 0.0):>8.2f}  "
-              f"{row['verdict']}")
-    untested = sum(1 for r in rows if r["verdict"] == "SURVIVED (untested)")
-    if untested:
-        print(f"  note: {untested} drill(s) never engaged the defenses — "
-              f"that is reported, not hidden")
-    return 0 if all(r["verdict"] != "KILLED" for r in rows) else 1
-
-
 def cmd_doctor(args: argparse.Namespace) -> int:
     print(BANNER)
     checks = []
@@ -716,6 +544,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     check("python >= 3.10", lambda: sys.version.split()[0])
     check("config validate", lambda: AppConfig().validate() or "valid")
 
+    def _live_defaults():
+        cfg = AppConfig()
+        if cfg.broker.mode != "quotex" or not cfg.risk.allow_live:
+            raise RuntimeError("live-only defaults drifted")
+        return "live-only defaults (mode=quotex, allow_live=on)"
+
+    check("live-only config", _live_defaults)
+
     def _indicators():
         from .indicators import list_indicators
 
@@ -730,12 +566,26 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     check("strategy registry", _strategies)
 
-    def _sim():
-        from .data.synthetic import generate_candles
+    def _venue_wire():
+        from .brokers.quotex.adapter import QuotexBroker
+        from .brokers.quotex.api import QuotexAPI
 
-        return f"{len(generate_candles('flash_crash', bars=30))} candles"
+        api = QuotexAPI(demo=True)
+        broker = QuotexBroker(api, allow_orders=True)
+        if not broker.allow_orders:
+            raise RuntimeError("venue broker must accept live orders")
+        return f"{broker.name} ready (allow_orders)"
 
-    check("synthetic markets", _sim)
+    check("venue wire", _venue_wire)
+
+    def _livefeed():
+        from .data.livefeed import LiveQuotexFeed
+
+        if LiveQuotexFeed.is_synthetic:
+            raise RuntimeError("the live feed must not be synthetic")
+        return "venue candles only"
+
+    check("live feed airlock", _livefeed)
 
     def _ws():
         from .network.websocket import encode_frame
@@ -753,14 +603,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     check("socket.io codec", _sio)
 
-    def _paper():
-        from .execution.paper import PaperBroker
+    def _pairing():
+        from .brokers.quotex.pairing import chrome_argv
 
-        b = PaperBroker(100)
-        b.connect()
-        return f"paper broker {b.name}"
+        argv = chrome_argv("https://qxbroker.com", "/tmp/profile", 9333,
+                          "chrome")
+        if "--remote-debugging-port=9333" not in argv:
+            raise RuntimeError("devtools argv drifted")
+        if "--user-data-dir=/tmp/profile" not in argv:
+            raise RuntimeError("profile argv drifted")
+        return "chrome pairing available"
 
-    check("paper venue", _paper)
+    check("chrome pairing", _pairing)
 
     def _gui():
         from .gui import GUI_AVAILABLE
@@ -781,6 +635,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     check("web terminal assets", _web)
 
+    def _session():
+        import os
+
+        from .brokers.quotex.pairing import load_session
+
+        paired = load_session("")
+        if paired:
+            return "paired browser session found"
+        if os.environ.get("QX_SSID"):
+            return "QX_SSID set"
+        return "no session yet — run `cybertrade quotex login`"
+
+    check("venue session", _session)
+
     failed = [c for c in checks if not c[1]]
     print(f"\n  {len(checks) - len(failed)}/{len(checks)} checks passed")
     return 1 if failed else 0
@@ -789,82 +657,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="cybertrade",
-        description="CYBERTRADE // NEON PROTOCOL — all-weather trading terminal",
+        description="CYBERTRADE // NEON PROTOCOL — live-only all-weather trading terminal",
     )
     p.add_argument("--version", action="version", version=f"cybertrade {__version__}")
     p.add_argument("-c", "--config", help="path to config json", default=None)
+
+    def purse_flags(sub: argparse.ArgumentParser) -> None:
+        purse = sub.add_mutually_exclusive_group()
+        purse.add_argument("--demo", action="store_true",
+                           help="trade the PRACTICE balance (real orders, demo money)")
+        purse.add_argument("--real", action="store_true",
+                           help="trade the REAL balance (real orders, REAL MONEY)")
+
     sub = p.add_subparsers(dest="command", required=True)
 
-    g = sub.add_parser("gui", help="desktop cyberpunk terminal")
-    g.add_argument("--scenario", default="", help="synthetic market scenario")
+    g = sub.add_parser("gui", help="desktop cyberpunk terminal (LIVE)")
+    purse_flags(g)
+    g.add_argument("-y", "--yes", action="store_true",
+                   help="skip the I UNDERSTAND confirmation")
     g.set_defaults(func=cmd_gui)
 
-    w = sub.add_parser("web", help="browser cyberpunk terminal")
+    w = sub.add_parser("web", help="browser cyberpunk terminal (LIVE)")
     w.add_argument("--host", default=None)
     w.add_argument("--port", type=int, default=None)
-    w.add_argument("--scenario", default="")
-    w.add_argument("--auto", action="store_true", help="auto-arm paper trading")
+    w.add_argument("--auto", action="store_true", help="auto-arm live trading")
+    purse_flags(w)
+    w.add_argument("-y", "--yes", action="store_true",
+                   help="skip the I UNDERSTAND confirmation")
     w.set_defaults(func=cmd_web)
 
-    r = sub.add_parser("run", help="headless paper/live trading")
-    r.add_argument("--scenario", default="")
-    r.add_argument("--live", action="store_true", help="DANGER: real order flow")
-    r.add_argument("-y", "--yes", action="store_true", help="skip live confirmation")
+    r = sub.add_parser("run", help="headless LIVE trading at the venue")
+    purse_flags(r)
+    r.add_argument("-y", "--yes", action="store_true",
+                   help="skip the I UNDERSTAND confirmation")
     r.set_defaults(func=cmd_run)
-    r.add_argument("--supervised", action="store_true", help=argparse.SUPPRESS)
-    r.add_argument("--dry-run", action="store_true",
-                   help="live venue quotes + paper fills; orders never reach the venue")
 
-    sup = sub.add_parser("supervise", help="bounded PAPER-engine crash/hang restarts")
-    sup.add_argument("--scenario", default="")
-    sup.add_argument("--max-restarts", type=int, default=5)
-    sup.add_argument("--restart-window", type=float, default=600.0, help="budget window, seconds")
-    sup.add_argument("--stale-seconds", type=float, default=None,
-                     help="no-progress timeout; default adapts to the timeframe")
-    sup.add_argument("--startup-grace", type=float, default=120.0)
-    sup.add_argument("--crash-dir", default="data/crashes")
-    sup.set_defaults(func=cmd_supervise)
-
-    b = sub.add_parser("backtest", help="run stress gauntlet")
-    b.add_argument("--scenario", default="")
-    b.add_argument("--bars", type=int, default=600)
-    b.add_argument("--out", default="", help="write json report")
-    b.set_defaults(func=cmd_backtest)
-
-    eg = sub.add_parser("edge", help="binary-options edge calculator (payout math)")
-    eg.add_argument("--payout", type=float, default=0.85, help="payout per win (0.85 = +85%%)")
-    eg.add_argument("--winrate", type=float, default=None,
-                    help="true/claimed P(win) to evaluate against the hurdle")
-    eg.add_argument("--confidence", type=float, default=None,
-                    help="a strategy's claimed confidence (for contrast only)")
-    eg.add_argument("--bankroll", type=float, default=1000.0)
-    eg.set_defaults(func=cmd_edge)
-
-    o = sub.add_parser("optimize", help="walk-forward search")
-    o.add_argument("--scenario", default="regime_whipsaw")
-    o.add_argument("--seed", type=int, default=99)
-    o.set_defaults(func=cmd_optimize)
-
-    mc = sub.add_parser("montecarlo", help="Monte Carlo risk lab (bootstrap P&L)")
-    mc.add_argument("--runs", type=int, default=2000, help="simulation paths")
-    mc.add_argument("--horizon", type=int, default=200, help="trades per path")
-    mc.add_argument("--starting-balance", type=float, default=1000.0)
-    mc.add_argument("--pnl", default="", help="comma-separated P&L sample (else built-in)")
-    mc.add_argument("--edge", type=float, default=0.0,
-                    help="win-rate edge over breakeven for a synthetic sample")
-    mc.add_argument("--payout", type=float, default=0.85)
-    mc.add_argument("--json", action="store_true")
-    mc.set_defaults(func=cmd_montecarlo)
-    mc.add_argument("--wins", type=int, default=None,
-                    help="posterior mode: settled wins in the record")
-    mc.add_argument("--losses", type=int, default=None,
-                    help="posterior mode: settled losses in the record")
-    clb = sub.add_parser("calibrate", help="calibration honesty ledger (persisted)")
-    clb.add_argument("--path", default="",
-                     help="ledger path (default: config calibration_path)")
-    clb.add_argument("--payout", type=float, default=0.85,
-                     help="payout hurdle for liar flags")
-    clb.set_defaults(func=cmd_calibrate)
     qx = sub.add_parser("quotex", help="venue session: login / status / warm")
     qx.add_argument("action", choices=["status", "warm", "login"])
     qx.add_argument("--ssid", default="",
@@ -881,6 +708,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="seconds to wait for your manual login + CAPTCHA")
     qx.set_defaults(func=cmd_quotex)
 
+    clb = sub.add_parser("calibrate", help="calibration honesty ledger (persisted)")
+    clb.add_argument("--path", default="",
+                     help="ledger path (default: config calibration_path)")
+    clb.add_argument("--payout", type=float, default=0.85,
+                     help="payout hurdle for liar flags")
+    clb.set_defaults(func=cmd_calibrate)
+
     cal = sub.add_parser("calendar", help="economic calendar / news blackouts")
     cal.add_argument("--days", type=float, default=7.0, help="horizon in days")
     cal.add_argument("--year", type=int, default=0, help="estimate releases for YEAR")
@@ -890,19 +724,30 @@ def build_parser() -> argparse.ArgumentParser:
     j = sub.add_parser("journal", help="journal analytics")
     j.set_defaults(func=cmd_journal_real)
 
-
     s = sub.add_parser("strategies", help="list strategies")
     s.set_defaults(func=cmd_strategies)
 
-    sc = sub.add_parser("scenarios", help="list stress scenarios")
-    sc.set_defaults(func=cmd_scenarios)
+    eg = sub.add_parser("edge", help="binary-options edge calculator (payout math)")
+    eg.add_argument("--payout", type=float, default=0.85, help="payout per win (0.85 = +85%%)")
+    eg.add_argument("--winrate", type=float, default=None,
+                    help="true/claimed P(win) to evaluate against the hurdle")
+    eg.add_argument("--confidence", type=float, default=None,
+                    help="a strategy's claimed confidence (for contrast only)")
+    eg.add_argument("--bankroll", type=float, default=1000.0)
+    eg.set_defaults(func=cmd_edge)
 
-    dr = sub.add_parser("drill", help="crisis drills — live-stack survival gauntlet")
-    dr.add_argument("scenario", nargs="*", default=[],
-                    help="scenario name(s) — default: all five crisis drills")
-    dr.add_argument("--ticks", type=int, default=400, help="shock ticks per scenario")
-    dr.add_argument("--seed", type=int, default=1337)
-    dr.set_defaults(func=cmd_drill)
+    mc = sub.add_parser("montecarlo", help="Monte Carlo risk lab (real records only)")
+    mc.add_argument("--runs", type=int, default=2000, help="simulation paths")
+    mc.add_argument("--horizon", type=int, default=200, help="trades per path")
+    mc.add_argument("--starting-balance", type=float, default=1000.0)
+    mc.add_argument("--pnl", default="", help="comma-separated settled P&L sample")
+    mc.add_argument("--payout", type=float, default=0.85)
+    mc.add_argument("--json", action="store_true")
+    mc.add_argument("--wins", type=int, default=None,
+                    help="posterior mode: settled wins in the record")
+    mc.add_argument("--losses", type=int, default=None,
+                    help="posterior mode: settled losses in the record")
+    mc.set_defaults(func=cmd_montecarlo)
 
     d = sub.add_parser("doctor", help="environment self-test")
     d.set_defaults(func=cmd_doctor)
@@ -923,7 +768,7 @@ def cmd_edge(args: argparse.Namespace) -> int:
         print(f"kelly stake   : {kelly_stake(p, b, args.bankroll):.2f} of {args.bankroll:.2f}"
               f"  (fraction {kelly_fraction_for(p, b):.4f})")
     if args.confidence is not None:
-        print(f"confidence    : {args.confidence:.2f}  <- a CLAIM, not P(win);"
+        print(f"confidence    : {args.confidence:.2f} <- a CLAIM, not P(win);"
               f" the engine gates on calibrated P(win) from its own ledger.")
     return 0
 

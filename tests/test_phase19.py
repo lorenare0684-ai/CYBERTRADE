@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 from cybertrade.constants import Side
 from cybertrade.data.models import Order, Settlement, Tick
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 class TestSettlementSalvage(unittest.TestCase):
@@ -39,9 +40,8 @@ class TestSettlementSalvage(unittest.TestCase):
 
 class TestPaperSalvage(unittest.TestCase):
     def setUp(self):
-        from cybertrade.execution.paper import PaperBroker
-
-        self.b = PaperBroker(starting_balance=1000.0, salvage_rate=0.25)
+        
+        self.b = VenueStub(balance=1000.0, salvage_rate=0.25)
         self.b.connect()
         self.b.on_tick(Tick(asset="EURUSD_otc", price=1.0))
 
@@ -114,15 +114,13 @@ class TestLifeboat(unittest.TestCase):
     def test_lockdown_salvages_all(self):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.config import AppConfig
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
-
+                
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            b = PaperBroker(starting_balance=1000.0)
-            eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0), broker=b)
+            b = VenueStub(balance=1000.0)
+            eng = TradingEngine(cfg, feed=VenueFeed(), broker=b)
             eng.boot()
             asset = eng.feed.assets[0]
             eng.broker.on_tick(Tick(asset=asset, price=1.0))
@@ -150,16 +148,14 @@ class TestLifeboat(unittest.TestCase):
     def test_salvage_disabled_by_config(self):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.config import AppConfig
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
-
+                
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
             cfg.risk.crisis_salvage = False
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            b = PaperBroker(starting_balance=1000.0)
-            eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0), broker=b)
+            b = VenueStub(balance=1000.0)
+            eng = TradingEngine(cfg, feed=VenueFeed(), broker=b)
             eng.boot()
             asset = eng.feed.assets[0]
             eng.broker.on_tick(Tick(asset=asset, price=1.0))

@@ -17,6 +17,7 @@ from cybertrade.config import AppConfig
 from cybertrade.quant.calibration import CalibrationTracker
 from cybertrade.risk.montecarlo import simulate_posterior
 
+from tests.venue_stubs import VenueFeed, VenueStub
 
 def _ledger_dict(a_w: int = 80, a_l: int = 20, b_w: int = 12, b_l: int = 8):
     return {
@@ -129,9 +130,7 @@ class TestHonestyLedger(unittest.TestCase):
 class TestEnginePersistence(unittest.TestCase):
     def test_boot_restore_shutdown_save(self):
         from cybertrade.bot.engine import TradingEngine
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
-
+                
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "cal.json")
             seed = CalibrationTracker()
@@ -142,7 +141,7 @@ class TestEnginePersistence(unittest.TestCase):
             cfg.calibration_path = path
             cfg.journal_path = os.path.join(tmp, "journal.db")
             eng = TradingEngine(
-                cfg, feed=SyntheticFeed(tick_interval=60.0), broker=PaperBroker()
+                cfg, feed=VenueFeed(), broker=VenueStub()
             )
             eng.boot()
             self.assertEqual(eng.calibrator.evidence(), (92, 28))

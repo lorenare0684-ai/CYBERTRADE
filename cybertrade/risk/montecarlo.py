@@ -192,7 +192,7 @@ def simulate(
             p05_min_equity=starting_balance,
             median_max_drawdown=0.0, p95_max_drawdown=0.0,
             expectancy_per_trade=0.0,
-            notes=["no trades to resample — run a backtest or trade first"],
+            notes=["no trades to resample — trade first; this build never invents a sample"],
         )
     horizon = horizon or max(50, n_obs)
     ruin_level = starting_balance * ruin_frac

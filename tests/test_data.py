@@ -1,23 +1,15 @@
-"""Data layer tests: models, history, synthetic markets, feeds."""
+"""Data layer tests: models, history, venue/replay feeds (no synthetic market)."""
 
 from __future__ import annotations
 
-import time
 import unittest
 
 from cybertrade.constants import Side, Timeframe
-from cybertrade.data.feed import QuoteBook, ReplayFeed, SyntheticFeed
+from cybertrade.data.feed import Feed, QuoteBook, ReplayFeed
 from cybertrade.data.history import CandleSeries, MultiTimeframeBook, load_history, resample
 from cybertrade.data.models import Candle, Fill, Order, Position, Settlement, Tick
-from cybertrade.data.synthetic import (
-    SCENARIO_NAMES,
-    MarketParams,
-    MarketSimulator,
-    generate_candles,
-    make_process,
-    scenario_catalog,
-)
 
+from tests.venue_stubs import VenueFeed, VenueStub, venue_candles
 
 class TestCandle(unittest.TestCase):
     def test_update_and_props(self):
@@ -66,7 +58,7 @@ class TestCandleSeries(unittest.TestCase):
         self.assertFalse(candles[1].closed)
 
     def test_resample(self):
-        small = generate_candles("gbm", bars=60, params=MarketParams(timeframe_seconds=60))
+        small = venue_candles(bars=60)
         big = resample(small, 300)
         self.assertTrue(len(big) <= 13)
         self.assertEqual(big[0].timeframe_seconds, 300)
@@ -83,52 +75,9 @@ class TestCandleSeries(unittest.TestCase):
         self.assertEqual(candles[-1].close, 1.2)
 
 
-class TestSynthetic(unittest.TestCase):
-    def test_all_scenarios_generate(self):
-        for name in SCENARIO_NAMES:
-            cs = generate_candles(name, bars=40, seed=3)
-            self.assertEqual(len(cs), 40, msg=name)
-            for c in cs:
-                self.assertGreaterEqual(c.high, c.low)
-                self.assertGreaterEqual(c.high, c.open)
-                self.assertLessEqual(c.low, c.open)
-
-    def test_deterministic(self):
-        a = generate_candles("gbm", bars=50, seed=9)
-        b = generate_candles("gbm", bars=50, seed=9)
-        self.assertEqual([c.close for c in a], [c.close for c in b])
-
-    def test_different_seeds_differ(self):
-        a = generate_candles("gbm", bars=50, seed=1)
-        b = generate_candles("gbm", bars=50, seed=2)
-        self.assertNotEqual([c.close for c in a], [c.close for c in b])
-
-    def test_bull_trends_up(self):
-        cs = generate_candles("bull_trend", bars=300, seed=4)
-        self.assertGreater(cs[-1].close, cs[0].close * 1.005)
-
-    def test_bear_trends_down(self):
-        cs = generate_candles("bear_trend", bars=300, seed=4)
-        self.assertLess(cs[-1].close, cs[0].close * 0.995)
-
-    def test_simulator_tick(self):
-        sim = MarketSimulator("range_chop", seed=2)
-        px, spread = sim.tick()
-        self.assertGreater(px, 0)
-        self.assertGreaterEqual(spread, 0)
-
-    def test_catalog(self):
-        rows = scenario_catalog()
-        self.assertGreaterEqual(len(rows), 10)
-
-    def test_unknown_scenario(self):
-        with self.assertRaises(Exception):
-            make_process("no_such_scenario")
-
-
 class TestFeeds(unittest.TestCase):
     def test_replay(self):
-        candles = generate_candles("gbm", bars=20)
+        candles = venue_candles(bars=20)
         feed = ReplayFeed("A", candles)
         seen = []
         feed.add_listener(lambda t: seen.append(t.price))
@@ -136,19 +85,17 @@ class TestFeeds(unittest.TestCase):
         self.assertEqual(len(ticks), 20)
         self.assertEqual(len(seen), 20)
 
-    def test_synthetic_warmup_and_ticks(self):
-        feed = SyntheticFeed(
-            assets=["A"], scenarios={"A": "gbm"},
-            timeframe_seconds=60, tick_interval=0.01, warmup_bars=50,
-        )
-        feed.warmup()
-        self.assertGreaterEqual(len(feed.book("A").book(60)), 40)
-        got = []
-        feed.add_listener(lambda t: got.append(t))
-        feed.start()
-        time.sleep(0.15)
-        feed.stop()
-        self.assertTrue(got)
+    def test_replay_feed_is_refused_in_live_modes(self):
+        """The airlock still holds: a recorded tape is not venue data."""
+        feed = ReplayFeed("A", venue_candles(bars=20))
+        self.assertTrue(feed.is_synthetic)
+        from cybertrade.config import AppConfig
+        from cybertrade.exceptions import ConfigError
+
+        with self.assertRaises(ConfigError):
+            from cybertrade.bot.engine import TradingEngine
+
+            TradingEngine(AppConfig(), feed=feed, broker=VenueStub())
 
     def test_quote_book(self):
         qb = QuoteBook()

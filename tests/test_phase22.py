@@ -15,9 +15,7 @@ import tempfile
 import unittest
 
 from cybertrade.config import AppConfig
-from cybertrade.data.feed import SyntheticFeed
 from cybertrade.data.models import Settlement, Side, TradeRecord
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.journal import TradeJournal, journal_report
 from cybertrade.web.server import EngineHub, WebTerminal
 
@@ -28,6 +26,7 @@ from cybertrade.risk.sessions import (
     session_report,
 )
 from cybertrade.bot.engine import TradingEngine
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _ts(hour: int, weekday: int = 1) -> float:
@@ -88,8 +87,8 @@ class TestSessionWiring(unittest.TestCase):
     def _engine(self) -> TradingEngine:
         return TradingEngine(
             AppConfig(),
-            feed=SyntheticFeed(tick_interval=60.0),
-            broker=PaperBroker(starting_balance=1000.0),
+            feed=VenueFeed(),
+            broker=VenueStub(balance=1000.0),
         )
 
     def test_engine_session_report_in_state(self):

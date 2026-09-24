@@ -79,19 +79,16 @@ strategy that overstates confidence gradually loses its own gate. Order-flow
 snapshots (`TickFlow`) ride in `StrategyContext.extra["flow"]`; the
 `TapeRecorder` taps the event bus at boot for bounded JSONL forensics.
 
-The backtester wires the identical gate (`backtest/engine.py`) with a fresh
-calibrator per run, and `RiskConfig.expiry_select="adaptive"` swaps the
-signal's horizon for the best modeled candidate (`quant/expiry.py`).
+`RiskConfig.expiry_select="adaptive"` swaps the signal's horizon for the
+best candidate (`quant/expiry.py`).
 Since Phase 6 the gate estimate is `p_win_for = min(blob, voter-blend)`
 (`observe_votes` gives every voter its own reliability table; Kelly sizing
 consumes the same calibrated P(win)); since Phase 7 every estimate can be
 conditioned on the active regime (`p_regime`, `RiskConfig.regime_cal`), and
-`oms.submit` carries `votes` so live settlements teach the same tables the
-backtester does. Since Phase 8 the hurdle itself is a venue quote
+`oms.submit` carries `votes` so every live settlement teaches those tables.
+Since Phase 8 the hurdle itself is a venue quote
 (`broker.payout_for`, per asset/expiry) feeding gate, sizing, and expiry
-selection; `min_payout` is the scam floor below that math. Phase 9 adds the
-dry-run harness (`execution/dryrun.py` + `QuotexBroker(allow_orders=False)`):
-live quotes and ticks in, paper fills out, zero venue orders.
+selection; `min_payout` is the scam floor below that math.
 
 ## Testing strategy
 
@@ -99,7 +96,8 @@ live quotes and ticks in, paper fills out, zero venue orders.
    series, Kelly bounds, drawdown of fixed curves.
 2. **Wire-level goldens** — Engine.IO/Socket.IO encode/decode round-trips and
    literal protocol strings (`42["authorization",{...}]`).
-3. **Survival regressions** — flash-crash scenario must never reach zero
-   equity; every strategy must run crash-free on every regime.
+3. **Survival regressions** — every strategy must run crash-free on every
+   recorded tape shape; the crash-echo guard must never call a clean bull
+   trend during a drawdown.
 4. **Clock discipline** — simulated/backdated streams re-anchor rate limits;
    cooldowns accept an explicit `now`.

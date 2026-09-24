@@ -3,6 +3,10 @@
 Zero dependencies.  A :class:`ThreadingHTTPServer` serves the dashboard and
 streams live engine telemetry over SSE so the browser HUD stays hot without
 websockets.
+
+Live only: the console arms a live engine (real order flow) and offers no
+paper, dry-run, drill, backtest or scenario-swap controls — none of those
+machinery exists in this build.
 """
 
 from __future__ import annotations
@@ -51,22 +55,14 @@ class EngineHub:
         self.config = config
         self.started = timex.now()
         self._log_lines: List[dict] = []
-        # Phase-23: score-bay jobs (one at a time) + bus mute while a temp
-        # gauntlet engine runs so its ticks never flicker the live chart.
-        self._job: Dict[str, Any] = {"state": "idle"}
-        self._job_lock = threading.Lock()
-        self._mute = threading.Event()
         default_bus.subscribe(Topic.LOG, self._on_log)
         for topic in (Topic.TICK, Topic.SIGNAL, Topic.SETTLE, Topic.REGIME,
                       Topic.ENGINE_STATE, Topic.RISK_REJECT, Topic.KILL,
-                      Topic.FILL, Topic.ALERT, Topic.NEWS, Topic.BALANCE,
-                      Topic.SCENARIO):
+                      Topic.FILL, Topic.ALERT, Topic.NEWS, Topic.BALANCE):
             default_bus.subscribe(topic, self._make_forwarder(topic.value))
 
     def _make_forwarder(self, name: str):
         def _forward(event) -> None:
-            if self._mute.is_set():  # temp gauntlet engine — do not cross-wire
-                return
             payload = event.payload
             if hasattr(payload, "to_dict"):
                 payload = payload.to_dict()
@@ -83,8 +79,7 @@ class EngineHub:
         return _forward
 
     def _on_log(self, event) -> None:
-        if self._mute.is_set():
-            return
+        # the score bay's mute flag is gone with it: every log line is live
         rec = dict(event.payload)
         self._log_lines.append(rec)
         if len(self._log_lines) > 400:
@@ -107,13 +102,6 @@ class EngineHub:
                 candles[asset] = []
         ledger = self.engine.oms.ledger
         equity_curve = [[ts, bal] for ts, bal in list(ledger.equity_curve)[-400:]]
-        feed = self.engine.feed
-        scenarios = {}
-        if callable(getattr(feed, "current_scenarios", None)):
-            try:
-                scenarios = feed.current_scenarios()
-            except Exception:  # noqa: BLE001
-                scenarios = {}
         return {
             "ts": timex.now(),
             "uptime": timex.now() - self.started,
@@ -134,7 +122,6 @@ class EngineHub:
                 self.engine.feed.assets[:6]
             ) if len(self.engine.feed.assets) > 1 else {},
             "calendar": self.engine.calendar.to_list(timex.now())[:8],
-            "scenarios": scenarios,
             # -- Phase-4 edge layer -----------------------------------------
             "edge": {
                 "payout": round(self.worst_payout(), 4),
@@ -149,93 +136,8 @@ class EngineHub:
             },
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
-            "drill": self.engine.drill_report(),
             "session": self.engine.session_report(),
-            "job": self.job_report(),
         }
-
-    def job_report(self) -> Dict[str, Any]:
-        """Phase-23: async score-bay job status (idle/running/done/error)."""
-        with self._job_lock:
-            return dict(self._job)
-
-    def start_job(self, kind: str, opts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Launch a backtest/gauntlet off the request thread (one at a time)."""
-        if kind not in ("backtest", "gauntlet"):
-            return {"ok": False, "error": f"unknown job {kind!r}"}
-        opts = dict(opts or {})
-        with self._job_lock:
-            if self._job.get("state") == "running":
-                return {"ok": False, "error": "a job is already running",
-                        "job": dict(self._job)}
-            self._job = {"state": "running", "kind": kind,
-                         "started": timex.now(), "opts": opts}
-        threading.Thread(target=self._run_job, args=(kind, opts),
-                         daemon=True, name=f"score-{kind}").start()
-        return {"ok": True, "job": dict(self._job)}
-
-    def _run_job(self, kind: str, opts: Dict[str, Any]) -> None:
-        """Worker: the live engine is never touched — gauntlet gets a temp one."""
-        import os
-        import tempfile
-
-        from ..config import AppConfig
-
-        started = timex.now()
-        try:
-            if kind == "backtest":
-                from ..backtest import Backtester, matrix_card, matrix_table
-
-                cfg = self.engine.config or AppConfig()
-                bt = Backtester(cfg)
-                results = bt.run_matrix(
-                    scenarios=list(opts["scenarios"]) if opts.get("scenarios") else None,
-                    bars=int(opts.get("bars") or 200),
-                    seeds=tuple(opts.get("seeds") or (1, 7, 42)),
-                )
-                payload = {
-                    "table": matrix_table(results),
-                    "card": matrix_card(results, payout=cfg.broker.payout_default),
-                    "runs": len(results),
-                    "alive": sum(1 for r in results if r.survived),
-                }
-            else:  # gauntlet — isolated temp engine, live stack untouched
-                from ..bot.drills import CRISIS_SCENARIOS, run_gauntlet
-                from ..bot.engine import TradingEngine
-                from ..data.feed import SyntheticFeed
-                from ..execution.paper import PaperBroker
-
-                names = tuple(opts.get("scenarios") or CRISIS_SCENARIOS)
-                cfg = AppConfig()
-                self._mute.set()  # its bus traffic must not reach the HUD
-                try:
-                    with tempfile.TemporaryDirectory() as tmp:
-                        cfg.journal_path = os.path.join(tmp, "score-journal.db")
-                        cfg.calibration_path = os.path.join(tmp, "score-cal.json")
-                        eng = TradingEngine(
-                            cfg, feed=SyntheticFeed(),
-                            broker=PaperBroker(starting_balance=1000.0),
-                        )
-                        eng.boot()
-                        try:
-                            rows = run_gauntlet(
-                                eng, scenarios=names,
-                                ticks=int(opts.get("ticks") or 150),
-                                seed=int(opts.get("seed") or 1337),
-                            )
-                        finally:
-                            eng.shutdown()
-                finally:
-                    self._mute.clear()
-                payload = {"rows": rows, "runs": len(rows)}
-            with self._job_lock:
-                self._job = {"state": "done", "kind": kind, "started": started,
-                             "finished": timex.now(), "result": payload}
-        except Exception as exc:  # noqa: BLE001 — surface, never crash the hub
-            self._mute.clear()
-            with self._job_lock:
-                self._job = {"state": "error", "kind": kind, "started": started,
-                             "finished": timex.now(), "error": str(exc)}
 
     def worst_payout(self) -> float:
         """The binding hurdle: the lowest venue quote across the universe."""
@@ -341,14 +243,17 @@ class EngineHub:
             )
             source = source_hint
         else:
-            from ..risk.montecarlo import simulate
-
-            # conservative placeholder: small negative edge, wide variance
-            report = simulate(
-                [8.5, -10.0] * 40 + [8.5] * 8,
-                starting_balance=starting, runs=runs, horizon=horizon,
-            )
-            source = "placeholder"
+            # No record, no invented sample: this build reports the hole.
+            return {
+                "empty": True,
+                "source": "none",
+                "n_trades": 0,
+                "verdict": "NO DATA",
+                "summary": (
+                    "no settled trades to resample — trade live (or read the "
+                    "journal) before the risk lab has anything honest to say"
+                ),
+            }
         data = report.to_dict()
         data["verdict"] = report.verdict()
         data["source"] = source
@@ -414,10 +319,6 @@ class WebTerminal:
                     return self._json(200, terminal.hub.logs())
                 if path == "/api/events":
                     return self._sse()
-                if path == "/api/scenarios":
-                    from ..backtest.scenarios import describe_all
-
-                    return self._json(200, describe_all())
                 if path == "/api/strategies":
                     return self._json(200, terminal.hub.engine.ensemble.describe())
                 if path == "/api/montecarlo":
@@ -501,7 +402,7 @@ class WebTerminal:
         engine = self.hub.engine
         try:
             if cmd == "arm":
-                engine.arm(live=False)
+                engine.arm()
                 return {"ok": True, "state": engine.state.value}
             if cmd == "disarm":
                 engine.disarm()
@@ -532,13 +433,6 @@ class WebTerminal:
                 )
                 placed = engine.inject_signal(sig)
                 return {"ok": placed, "placed": placed}
-            if cmd == "resolve_paper":
-                from ..statestore import finite
-                pos_id = str(body.get("position") or "")
-                price = finite(body.get("expiry_price"), "expiry_price", 1e-12)
-                resolved = engine.oms.resolve_recovery(pos_id, price)
-                return {"ok": resolved, "resolved": pos_id if resolved else "",
-                        "error": "" if resolved else "not a held paper position"}
             if cmd == "close":
                 pos_id = str(body.get("position") or "")
                 if not pos_id:
@@ -567,43 +461,6 @@ class WebTerminal:
                 engine.survivor.clear_lockdown()
                 engine.save_operator_state()
                 return {"ok": True}
-            if cmd == "scenario":
-                asset = str(body.get("asset") or "")
-                scenario = str(body.get("scenario") or "")
-                feed = engine.feed
-                setter = getattr(feed, "set_scenario", None)
-                if not callable(setter):
-                    return {"ok": False, "error": "feed does not support scenario swaps"}
-                setter(asset, scenario)
-                from ..events import Topic as _T
-
-                default_bus.publish(
-                    _T.SCENARIO,
-                    {"asset": asset, "scenario": scenario},
-                    source="web",
-                )
-                current = feed.current_scenarios() if callable(
-                    getattr(feed, "current_scenarios", None)) else {}
-                return {"ok": True, "scenarios": current}
-            if cmd == "drill":
-                from ..bot.drills import CRISIS_SCENARIOS
-
-                scenario = str(body.get("scenario") or "")
-                if scenario in ("", "stop"):
-                    engine.drill.disarm()
-                    return {"ok": True, "drill": engine.drill_report()}
-                if scenario not in CRISIS_SCENARIOS:
-                    return {"ok": False, "error": f"unknown drill {scenario!r}"}
-                engine.drill.arm(scenario, assets=engine.feed.assets,
-                                 ticks=int(body.get("ticks") or 250))
-                from ..events import Topic as _T
-
-                default_bus.publish(_T.SCENARIO, {"drill": scenario}, source="web")
-                return {"ok": True, "drill": engine.drill_report()}
-            if cmd == "run":
-                kind = str(body.get("kind") or "")
-                opts = body.get("opts") if isinstance(body.get("opts"), dict) else {}
-                return self.hub.start_job(kind, opts)
             if cmd == "strategy":
                 name = str(body.get("name") or "")
                 enabled = bool(body.get("enabled", True))

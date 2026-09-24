@@ -30,11 +30,11 @@ from cybertrade.brokers.quotex.pairing import (
 )
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
-from cybertrade.data.feed import ReplayFeed, SyntheticFeed
+from cybertrade.data.feed import ReplayFeed
 from cybertrade.data.livefeed import LiveQuotexFeed
 from cybertrade.data.models import Candle, Tick
 from cybertrade.exceptions import ConfigError, FeedError
-from cybertrade.execution.paper import PaperBroker
+from tests.venue_stubs import VenueFeed, VenueStub, venue_candles
 
 
 def _candles(asset: str, n: int = 12):
@@ -194,7 +194,6 @@ class TestPairSession(unittest.TestCase):
 class TestLiveFeed(unittest.TestCase):
     def test_flags_and_warmup_and_ticks(self):
         self.assertFalse(LiveQuotexFeed.is_synthetic)
-        self.assertTrue(SyntheticFeed.is_synthetic)
         self.assertTrue(ReplayFeed.is_synthetic)
 
         api = FakeApi(bars=12)
@@ -225,31 +224,28 @@ class TestLiveFeed(unittest.TestCase):
         self.assertIn("quotex login", str(ctx.exception))
 
 
-class TestEngineRefusesSyntheticInLiveModes(unittest.TestCase):
-    def test_quotex_mode_rejects_synthetic_feed(self):
+class TestEngineRefusesForeignFeeds(unittest.TestCase):
+    def test_replay_feed_is_refused_in_live_mode(self):
         cfg = AppConfig()
         cfg.broker.mode = "quotex"
         with self.assertRaises(ConfigError) as ctx:
-            TradingEngine(cfg, feed=SyntheticFeed(assets=["EURUSD_otc"]),
-                          broker=PaperBroker())
+            TradingEngine(cfg, feed=ReplayFeed("EURUSD_otc", venue_candles(n=5)),
+                          broker=VenueStub())
         self.assertIn("quotex login", str(ctx.exception))
 
-    def test_dryrun_mode_rejects_synthetic_feed(self):
-        cfg = AppConfig()
-        cfg.broker.mode = "dryrun"
-        with self.assertRaises(ConfigError):
-            TradingEngine(cfg, feed=SyntheticFeed(assets=["EURUSD_otc"]),
-                          broker=PaperBroker())
+    def test_any_mode_but_quotex_is_refused(self):
+        for mode in ("paper", "dryrun", "sim", "bogus"):
+            cfg = AppConfig()
+            cfg.broker.mode = mode
+            with self.assertRaises(ConfigError):
+                TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD_otc"]),
+                              broker=VenueStub())
 
-    def test_paper_mode_allows_synthetic_and_live_also_ok(self):
-        cfg = AppConfig()  # paper default
-        TradingEngine(cfg, feed=SyntheticFeed(assets=["EURUSD_otc"]),
-                      broker=PaperBroker())
-        cfg2 = AppConfig()
-        cfg2.broker.mode = "quotex"
-        feed = LiveQuotexFeed(FakeApi(), assets=["EURUSD_otc"],
-                              refresh_seconds=0.0)
-        TradingEngine(cfg2, feed=feed, broker=PaperBroker())  # constructs
+    def test_missing_broker_or_feed_is_refused(self):
+        cfg = AppConfig()
+        cfg.broker.mode = "quotex"
+        with self.assertRaises(ConfigError):
+            TradingEngine(cfg, feed=None, broker=None)
 
 
 class TestLiveApiSessionSources(unittest.TestCase):
@@ -258,7 +254,6 @@ class TestLiveApiSessionSources(unittest.TestCase):
 
         tmp = tempfile.mkdtemp()
         cfg = AppConfig()
-        cfg.broker.mode = "dryrun"
         cfg.qx_session_path = os.path.join(tmp, "qx.json")
         save_session(cfg.qx_session_path,
                      {"ssid": "FILESSID", "cookies": "sessionid=FILESSID"})
@@ -280,7 +275,6 @@ class TestLiveApiSessionSources(unittest.TestCase):
         from cybertrade.cli import _live_api
 
         cfg = AppConfig()
-        cfg.broker.mode = "dryrun"
         cfg.qx_session_path = os.path.join(tempfile.mkdtemp(), "none.json")
         with self.assertRaises(ConfigError) as ctx:
             _live_api(cfg, api_factory=lambda: FakeApi())

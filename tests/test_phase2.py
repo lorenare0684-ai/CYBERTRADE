@@ -22,8 +22,7 @@ from cybertrade.bot.calendar import (
 from cybertrade.config import AppConfig
 from cybertrade.constants import MarketRegime, Side
 from cybertrade.data.models import Candle
-from cybertrade.data.feed import SyntheticFeed
-from cybertrade.data.synthetic import SCENARIO_NAMES, MarketParams, generate_candles, make_process
+from tests.venue_stubs import VenueFeed, make_engine, venue_candles
 from cybertrade.events import Topic, default_bus
 from cybertrade.indicators.core import rsi
 from cybertrade.indicators.divergence import (
@@ -399,50 +398,46 @@ class TestPlugins(unittest.TestCase):
         self.assertEqual(reg.load_all(), [])
 
 
-class TestScenarios(unittest.TestCase):
-    def test_all_scenarios_generate(self):
-        for name in SCENARIO_NAMES:
-            candles = generate_candles(name, bars=80, seed=5)
-            self.assertEqual(len(candles), 80, name)
-            self.assertTrue(all(c.high >= c.low for c in candles), name)
+class TestVenueTape(unittest.TestCase):
+    def test_tape_shape_is_stable(self):
+        # the same shape/seed always yields the same path — a recorded tape
+        a = venue_candles(n=40, shape="range", seed=9)
+        b = venue_candles(n=40, shape="range", seed=9)
+        self.assertEqual([c.close for c in a], [c.close for c in b])
+        self.assertNotEqual([c.close for c in a],
+                            [c.close for c in venue_candles(n=40, shape="trend_up", seed=9)])
 
-    def test_process_deterministic(self):
-        a = make_process("flash_crash", MarketParams(), seed=9)
-        b = make_process("flash_crash", MarketParams(), seed=9)
-        sa, sb = a.initial_state(), b.initial_state()
-        for _ in range(30):
-            self.assertAlmostEqual(a.step(sa), b.step(sb), places=12)
-
-    def test_feed_hot_swap_keeps_price(self):
-        feed = SyntheticFeed(assets=["EURUSD"], scenarios={"EURUSD": "gbm"},
-                             warmup_bars=20, tick_interval=0.01)
+    def test_feed_warmup_keeps_last_price(self):
+        feed = VenueFeed(assets=["EURUSD"])
         feed.warmup()
-        before = feed.last_price("EURUSD")
-        feed.set_scenario("EURUSD", "flash_crash")
-        self.assertEqual(feed.current_scenarios()["EURUSD"], "flash_crash")
-        self.assertAlmostEqual(feed.last_price("EURUSD"), before, places=9)
-        feed.set_scenario("EURUSD", "regime_whipsaw")
-        self.assertEqual(feed.scenarios["EURUSD"], "regime_whipsaw")
+        self.assertEqual(feed.last_price("EURUSD"),
+                         feed.history("EURUSD", 1, 60)[-1].close)
 
-    def test_warmup_resumes_sim_price(self):
-        # regression: warmup used to leave sim.state.price at start_price, so
-        # the first live tick teleported price and faked a crash bar at boot
-        feed = SyntheticFeed(assets=["EURUSD"], scenarios={"EURUSD": "bull_trend"},
-                             warmup_bars=300, tick_interval=0.01)
-        feed.warmup()
-        sim = feed._sims["EURUSD"]
-        self.assertAlmostEqual(sim.state.price, feed.last_price("EURUSD"), places=9)
-        px, _spread = sim.tick()
-        # the next tick must live in the same neighbourhood (no teleport)
-        self.assertLess(abs(px - feed.last_price("EURUSD")) / feed.last_price("EURUSD"), 0.05)
+    def test_feed_advance_appends_closed_bars(self):
+        feed = VenueFeed(assets=["EURUSD"])
+        last_ts = feed.history("EURUSD", 1, 60)[-1].open_ts
+        feed.advance(3)
+        candles = feed.history("EURUSD", 4, 60)
+        self.assertEqual(len(candles), 4)
+        self.assertGreater(candles[-1].open_ts, last_ts)
+
+
+def _settled(i: int, won: bool):
+    from cybertrade.constants import Side
+    from cybertrade.data.models import Fill, Settlement
+
+    fill = Fill(order_id=f"o{i}", asset="EURUSD_otc", side=Side.CALL,
+                price=1.1, amount=10.0, payout=0.85)
+    return Settlement(fill_id=fill.id, order_id=fill.order_id,
+                      asset="EURUSD_otc", side=Side.CALL, strike=1.1,
+                      expiry_price=1.2 if won else 1.0, stake=10.0,
+                      payout=0.85 if won else 0.0, won=won)
 
 
 class TestEnginePhase2Wiring(unittest.TestCase):
     def test_calendar_veto_and_cluster_plumbing(self):
-        from cybertrade.bot.engine import TradingEngine
-
-        eng = TradingEngine(AppConfig())
-        eng.boot()
+        eng = make_engine(self, assets=["EURUSD"])
+        eng.config.survivor.news_blackout_minutes = 5.0
         try:
             self.assertTrue(eng.alerts._subscribed)
             self.assertGreater(len(eng.calendar.events), 0)
@@ -461,18 +456,27 @@ class TestEnginePhase2Wiring(unittest.TestCase):
         finally:
             eng.shutdown()
 
-    def test_hub_montecarlo_payload(self):
-        from cybertrade.bot.engine import TradingEngine
+    def test_hub_montecarlo_payload(self):  # noqa: C901
         from cybertrade.web.server import EngineHub
 
-        eng = TradingEngine(AppConfig())
-        eng.boot()
+        eng = make_engine(self, assets=["EURUSD"])
         try:
             hub = EngineHub(eng, eng.config)
+            # no settled trades -> the lab reports the hole, never a sample
+            empty = hub.montecarlo(runs=20, horizon=15)
+            self.assertTrue(empty["empty"])
+            self.assertEqual(empty["verdict"], "NO DATA")
+            self.assertEqual(empty["n_trades"], 0)
+            # with real settlements it bootstraps them
+            for i in range(6):
+                eng.oms.ledger.record_settlement(
+                    _settled(i, won=(i % 2 == 0)), strategy="alpha")
             data = hub.montecarlo(runs=20, horizon=15)
             for key in ("verdict", "bands", "p05_terminal", "p50_terminal",
                         "risk_of_ruin", "source"):
                 self.assertIn(key, data)
+            self.assertEqual(data["source"], "trades")
+            self.assertEqual(data["n_trades"], 6)
             state = hub.state()
             self.assertIn("equity_curve", state)
             self.assertIn("calendar", state)

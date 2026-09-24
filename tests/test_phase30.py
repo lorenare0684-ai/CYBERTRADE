@@ -33,6 +33,7 @@ from cybertrade.data.livefeed import LiveQuotexFeed
 from cybertrade.data.models import Candle
 from cybertrade.exceptions import ConfigError
 from cybertrade.utils import timex
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _candles(asset: str, tf: int, start_ts: float, n: int):

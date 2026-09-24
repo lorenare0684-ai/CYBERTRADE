@@ -1,4 +1,4 @@
-"""Broker interface every venue adapter implements (paper, dry-run, Quotex)."""
+"""Broker interface every venue adapter implements (Quotex today)."""
 
 from __future__ import annotations
 

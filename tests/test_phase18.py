@@ -14,6 +14,7 @@ import unittest
 
 from cybertrade.data.models import Settlement, Side, TradeRecord
 from cybertrade.journal import TradeJournal, strategy_decay
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _rec(i: int, won: bool, strategy: str = "alpha") -> TradeRecord:
@@ -76,15 +77,13 @@ class TestEngineDecayAlert(unittest.TestCase):
     def test_alert_fires_once_and_rearms(self):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.config import AppConfig
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
-
+                
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0),
-                                broker=PaperBroker())
+            eng = TradingEngine(cfg, feed=VenueFeed(),
+                                broker=VenueStub())
             eng.boot()
             # prior window: 8 wins, then 13 losses — window=10 needs 20 rows
             # before any row speaks (10 recent + 10 prior).
@@ -105,16 +104,14 @@ class TestEngineDecayAlert(unittest.TestCase):
     def test_web_block(self):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.config import AppConfig
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
         from cybertrade.web.server import EngineHub
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = AppConfig()
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0),
-                                broker=PaperBroker())
+            eng = TradingEngine(cfg, feed=VenueFeed(),
+                                broker=VenueStub())
             eng.boot()
             for i in range(20):
                 eng._on_settle(_rec(i, i < 12))

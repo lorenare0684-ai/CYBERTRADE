@@ -24,24 +24,28 @@ compliance with those terms and with the law of your jurisdiction (algorithmic
 trading is regulated in many countries; binary options are banned for retail
 traders in some jurisdictions, e.g. the EU/UK).
 
-## 3. Paper first, always
+## 3. This build is live only
 
-The default mode of every entry point (`gui`, `web`, `run`) is **paper
-simulation**. Live order flow requires all of:
+There is **no paper mode and no dry-run mode** in this build — they were
+removed, not disabled. Every order placed by `gui`, `web` or `run` is a real
+order at the venue. Every trading command therefore:
 
-1. `risk.allow_live: true` in the config file,
-2. `--live` on the CLI,
-3. typing `I UNDERSTAND` at an interactive prompt,
-4. a broker session you obtained yourself.
+1. asks which purse to trade — `--demo` (PRACTICE balance) or `--real` (REAL
+   MONEY); nothing is defaulted and a non-interactive shell with no choice
+   fails instead of guessing with your money,
+2. asks you to type `I UNDERSTAND` at an interactive prompt (`--yes` skips
+   the typing for scripted operators who already know),
+3. needs a venue session you obtained yourself (`cybertrade quotex login`).
 
-Even then: **prefer the broker's PRACTICE account** (`demo: true`).
+Even live: **prefer the broker's PRACTICE balance** until a strategy has
+proven itself on real fills.
 
 ## 4. Past performance ≠ future results
 
-Backtests in this repo (including the "gauntlet" of stress scenarios) are
-simulations with simplified friction. Real fills are worse. A strategy that
-survives every scenario in `backtest/scenarios.py` can still fail on real
-markets in ways those scenarios do not model.
+The backtest lab that used to live here was a simulation with simplified
+friction, and it was removed with the rest of the simulator. Nothing in this
+build claims a strategy works: only the venue's own fills and the SQLite
+journal can tell you that, and they will.
 
 ## 5. Credentials
 

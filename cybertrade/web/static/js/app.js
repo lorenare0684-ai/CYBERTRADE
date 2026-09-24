@@ -92,47 +92,6 @@ function render(state) {
         || (jd.decaying && jd.decaying.length)) ? "mini bad" : "mini";
     }
   }
-  const dr = $("drill");
-  if (dr) {
-    const d = snap.drill;
-    dr.textContent = d
-      ? `DRILL ${String(d.name).toUpperCase()} · ${d.ticks} steps · floor ${d.posture_min}`
-        + ` · salv ${d.salvaged}${d.killed ? " · KILLED" : ""}`
-      : "drill idle";
-    dr.className = d ? "mini bad" : "mini";
-  }
-  // score bay (P23)
-  const job = snap.job;
-  const jobEl = $("job");
-  if (jobEl && job) {
-    jobEl.textContent = job.state === "running"
-      ? `JOB ${String(job.kind || "?").toUpperCase()} RUNNING…`
-      : `JOB ${String(job.state || "idle").toUpperCase()}`;
-    jobEl.className = (job.state === "running" || job.state === "error") ? "mini bad" : "mini";
-  }
-  const sc = $("scorecard");
-  if (sc && job && (job.state === "done" || job.state === "error")) {
-    const key = `${job.kind}:${job.state}:${job.finished || job.started}`;
-    if (sc.dataset.key !== key) {
-      sc.dataset.key = key;
-      if (job.state === "error") {
-        sc.textContent = "JOB ERROR: " + (job.error || "unknown");
-      } else {
-        const r = job.result || {};
-        const rows = (r.rows || []).map(x =>
-          `${String(x.name).padEnd(20)} ${String(x.posture_min).padEnd(14)} `
-          + `salv ${x.salvaged} pnl ${(Number(x.pnl) || 0).toFixed(2)}  ${x.verdict}`
-        ).join("\n");
-        sc.textContent = [
-          r.table || "",
-          rows,
-          r.card || "",
-          r.runs ? `runs ${r.runs}${r.alive != null ? ` · alive ${r.alive}` : ""}` : "",
-        ].filter(Boolean).join("\n\n");
-      }
-      sc.style.display = "block";
-    }
-  }
   // strategy deck (P26): live arsenal with ward badges + ON/OFF toggles
   const stDeck = snap.strategies;
   const deck = $("deck-body");
@@ -297,6 +256,12 @@ async function refreshMC() {
     const pm = ($("mc-posterior") && $("mc-posterior").checked) ? "&mode=posterior" : "";
     const r = await fetch(`/api/montecarlo?runs=300&horizon=200${pm}`);
     const rep = await r.json();
+    if (rep.empty) {
+      const v = $("mc-verdict");
+      if (v) { v.textContent = rep.verdict || "NO DATA"; v.className = "warn"; }
+      if ($("mc-source")) $("mc-source").textContent = rep.summary || "no settled trades";
+      return;
+    }
     if (mcChart) mcChart.setData(rep.bands || [], rep.starting_balance);
     const v = $("mc-verdict");
     if (v) {
@@ -313,21 +278,6 @@ async function refreshMC() {
         `${rep.runs || 0} paths · ${rep.horizon || 0} trades · src ${rep.source || "?"} (${rep.n_trades || 0} settled)`;
     }
   } catch (e) { /* lab is advisory only — never break the HUD */ }
-}
-
-/* ---------- Phase-2: scenario hot-swap ---------- */
-async function loadScenarios() {
-  try {
-    const r = await fetch("/api/scenarios");
-    const list = await r.json();
-    const sel = $("scenario-select");
-    if (!sel || !Array.isArray(list)) return;
-    (list || []).forEach((s) => {
-      const o = document.createElement("option");
-      o.value = s.name; o.textContent = s.name + " — " + (s.risk || "");
-      sel.appendChild(o);
-    });
-  } catch (e) { /* non-fatal */ }
 }
 
 function renderBlotter(trades) {
@@ -450,7 +400,15 @@ async function cmd(body) {
 }
 
 /* ---------- controls ---------- */
-$("btn-arm").onclick = () => cmd({ cmd: "arm" });
+// LIVE ONLY: arming from the browser still asks first — real order flow.
+$("btn-arm").onclick = () => {
+  const ok = window.confirm(
+    "ARM LIVE TRADING?\n\n"
+    + "This engine places REAL orders at Quotex with the configured purse.\n"
+    + "Cancel to stay disarmed."
+  );
+  if (ok) cmd({ cmd: "arm" });
+};
 $("btn-disarm").onclick = () => cmd({ cmd: "disarm" });
 $("btn-kill").onclick = () => cmd({ cmd: "kill" });
 $("btn-call").onclick = () => cmd({ cmd: "trade", side: "call", asset: currentAsset, amount: 5 });
@@ -458,23 +416,6 @@ $("btn-put").onclick = () => cmd({ cmd: "trade", side: "put", asset: currentAsse
 $("btn-news").onclick = () => cmd({ cmd: "news" });
 $("btn-lock").onclick = () => cmd({ cmd: "lockdown" });
 $("btn-clear").onclick = () => cmd({ cmd: "unlock" });
-const DRILLS = {
-  "btn-drill-crash": "flash_crash",
-  "btn-drill-gap": "gap_open",
-  "btn-drill-news": "news_spike",
-  "btn-drill-vac": "liquidity_vacuum",
-  "btn-drill-whip": "regime_whipsaw",
-};
-for (const [id, scenario] of Object.entries(DRILLS)) {
-  const el = $(id);
-  el && (el.onclick = () => cmd({ cmd: "drill", scenario }));
-}
-$("btn-drill-stop") && ($("btn-drill-stop").onclick = () => cmd({ cmd: "drill", scenario: "stop" }));
-const RUNS = { "btn-run-bt": "backtest", "btn-run-gauntlet": "gauntlet" };
-for (const [id, kind] of Object.entries(RUNS)) {
-  const el = $(id);
-  el && (el.onclick = () => cmd({ cmd: "run", kind }));
-}
 // strategy deck toggles (P26) — one delegated listener
 const deckEl = $("deck-body");
 deckEl && deckEl.addEventListener("click", (e) => {
@@ -484,29 +425,9 @@ deckEl && deckEl.addEventListener("click", (e) => {
 });
 const posEl = $("pos-body");
 posEl && posEl.addEventListener("click", (e) => {
-  const resolve = e.target.closest("[data-resolve]");
-  if (resolve) {
-    const raw = window.prompt("PAPER recovery only: enter the known expiry price. "
-      + "Do not guess. Cancel if you have no expiry evidence; the contract stays held.");
-    if (raw === null || !raw.trim()) return;
-    const price = Number(raw);
-    if (!Number.isFinite(price) || price <= 0) {
-      window.alert("Expiry price must be a positive finite number.");
-      return;
-    }
-    if (window.confirm(`Resolve this held PAPER contract at expiry price ${price}? This records its simulated P/L.`)) {
-      cmd({ cmd: "resolve_paper", position: resolve.dataset.resolve, expiry_price: price });
-    }
-    return;
-  }
   const b = e.target.closest("[data-close]");
   if (!b) return;
   cmd({ cmd: "close", position: b.dataset.close });
-});
-$("btn-scenario") && ($("btn-scenario").onclick = async () => {
-  const sel = $("scenario-select");
-  if (!sel || !sel.value || !currentAsset) return;
-  await cmd({ cmd: "scenario", asset: currentAsset, scenario: sel.value });
 });
 $("btn-mc") && ($("btn-mc").onclick = () => refreshMC());
 
@@ -518,7 +439,6 @@ setInterval(pollState, 2500);
 openSSE();
 if ($("equity-chart")) equityChart = new window.NeonLine($("equity-chart"));
 if ($("mc-chart")) mcChart = new window.NeonBands($("mc-chart"));
-loadScenarios();
 refreshMC();
 setInterval(refreshMC, 30000);
 

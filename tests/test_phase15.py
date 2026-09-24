@@ -1,13 +1,10 @@
 """Phase-15 tests — the live wire: mode=quotex with the full safety stack.
 
-`BrokerConfig.mode` declared `paper | quotex | dryrun` since Phase 1, dryrun
-became real in Phase 9 — and `quotex` was still just a comment. The adapter
-was already a complete Broker (submit -> api.buy, local settle_due, venue
-reconciliation); this wires the build path and the interlocks: allow_orders
-rides on cfg.risk.allow_live, which the I-UNDERSTAND gate sets BEFORE the
-engine is built. Without --live, mode=quotex degrades to dry-run and says so.
-Phase-29: live modes now require LIVE venue candles (`_live_api` +
-LiveQuotexFeed) — synthetic feeds are refused outright.
+The adapter is a complete Broker (submit -> api.buy, local settle_due, venue
+reconciliation).  The build path wires it with `cli._build_engine`, which
+demands LIVE venue candles (`_live_api` + LiveQuotexFeed) and an explicitly
+chosen purse — nothing degrades to a simulator any more.  `_confirm_live` is
+the one human check that survives: type I UNDERSTAND, or --yes for scripts.
 """
 
 from __future__ import annotations
@@ -23,7 +20,9 @@ from cybertrade.config import AppConfig
 from cybertrade.data.models import Candle, Order
 from cybertrade.constants import Side
 from cybertrade.exceptions import OrderRejected
+from cybertrade.cli import main
 
+from tests.venue_stubs import VenueFeed, VenueStub
 
 def _candles(asset: str, n: int = 8):
     """Canned venue history for LiveQuotexFeed warmup (P29)."""
@@ -100,21 +99,12 @@ class TestLiveSubmit(unittest.TestCase):
 
 
 class TestBuildWiring(unittest.TestCase):
-    def test_build_venue_forwards_allow_orders(self):
-        from cybertrade.cli import _build_venue
-
-        fake = FakeApi()
-        v = _build_venue(AppConfig(), api_factory=lambda: fake, allow_orders=True)
-        self.assertTrue(v.allow_orders)
-        v2 = _build_venue(AppConfig(), api_factory=lambda: FakeApi())
-        self.assertFalse(v2.allow_orders)
-
-    def _build(self, allow_live: bool):
+    def _build(self):
         from cybertrade.cli import _build_engine
 
         cfg = AppConfig()
         cfg.broker.mode = "quotex"
-        cfg.risk.allow_live = allow_live
+        cfg.broker.demo_account = True          # the purse is chosen, never defaulted
         with tempfile.TemporaryDirectory() as tmp:
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
@@ -124,52 +114,87 @@ class TestBuildWiring(unittest.TestCase):
                             lambda c, api_factory=None: fake):
                 return _build_engine(cfg)
 
-    def test_quotex_without_live_degrades_to_dryrun(self):
-        eng = self._build(allow_live=False)
-        self.assertEqual(eng.broker.name, "PAPER-DRY")
-        self.assertFalse(eng.broker.venue.allow_orders)
-        eng.shutdown()
+    def test_live_wire_arms_the_venue(self):
+        eng = self._build()
+        try:
+            self.assertTrue(eng.broker.name.startswith("QUOTEX-"))
+            self.assertTrue(eng.broker.allow_orders)
+            # the venue sees the purse the operator chose
+            self.assertTrue(eng.config.broker.purse_chosen)
+        finally:
+            eng.shutdown()
 
-    def test_quotex_with_live_is_the_live_wire(self):
-        eng = self._build(allow_live=True)
-        self.assertEqual(eng.broker.name, "QUOTEX-DEMO")
-        self.assertTrue(eng.broker.allow_orders)
-        eng.shutdown()
+    def test_unchosen_purse_blocks_the_build(self):
+        from cybertrade.cli import _build_engine
+        from cybertrade.exceptions import ConfigError
+
+        cfg = AppConfig()
+        cfg.broker.mode = "quotex"
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg.journal_path = os.path.join(tmp, "journal.db")
+            cfg.calibration_path = os.path.join(tmp, "cal.json")
+            cfg.qx_session_path = os.path.join(tmp, "qx.json")
+            with mock.patch("cybertrade.cli._live_api",
+                            lambda c, api_factory=None: FakeApi()):
+                with self.assertRaises(ConfigError):
+                    _build_engine(cfg)
 
 
 class TestConfirmLiveGate(unittest.TestCase):
-    def _args(self, live, yes):
-        return SimpleNamespace(live=live, yes=yes)
+    def _args(self, yes, **kw):
+        return SimpleNamespace(yes=yes, **kw)
 
-    def test_without_live_flag_nothing_touches_allow(self):
-        from cybertrade.cli import _confirm_live
-
-        cfg = AppConfig()
-        self.assertTrue(_confirm_live(self._args(live=False, yes=False), cfg))
-        self.assertFalse(cfg.risk.allow_live)
-
-    def test_wrong_typing_aborts(self):
+    def test_wrong_typing_aborts_before_the_venue_is_touched(self):
         from cybertrade.cli import _confirm_live
 
         cfg = AppConfig()
         with mock.patch("builtins.input", lambda *_: "nope"):
-            self.assertFalse(_confirm_live(self._args(live=True, yes=False), cfg))
-        self.assertFalse(cfg.risk.allow_live)
+            self.assertFalse(_confirm_live(self._args(yes=False), cfg))
+
+        # and `run` never reaches the venue wire when the gate refuses
+        with mock.patch("cybertrade.cli._confirm_live", lambda a, c: False), \
+                mock.patch("cybertrade.cli._build_engine",
+                           side_effect=AssertionError("must not build")):
+            self.assertEqual(main(["run", "--demo"]), 1)
 
     def test_i_understand_unlocks(self):
         from cybertrade.cli import _confirm_live
 
         cfg = AppConfig()
         with mock.patch("builtins.input", lambda *_: "I UNDERSTAND"):
-            self.assertTrue(_confirm_live(self._args(live=True, yes=False), cfg))
+            self.assertTrue(_confirm_live(self._args(yes=False), cfg))
         self.assertTrue(cfg.risk.allow_live)
 
     def test_yes_flag_skips_prompt_but_still_gates(self):
         from cybertrade.cli import _confirm_live
 
         cfg = AppConfig()
-        self.assertTrue(_confirm_live(self._args(live=True, yes=True), cfg))
+        self.assertTrue(_confirm_live(self._args(yes=True), cfg))
         self.assertTrue(cfg.risk.allow_live)
+
+    def test_purse_is_declared_before_the_gate(self):
+        from cybertrade.cli import _confirm_live, _resolve_purse
+
+        cfg = AppConfig()
+        _resolve_purse(cfg, self._args(yes=False, demo=True))
+        self.assertTrue(cfg.broker.purse_chosen)
+        with mock.patch("builtins.input", lambda *_: "I UNDERSTAND"):
+            self.assertTrue(_confirm_live(self._args(yes=False), cfg))
+
+    def test_purse_flag_reaches_config(self):
+        from cybertrade.cli import _resolve_purse
+
+        cfg = AppConfig()
+        _resolve_purse(cfg, self._args(yes=False, real=True))
+        self.assertTrue(cfg.broker.purse_chosen)
+        self.assertIs(cfg.broker.demo_account, False)
+
+    def test_both_purses_at_once_is_an_error(self):
+        from cybertrade.cli import _resolve_purse
+        from cybertrade.exceptions import ConfigError
+
+        with self.assertRaises(ConfigError):
+            _resolve_purse(AppConfig(), self._args(yes=False, demo=True, real=True))
 
 
 if __name__ == "__main__":

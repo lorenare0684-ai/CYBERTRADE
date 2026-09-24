@@ -14,6 +14,7 @@ from cybertrade.config import AppConfig
 from cybertrade.quant.calibration import CalibrationTracker, beta_quantile
 from cybertrade.risk.manager import RiskManager
 
+from tests.venue_stubs import VenueFeed, VenueStub
 CONF = 0.8  # lives in bucket [0.80, 0.85) -> index 6
 RISK = AppConfig().risk
 

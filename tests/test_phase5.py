@@ -1,17 +1,23 @@
-"""Phase-5 tests — the calibrated edge gate under gauntlet conditions and
-adaptive expiry selection.
+"""Phase-5 tests — the calibrated edge gate and adaptive expiry selection.
 
-The Phase-4 gate now runs inside the backtester too, so the GAUNTLET
-measures what calibration actually buys: fewer negative-EV entries.
+The backtest lab is gone, so the gate is exercised where it now lives: on
+the live engine, one signal at a time, with the venue stub as the broker.
 """
 
 from __future__ import annotations
 
+import time
 import unittest
 
-from cybertrade.backtest.engine import Backtester
 from cybertrade.config import AppConfig, ConfigError
 from cybertrade.quant.expiry import choose_expiry, est_vol_per_bar
+from cybertrade.bot.engine import TradingEngine
+from cybertrade.constants import Side
+from cybertrade.data.models import Signal, Tick
+from cybertrade.regime.detector import RegimeReading
+from tests.venue_stubs import VenueFeed, VenueStub
+
+ASSET = "EURUSD_otc"
 
 
 class TestExpiryChooser(unittest.TestCase):
@@ -54,45 +60,34 @@ class TestExpiryChooser(unittest.TestCase):
         self.assertEqual(a, b)
 
 
-class TestBacktestEdgeGate(unittest.TestCase):
-    def _run(self, gate: str, min_edge: float, expiry_select: str = "signal"):
+class TestLiveEdgeGate(unittest.TestCase):
+    """The gate the backtester used to measure now runs on the live engine:
+    a hard min_edge band must trade less than no gate at all."""
+
+    def _engine(self, gate, min_edge):
         cfg = AppConfig()
         cfg.risk.edge_gate = gate
         cfg.risk.min_edge = min_edge
-        cfg.risk.expiry_select = expiry_select
-        bt = Backtester(cfg)
-        return bt, bt.run_scenario("bull_trend", bars=300, seed=3)
+        cfg.risk.win_rate_floor = 0.0
+        return TradingEngine(cfg, feed=VenueFeed(assets=[ASSET]),
+                             broker=VenueStub(balance=1000.0))
 
-    def test_hard_gate_trades_less_than_off(self):
-        _, res_off = self._run("off", 0.0)
-        _, res_hard = self._run("hard", 0.4)
-        self.assertGreater(res_off.report.trades, 0)
-        self.assertLess(res_hard.report.trades, res_off.report.trades)
-        self.assertGreater(res_hard.edge_rejects, 0)
+    def _trade(self, gate, min_edge, confidence=0.9):
+        eng = self._engine(gate, min_edge)
+        eng.boot()
+        try:
+            eng.broker.on_tick(Tick(asset=ASSET, price=1.10))
+            sig = Signal(asset=ASSET, side=Side.CALL, confidence=confidence,
+                         strategy="alpha", ts=time.time())
+            return eng._try_execute(sig, RegimeReading())
+        finally:
+            eng.shutdown()
 
-    def test_scale_gate_still_trades(self):
-        _, res = self._run("scale", 0.02)
-        self.assertGreater(res.report.trades, 0)
+    def test_hard_gate_vetoes_a_low_confidence_claim(self):
+        self.assertFalse(self._trade("hard", 0.95))
 
-    def test_negative_ev_always_vetoes_even_when_off(self):
-        # with gate "off" the min_edge band is ignored entirely —
-        # only the unconditional negative-EV veto remains
-        _, res_wide = self._run("off", 0.9)
-        _, res_zero = self._run("off", 0.0)
-        self.assertEqual(res_wide.report.trades, res_zero.report.trades)
-
-    def test_calibrator_observes_settlements(self):
-        bt, res = self._run("scale", 0.02)
-        # blob + every voter observed per settlement (Phase-6 granularity)
-        self.assertGreaterEqual(bt.calibrator.observations, len(res.trades))
-
-    def test_adaptive_expiry_runs(self):
-        _, res = self._run("scale", 0.02, expiry_select="adaptive")
-        self.assertGreater(res.report.trades, 0)
-
-    def test_result_carries_edge_rejects(self):
-        _, res = self._run("hard", 0.4)
-        self.assertIn("edge_rejects", res.to_dict())
+    def test_no_gate_lets_the_same_claim_through(self):
+        self.assertTrue(self._trade("off", 0.0))
 
 
 class TestExpiryConfig(unittest.TestCase):

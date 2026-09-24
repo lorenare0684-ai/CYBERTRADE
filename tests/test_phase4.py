@@ -39,6 +39,7 @@ from cybertrade.regime.detector import RegimeReading
 from cybertrade.strategies.base import StrategyContext
 from cybertrade.strategies.orderflow import AbsorptionFade, ImbalanceMomentum, POCReversion
 from cybertrade.utils import timex
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 class TestBinaryMath(unittest.TestCase):
@@ -290,7 +291,7 @@ class TestEdgeGate(unittest.TestCase):
         cfg = AppConfig()
         cfg.risk.edge_gate = gate
         cfg.risk.min_edge = min_edge
-        return TradingEngine(cfg)
+        return TradingEngine(cfg, feed=VenueFeed(), broker=VenueStub())
 
     def _signal(self, engine: TradingEngine, conf: float = 0.9):
         return Signalish(engine, conf)

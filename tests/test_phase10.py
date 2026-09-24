@@ -14,6 +14,7 @@ from cybertrade.cli import main
 from cybertrade.quant.calibration import CalibrationTracker
 from cybertrade.risk.montecarlo import simulate_posterior
 
+from tests.venue_stubs import VenueFeed, VenueStub
 
 class TestPosteriorMonteCarlo(unittest.TestCase):
     def test_strong_record_is_mostly_honest(self):

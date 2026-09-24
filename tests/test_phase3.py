@@ -7,10 +7,10 @@ import unittest
 
 from cybertrade.constants import MarketRegime, Side
 from cybertrade.data.models import Candle
-from cybertrade.data.synthetic import generate_candles
 from cybertrade.regime.detector import RegimeDetector
 from cybertrade.strategies.base import Strategy, StrategyContext
 from cybertrade.strategies.ensemble import AllWeatherEnsemble
+from tests.venue_stubs import VenueFeed, VenueStub, venue_candles
 
 
 def _zig_candles(n: int, start: float = 1.0, drift: float = 0.0004,
@@ -99,7 +99,7 @@ class TestCrashEchoGuard(unittest.TestCase):
         # generated flash_crash path: wherever the crash lands, the bars right
         # after a >3.5σ down bar must not be BULL_TREND
         for seed in (3, 11, 29):
-            candles = generate_candles("flash_crash", bars=240, seed=seed)
+            candles = venue_candles(n=240, shape="trend_down", seed=seed)
             det = RegimeDetector()
             rets = [math.log(candles[i].close / candles[i - 1].close)
                     for i in range(1, len(candles))]

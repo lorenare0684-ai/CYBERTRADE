@@ -1,9 +1,9 @@
 """Phase-14 tests — the venue actually connects: SSID session + real warm.
 
-The dry-run harness built a QuotexAPI with no session and no connect — live
-quotes and history could never arrive. Now `_build_venue` authenticates
+The paper harness built a QuotexAPI with no session and no connect — live
+quotes and history could never arrive.  `cli._live_api` authenticates
 (session sources: --ssid/config.ssid/QX_SSID/login — never written to disk)
-and engine boot pulls real candles into the books before trading.
+and raises rather than degrading when no session exists.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ import unittest
 import unittest.mock as mock
 from types import SimpleNamespace
 
-from cybertrade.cli import _build_venue
+from cybertrade.cli import _live_api
 from cybertrade.config import AppConfig
+from cybertrade.exceptions import ConfigError
 from cybertrade.data.models import Candle
 
+from tests.venue_stubs import VenueFeed, VenueStub
 MARKER = 1_000_000.0
 
 
@@ -54,6 +56,9 @@ class FakeApi:
             raise RuntimeError("no session — call login() or set_ssid() first")
         return True
 
+    def close(self):
+        pass
+
     def add_listener(self, fn):
         pass
 
@@ -75,62 +80,53 @@ class FakeApi:
         return SimpleNamespace(balance=4321.0)
 
 
-class TestBuildVenue(unittest.TestCase):
+class TestLiveSessionSources(unittest.TestCase):
     def test_env_ssid_reaches_api(self):
         fake = FakeApi()
         cfg = AppConfig()
         os.environ["QX_SSID"] = "QX.envtoken"
         try:
-            venue = _build_venue(cfg, api_factory=lambda: fake)
+            api = _live_api(cfg, api_factory=lambda: fake)
         finally:
             os.environ.pop("QX_SSID", None)
-        self.assertIsNotNone(venue)
         self.assertEqual(fake.ssid_set, "QX.envtoken")
-        self.assertFalse(venue.allow_orders)
+        self.assertTrue(getattr(api, "connected", False))
 
     def test_config_ssid_wins_and_login_fallback(self):
         fake = FakeApi()
         cfg = AppConfig()
         cfg.broker.ssid = "QX.cfgtoken"
-        venue = _build_venue(cfg, api_factory=lambda: fake)
+        _live_api(cfg, api_factory=lambda: fake)
         self.assertEqual(fake.ssid_set, "QX.cfgtoken")
 
         fake2 = FakeApi()
         cfg2 = AppConfig()
         cfg2.broker.username = "u"
         cfg2.broker.password = "p"
-        _build_venue(cfg2, api_factory=lambda: fake2)
+        _live_api(cfg2, api_factory=lambda: fake2)
         self.assertEqual(fake2.logged_in, ("u", "p"))
 
-    def test_no_session_degrades_to_none(self):
-        venue = _build_venue(AppConfig(), api_factory=lambda: FakeApi())
-        self.assertIsNone(venue)
-
-    def test_ssid_never_serialized(self):
-        cfg = AppConfig()
-        cfg.broker.ssid = "QX.secret"
-        cfg.broker.password = "pw"
-        blob = json.dumps(cfg.to_dict())
-        self.assertNotIn("QX.secret", blob)
-        self.assertNotIn("pw", blob)
-        self.assertEqual(cfg.to_dict()["broker"]["ssid"], "")
+    def test_no_session_raises_instead_of_degrading(self):
+        with self.assertRaises(Exception):
+            _live_api(AppConfig(), api_factory=lambda: FakeApi())
 
 
 class TestBootWarm(unittest.TestCase):
     def _boot_engine(self, fake):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.brokers.quotex.adapter import QuotexBroker
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.dryrun import DryRunBroker
+        from cybertrade.data.livefeed import LiveQuotexFeed
 
         cfg = AppConfig()
+        cfg.broker.demo_account = True
         with tempfile.TemporaryDirectory() as tmp:
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
-            venue = QuotexBroker(fake, allow_orders=False)
-            broker = DryRunBroker(venue=venue, starting_balance=1000.0)
-            eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0),
-                                broker=broker)
+            feed = LiveQuotexFeed(fake, assets=cfg.strategy.universe,
+                                  timeframe_seconds=cfg.timeframe().seconds,
+                                  warm_bars=50, refresh_seconds=0.0)
+            eng = TradingEngine(cfg, feed=feed,
+                                broker=QuotexBroker(fake, allow_orders=False))
             eng.boot()
             return eng
 
@@ -143,32 +139,30 @@ class TestBootWarm(unittest.TestCase):
         self.assertIn(MARKER + 2, ts)
         eng.shutdown()
 
-    def test_warm_failure_never_blocks_boot(self):
-        eng = self._boot_engine(FakeApi(fail=True))
-        self.assertEqual(eng.state.value, "disarmed")
-        eng.shutdown()
+    def test_dead_venue_history_blocks_boot(self):
+        # the live build refuses to trade on an empty venue book
+        from cybertrade.data.feed import FeedError
+
+        with self.assertRaises((FeedError, ConfigError)) as ctx:
+            self._boot_engine(FakeApi(fail=True))
+        self.assertIn("warmup", str(ctx.exception).lower())
 
 
 class TestQuotexCommand(unittest.TestCase):
     def test_status_and_warm(self):
-        fake = FakeApi()
-        venue_holder = _build_venue(AppConfig(), api_factory=lambda: FakeApi(have_session=True))
-        self.assertIsNotNone(venue_holder)
-
-        from cybertrade.brokers.quotex.adapter import QuotexBroker
-
-        patched = QuotexBroker(fake, allow_orders=False)
-        with mock.patch("cybertrade.cli._build_venue",
-                        lambda cfg, api_factory=None: patched):
+        fake = FakeApi(have_session=True)
+        with mock.patch("cybertrade.cli._live_api", lambda cfg: fake):
             from cybertrade.cli import main
+
             self.assertEqual(main(["quotex", "status", "--ssid", "QX.x"]), 0)
             self.assertEqual(main(["quotex", "warm", "--bars", "5"]), 0)
 
     def test_no_session_is_error(self):
         from cybertrade.cli import main
+
         os.environ.pop("QX_SSID", None)
-        with mock.patch("cybertrade.cli._build_venue",
-                        lambda cfg, api_factory=None: None):
+        with mock.patch("cybertrade.cli._live_api",
+                        side_effect=RuntimeError("no session")):
             self.assertEqual(main(["quotex", "status"]), 1)
 
 

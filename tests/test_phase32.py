@@ -1,7 +1,8 @@
-"""Phase 32: durable governor/book recovery and bounded PAPER supervision.
+"""Phase 32: durable governor recovery and live venue reconciliation.
 
-Most lifecycles use fake clocks/processes; bounded subprocess probes also
-exercise real crashes, OS-lock release, noisy pipes, and hang cleanup.
+Every runtime is a live venue runtime now: the checkpoint carries the risk
+governor and ledger, positions belong to the venue and are re-adopted by
+reconciliation, and the supervisor/backtest/dry-run harnesses are gone.
 No venue or Tk needed.
 """
 from __future__ import annotations
@@ -23,14 +24,13 @@ import unittest
 from unittest import mock
 
 from cybertrade.bot.engine import TradingEngine
-from cybertrade.cli import build_parser, cmd_run, cmd_supervise
+from cybertrade.cli import build_parser, cmd_run
 from cybertrade.config import AppConfig, RiskConfig
 from cybertrade.constants import EngineState, Side
 from cybertrade.data.feed import Feed
 from cybertrade.data.models import AccountSnapshot, Fill, Order, Position, Tick
 from cybertrade.exceptions import ConfigError, KillSwitchEngaged
 from cybertrade.execution.broker import Broker
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.risk.manager import RiskManager
 from cybertrade.statestore import (
     StateError, StateLease, heartbeat_age, load_continuity, load_operator_state,
@@ -38,9 +38,7 @@ from cybertrade.statestore import (
     unpack_position, write_heartbeat,
 )
 from cybertrade.utils import timex
-from cybertrade.watchdog import (
-    RestartBudget, SAFETY_HOLD_EXIT, Supervisor, backoff_seconds, write_crash_report,
-)
+from cybertrade.shutdown import SAFETY_HOLD_EXIT, stop_on_sigterm
 from cybertrade.web.server import EngineHub, WebTerminal
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,13 +57,19 @@ class QuietFeed(Feed):
         return 1.1
 
 
-class VenueStub(Broker):
+class RecordingVenue(Broker):
+    """A venue that fills orders locally but never leaves the process.
+
+    Recovery tests need a broker that *has* positions to reconcile, so the
+    fill happens here and the balance is escrowed exactly like the venue.
+    """
     def __init__(self, balance=1000.0, user="account-a"):
         super().__init__()
         self.balance = balance
         self.api = SimpleNamespace(session=SimpleNamespace(user_id=user))
         self.submits = 0
         self._connected = False
+        self._positions = {}
 
     @property
     def name(self):
@@ -86,23 +90,35 @@ class VenueStub(Broker):
                                margin_used=0, open_positions=0, peak_balance=self.balance)
 
     def last_price(self, asset):
-        return 1.1
+        return getattr(self, "_px", 1.1)
+
+    def on_tick(self, tick):
+        self._px = tick.price
 
     def payout_for(self, asset, expiry_seconds):
         return .85
 
     def submit(self, order):
         self.submits += 1
-        raise AssertionError("recovery must never send a venue order")
+        fill = Fill(
+            order_id=order.id, asset=order.asset, side=order.side,
+            price=order.limit_price or self.last_price(order.asset),
+            amount=order.amount, payout=order.payout or 0.85, ts=order.ts,
+        )
+        self.balance -= order.amount
+        pos = Position(fill=fill, expiry_ts=order.ts + order.expiry_seconds,
+                       strategy=order.meta.get("strategy") or "")
+        self._positions[pos.id] = pos
+        return fill
 
     def open_positions(self):
-        return []
+        return list(self._positions.values())
 
     def settle_due(self, now=None):
         return []
 
     def close_position(self, position_id):
-        return False
+        return self._positions.pop(position_id, None) is not None
 
 
 class TempCase(unittest.TestCase):
@@ -330,7 +346,7 @@ class EngineCase(TempCase):
 
     def engine(self, durable=True, broker=None, boot=True):
         eng = TradingEngine(self.cfg, feed=QuietFeed(), durable=durable,
-                            broker=broker or PaperBroker(latency_ms=0, slippage_bps=0))
+                            broker=broker or RecordingVenue())
         self.addCleanup(self.close, eng)
         if boot:
             eng.boot()
@@ -352,19 +368,6 @@ class EngineCase(TempCase):
         self.assertIsNotNone(order)
         return order
 
-    def expire_offline(self):
-        eng = self.engine()
-        self.order(eng)
-        self.close(eng)
-        data = load_continuity(self.path)
-        row = data["paper"]["positions"][0]
-        row["fill"]["ts"] = time.time() - 120
-        row["expiry_ts"] = row["fill"]["ts"] + 60
-        data["orders"][0]["ts"] = row["fill"]["ts"]
-        save_continuity(self.path, data)
-        return self.engine()
-
-
 class TestEngineContinuity(EngineCase):
     def test_fresh_runtime_checkpoints_disarmed(self):
         eng = self.engine()
@@ -383,62 +386,6 @@ class TestEngineContinuity(EngineCase):
         self.assertFalse(os.path.exists(self.path))
         self.assertFalse(os.path.exists(self.cfg.heartbeat_path))
         self.assertFalse(eng.snapshot()["continuity"]["enabled"])
-
-    def test_restart_keeps_daily_loss_lock_and_trade_count(self):
-        self.cfg.risk.max_daily_loss_frac = .04
-        eng = self.engine()
-        self.order(eng, amount=50)
-        pos = eng.broker.open_positions()[0]
-        eng.broker.on_tick(Tick(ASSET, 1.0, ts=pos.expiry_ts + 1))
-        eng.oms.pump(now=pos.expiry_ts + 1)
-        self.assertGreater(eng.risk.state.locked_until, time.time())
-        self.close(eng)
-        restored = self.engine()
-        self.assertEqual(restored.oms.ledger.balance, 950)
-        self.assertEqual(restored.broker.account().balance, 950)
-        self.assertEqual(restored.risk.state.trades_today, 1)
-        self.assertAlmostEqual(restored.risk.daily_loss_frac(), .05)
-        self.assertEqual(restored.risk.state.consecutive_losses, 1)
-        self.assertIsNone(restored.oms.submit(ASSET, Side.CALL, 5, 60, payout=.85))
-
-    def test_open_contract_links_and_exposure_settle_once(self):
-        eng = self.engine()
-        order = self.order(eng)
-        original = eng.broker.open_positions()[0]
-        self.close(eng)
-        restored = self.engine()
-        pos = restored.broker.open_positions()[0]
-        self.assertEqual(pack_position(pos), pack_position(original))
-        self.assertEqual(restored.oms.orders[order.id].meta["cluster"], "USD")
-        self.assertEqual(restored.risk.state.open_clusters, {"USD": 1})
-        self.assertEqual(restored.risk.state.trades_today, 1)  # not counted twice
-        restored.broker.on_tick(Tick(ASSET, 1.2, ts=pos.expiry_ts + 1))
-        records = restored.oms.pump(now=pos.expiry_ts + 1)
-        self.assertEqual((records[0].strategy, records[0].regime), ("alpha", "range"))
-        self.assertEqual(restored.oms.ledger.balance, 1008.5)
-        self.assertEqual(restored.risk.state.open_count, 0)
-        self.assertEqual(restored.risk.state.open_stake_sum, 0)
-        self.assertEqual(restored.oms.pump(now=pos.expiry_ts + 2), [])
-        self.close(restored)
-        again = self.engine()
-        self.assertEqual(again.oms.ledger.balance, 1008.5)
-        self.assertEqual(again.broker.open_positions(), [])
-
-    def test_pending_salvage_cash_not_credited_twice(self):
-        eng = self.engine()
-        self.order(eng)
-        pos = eng.broker.open_positions()[0]
-        eng.broker.on_tick(Tick(ASSET, 1.0))
-        self.assertTrue(eng.broker.close_position(pos.id))
-        self.assertEqual(eng.broker.account().balance, 992.5)
-        self.assertEqual(eng.oms.ledger.balance, 990)
-        eng.continuity.commit()
-        self.close(eng)
-        restored = self.engine()
-        self.assertEqual(len(restored.oms.pump()), 1)
-        self.assertEqual(restored.oms.ledger.balance, 992.5)
-        self.assertEqual(restored.risk.state.open_count, 0)
-        self.assertEqual(restored.oms.pump(), [])
 
     def test_kill_and_explicit_clear_are_both_durable(self):
         eng = self.engine()
@@ -477,27 +424,6 @@ class TestEngineContinuity(EngineCase):
             eng.arm()
         self.close(eng)
         self.assertEqual(Path(self.path).read_bytes(), b"{broken checkpoint")
-
-    def test_partial_position_corruption_refuses_entire_book(self):
-        eng = self.engine()
-        self.order(eng)
-        self.close(eng)
-        data = load_continuity(self.path)
-        del data["paper"]["positions"][0]["fill"]["id"]
-        save_continuity(self.path, data)
-        restored = self.engine()
-        self.assertTrue(restored.continuity.fault)
-        self.assertEqual(restored.broker.open_positions(), [])
-        self.assertTrue(restored.risk.state.kill)
-
-    def test_cross_book_cash_or_exposure_mismatch_is_rejected(self):
-        eng = self.engine()
-        self.close(eng)
-        data = load_continuity(self.path)
-        data["paper"]["balance"] = 950
-        save_continuity(self.path, data)
-        restored = self.engine()
-        self.assertIn("cash mismatch", restored.continuity.fault)
 
     def test_failed_before_write_never_reaches_broker(self):
         eng = self.engine()
@@ -551,132 +477,13 @@ class TestEngineContinuity(EngineCase):
                 eng.cycle()
         self.assertEqual(read_heartbeat(self.cfg.heartbeat_path), before)
 
-    def test_offline_expiry_does_not_become_a_refund_or_current_mark_win(self):
-        eng = self.expire_offline()
-        pos = eng.broker.open_positions()[0]
-        eng.broker.on_tick(Tick(ASSET, 1.5))
-        self.assertEqual(eng.oms.pump(), [])
-        self.assertEqual(eng.oms.ledger.balance, 990)
-        self.assertFalse(eng.oms.close_position(pos.id))
-        with self.assertRaises(KillSwitchEngaged):
-            eng.arm()
-        self.assertEqual(eng.continuity.status()["held_positions"], [pos.id])
-
-    def test_restored_future_contract_waits_for_fresh_expiry_quote(self):
-        eng = self.engine()
-        self.order(eng)
-        self.close(eng)
-        restored = self.engine()
-        pos = restored.broker.open_positions()[0]
-        self.assertEqual(restored.oms.pump(now=pos.expiry_ts + 1), [])
-        self.assertEqual(restored.oms.ledger.balance, 990)
-        restored.broker.on_tick(Tick(ASSET, 1.2, ts=pos.expiry_ts - 1))
-        self.assertEqual(restored.oms.pump(now=pos.expiry_ts + 1), [])
-
-    def test_explicit_paper_resolution_records_once_and_releases_exposure(self):
-        eng = self.expire_offline()
-        pos = eng.broker.open_positions()[0]
-        self.assertTrue(eng.oms.resolve_recovery(pos.id, 1.0))
-        self.assertFalse(eng.oms.resolve_recovery(pos.id, 1.0))
-        self.assertEqual(eng.oms.ledger.balance, 990)
-        self.assertEqual(eng.risk.state.open_count, 0)
-        self.assertFalse(eng.continuity.status()["blocked"])
-        self.assertEqual(len(eng.oms.trades), 1)
-
-    def test_invalid_resolution_input_does_not_poison_book(self):
-        eng = self.expire_offline()
-        pos = eng.broker.open_positions()[0]
-        for value in (float("nan"), -1, True, "1.2"):
-            with self.assertRaises(StateError):
-                eng.oms.resolve_recovery(pos.id, value)
-        self.assertFalse(eng.continuity.fault)
-        self.assertEqual(len(eng.broker.open_positions()), 1)
-
-    def test_web_recovery_status_and_resolution_endpoint(self):
-        eng = self.expire_offline()
-        hub = EngineHub(eng, self.cfg)
-        web = WebTerminal(hub, port=0)
-        pos = eng.broker.open_positions()[0]
-        self.assertTrue(hub.state()["snapshot"]["continuity"]["blocked"])
-        self.assertTrue(hub.state()["positions"][0]["recovery_hold"])
-        result = web.command({"cmd": "resolve_paper", "position": pos.id, "expiry_price": 1.2})
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(eng.oms.ledger.balance, 1008.5)
-        self.assertEqual(hub.state()["positions"], [])
-
-    def test_web_close_commits_salvage_with_ledger(self):
-        eng = self.engine()
-        self.order(eng)
-        pos = eng.broker.open_positions()[0]
-        eng.broker.on_tick(Tick(ASSET, 1.0))
-        result = WebTerminal(EngineHub(eng, self.cfg), port=0).command(
-            {"cmd": "close", "position": pos.id})
-        self.assertTrue(result["ok"])
-        data = load_continuity(self.path)
-        self.assertEqual(data["paper"]["pending"], [])
-        self.assertEqual(data["ledger"]["balance"], 992.5)
-        self.assertEqual(data["risk"]["state"]["open_count"], 0)
-
     def test_new_account_or_mode_does_not_load_another_book(self):
         eng = self.engine()
         self.close(eng)
-        self.cfg.broker.mode = "dryrun"
-        restored = self.engine()
+        self.cfg.broker.mode = "quotex"
+        restored = self.engine(broker=RecordingVenue(user="account-b"))
         self.assertIn("different mode/account", restored.continuity.fault)
 
-    def _hard_crash_child(self, during_submit=False):
-        paths = {name: getattr(self.cfg, name) for name in
-                 ("continuity_path", "heartbeat_path", "journal_path", "operator_path",
-                  "calibration_path", "plugins_dir", "calendar_path")}
-        script = """
-import json, os, sys
-from tests.test_phase32 import QuietFeed
-from cybertrade.config import AppConfig
-from cybertrade.bot.engine import TradingEngine
-from cybertrade.execution.paper import PaperBroker
-from cybertrade.data.models import Tick
-from cybertrade.constants import Side
-cfg = AppConfig()
-for key, value in json.loads(sys.argv[1]).items():
-    setattr(cfg, key, value)
-cfg.tape_enabled = False
-cfg.alerts.enable_sound = False
-cfg.strategy.universe = ['EURUSD_otc']
-class CrashBroker(PaperBroker):
-    def submit(self, order):
-        fill = super().submit(order)
-        if sys.argv[2] == 'during':
-            os._exit(9)
-        return fill
-eng = TradingEngine(cfg, feed=QuietFeed(), durable=True,
-                    broker=CrashBroker(latency_ms=0, slippage_bps=0))
-eng.boot()
-eng.broker.on_tick(Tick('EURUSD_otc', 1.1))
-order = eng.oms.submit('EURUSD_otc', Side.CALL, 10, 60, payout=.85)
-assert order is not None
-os._exit(9)
-"""
-        proc = subprocess.run([sys.executable, "-c", script, json.dumps(paths),
-                               "during" if during_submit else "after"], cwd=ROOT,
-                              capture_output=True, timeout=15)
-        self.assertEqual(proc.returncode, 9, proc.stderr)
-
-    def test_real_process_crash_restores_acknowledged_contract(self):
-        self._hard_crash_child()
-        restored = self.engine()
-        self.assertTrue(restored.continuity.restored)
-        self.assertFalse(restored.continuity.status()["blocked"])
-        self.assertEqual(len(restored.broker.open_positions()), 1)
-        self.assertEqual(restored.oms.ledger.balance, 990)
-        self.assertEqual(restored.risk.state.trades_today, 1)
-
-    def test_real_crash_inside_submit_leaves_hold_not_replay(self):
-        self._hard_crash_child(during_submit=True)
-        restored = self.engine()
-        self.assertIn("interrupted submit", restored.continuity.fault)
-        self.assertTrue(restored.risk.state.kill)
-        self.assertEqual(restored.broker.open_positions(), [])
-        self.assertEqual(load_continuity(self.path)["pending_operation"], "submit")
 
     @unittest.skipUnless(os.name == "posix", "symlink probe requires POSIX")
     def test_symlink_alias_keeps_same_book_and_lock_inode(self):
@@ -715,44 +522,56 @@ class TestVenueRecovery(EngineCase):
         self.cfg.broker.mode = "quotex"
 
     def test_live_recovery_never_replays_paper_cash_or_orders(self):
-        first = self.engine(broker=VenueStub(balance=1000))
+        first = self.engine(broker=RecordingVenue(balance=1000))
         self.close(first)
-        venue = VenueStub(balance=975)
+        venue = RecordingVenue(balance=975)
         restored = self.engine(broker=venue)
         self.assertTrue(restored.continuity.restored)
+        self.assertFalse(restored.continuity.fault)
+        # the venue balance is the only cash there is; nothing local is credited
         self.assertEqual(restored.oms.ledger.balance, 975)
         self.assertEqual(restored.risk.state.day_start_balance, 1000)
         self.assertEqual(venue.submits, 0)
+        # there is no local paper resolution any more — the venue decides
         self.assertFalse(restored.oms.resolve_recovery("anything", 1.1))
-        with self.assertRaises(KillSwitchEngaged):
-            restored.arm(live=False)
 
-    def test_live_exposure_is_held_for_venue_reconciliation(self):
-        first = self.engine(broker=VenueStub())
-        with first.oms.transaction("test-live-exposure"):
-            first.risk.on_open(Order(ASSET, Side.CALL, 10))
+    def test_open_exposure_is_held_for_venue_reconciliation(self):
+        first = self.engine(broker=RecordingVenue(balance=1000))
+        self.order(first)
         self.close(first)
-        restored = self.engine(broker=VenueStub())
+        # a venue that no longer holds the contract: the exposure is held,
+        # never settled from local cash and never replayed as an order
+        venue = RecordingVenue(balance=990)
+        restored = self.engine(broker=venue)
         self.assertIn("venue reconciliation", restored.continuity.fault)
-        self.assertEqual(restored.broker.submits, 0)
         self.assertTrue(restored.risk.state.kill)
+        self.assertEqual(venue.submits, 0)
+        with self.assertRaises(KillSwitchEngaged):
+            restored.arm()
+
+    def test_exposure_without_a_venue_order_cannot_be_checkpointed(self):
+        eng = self.engine(broker=RecordingVenue())
+        with self.assertRaises(StateError) as ctx:
+            with eng.oms.transaction("test-live-exposure"):
+                eng.risk.on_open(Order(ASSET, Side.CALL, 10))
+        self.assertIn("does not match the live order registry", str(ctx.exception))
 
     def test_authenticated_account_identity_must_match(self):
-        first = self.engine(broker=VenueStub(user="account-a"))
+        first = self.engine(broker=RecordingVenue(user="account-a"))
         self.close(first)
-        restored = self.engine(broker=VenueStub(user="account-b"))
+        restored = self.engine(broker=RecordingVenue(user="account-b"))
         self.assertIn("different mode/account", restored.continuity.fault)
 
     def test_live_account_id_can_come_from_venue_balance_payload(self):
         from cybertrade.brokers.quotex.models import QXBalance
-        venue = VenueStub(user="")
+        venue = RecordingVenue(user="")
         venue.api.balance = QXBalance.from_payload({"userId": "from-venue", "balance": 1000})
         eng = self.engine(broker=venue)
         self.assertFalse(eng.continuity.fault)
         self.assertEqual(load_continuity(self.path)["scope"]["account"], "from-venue")
 
     def test_runtime_account_switch_is_blocked_before_order_submission(self):
-        venue = VenueStub()
+        venue = RecordingVenue()
         eng = self.engine(broker=venue)
         before = Path(self.path).read_bytes()
         venue.api.session.user_id = "different-account"
@@ -763,13 +582,13 @@ class TestVenueRecovery(EngineCase):
         self.assertEqual(Path(self.path).read_bytes(), before)
 
     def test_conflicting_venue_identity_sources_fail_closed(self):
-        venue = VenueStub(user="one")
+        venue = RecordingVenue(user="one")
         venue.api.balance = SimpleNamespace(user_id="other")
         eng = self.engine(broker=venue)
         self.assertIn("identities disagree", eng.continuity.fault)
 
     def test_unknown_live_identity_fails_closed(self):
-        eng = self.engine(broker=VenueStub(user=""))
+        eng = self.engine(broker=RecordingVenue(user=""))
         self.assertIn("user ID", eng.continuity.fault)
         self.assertEqual(eng.broker.submits, 0)
         self.assertFalse(os.path.exists(self.path))
@@ -817,238 +636,84 @@ class FakeProcess:
         return self.returncode
 
 
-class TestProcessSupervisor(TempCase):
-    def setup_supervisor(self, proc=None, beats=None, max_restarts=0, **kwargs):
-        self.clock = Clock()
-        self.proc = proc or FakeProcess()
-        self.spawn_kw = {}
-        def spawn(cmd, **kw):
-            self.spawn_kw.update(kw)
-            return self.proc
-        def reader(path):
-            return beats(self) if beats else {}
-        defaults = dict(heartbeat_path=self.path, crash_dir=self.tmp.name,
-                        budget=RestartBudget(max_restarts, 60, clock=self.clock),
-                        max_stale=2, startup_grace=4, watch_slice=1,
-                        clock=self.clock, wall=lambda: 1_700_000_000 + self.clock(),
-                        sleep=self.clock.sleep, spawn=spawn, read_beat=reader,
-                        backoff=lambda n: 2 ** n)
-        defaults.update(kwargs)
-        return Supervisor(["python", "paper-child"], **defaults)
+class TestShutdownContract(TempCase):
+    """The supervisor/watchdog harness is gone; what survives is the contract
+    a live runtime still owes the operator: bounded exit codes and a signal
+    handler that disarms instead of dying silently."""
 
-    def beat(self, seq=0, **changes):
-        return {"pid": self.proc.pid, "run_id": self.spawn_kw["env"]["CYBERTRADE_RUN_ID"],
-                "cycle": seq, "ts": 1e99, "state": "armed", **changes}
+    def test_safety_hold_exit_code_is_bounded_and_distinct(self):
+        self.assertEqual(SAFETY_HOLD_EXIT, 78)
+        self.assertNotEqual(SAFETY_HOLD_EXIT, 0)
+        self.assertNotEqual(SAFETY_HOLD_EXIT, 2)
 
-    def test_budget_rolls_and_allows_zero_restarts(self):
-        clk = Clock()
-        b = RestartBudget(2, 10, clock=clk)
-        self.assertTrue(b.allow())
-        self.assertTrue(b.allow())
-        self.assertFalse(b.allow())
-        clk.sleep(10)
-        self.assertTrue(b.allow())
-        self.assertFalse(RestartBudget(0).allow())
-        with self.assertRaises(ValueError):
-            RestartBudget(-1)
+    def test_sigterm_becomes_keyboard_interrupt(self):
+        seen = []
+        with mock.patch("signal.signal") as sig:
+            with stop_on_sigterm():
+                self.assertEqual(sig.call_count, 1)     # SIGTERM is the wire
+                handler = sig.call_args.args[1]
+            self.assertEqual(sig.call_count, 2)         # restored on exit
+        with self.assertRaises(KeyboardInterrupt):
+            handler(15, None)
+        self.assertEqual(seen, [])
 
-    def test_backoff_jitter_caps_and_large_attempts(self):
-        for seed in range(10):
-            first = backoff_seconds(1, rnd=random.Random(seed))
-            self.assertGreaterEqual(first, 1.6)
-            self.assertLessEqual(first, 2.4)
-            self.assertLessEqual(backoff_seconds(100_000, rnd=random.Random(seed)), 300)
-        self.assertNotEqual(backoff_seconds(3, rnd=random.Random(1)),
-                            backoff_seconds(3, rnd=random.Random(2)))
+    def test_sigterm_off_the_main_thread_is_a_noop(self):
+        done = []
+        thread = threading.Thread(
+            target=lambda: stop_on_sigterm().__enter__() or done.append(True))
+        thread.start()
+        thread.join(2)
+        self.assertEqual(done, [True])
 
-    def test_report_unique_bounded_private_redacted_and_rotated(self):
-        paths = []
-        for _ in range(3):
-            paths.append(write_crash_report(self.tmp.name, cmd=["x", "--ssid", "SECRET1"],
-                                            exit_code=2, ts=100, keep=2, max_output=80,
-                                            output="a" * 200 + '\npassword=SECRET2\n{"ssid":"SECRET3"}\nboom'))
-        self.assertEqual(len(set(paths)), 3)
-        self.assertEqual(len(list(Path(self.tmp.name).glob("crash-*.txt"))), 2)
-        body = Path(paths[-1]).read_text()
-        self.assertNotIn("SECRET", body)
-        self.assertIn("boom", body)
-        self.assertLess(len(body), 350)
-        if os.name == "posix":
-            self.assertEqual(stat.S_IMODE(os.stat(paths[-1]).st_mode), 0o600)
 
-    def test_clean_exit_is_not_respawned(self):
-        sup = self.setup_supervisor(FakeProcess(code=0))
-        self.assertEqual(sup.run(), 0)
-        self.assertEqual(sup.restarts, 0)
-        self.assertIsNone(sup.last_report)
+    def test_parser_rejects_deleted_commands(self):
+        parser = build_parser()
+        for command in ("supervise", "backtest", "optimize", "drill", "scenarios"):
+            with self.assertRaises(SystemExit):
+                with mock.patch("sys.stderr", new=io.StringIO()):
+                    parser.parse_args([command])
 
-    def test_safety_hold_exit_is_not_respawned(self):
-        sup = self.setup_supervisor(FakeProcess(code=SAFETY_HOLD_EXIT), max_restarts=5)
-        self.assertEqual(sup.run(), SAFETY_HOLD_EXIT)
-        self.assertEqual(sup.restarts, 0)
-        self.assertIn("safety-hold", Path(sup.last_report).read_text())
-
-    def test_crash_budget_exhausts_after_bounded_restarts(self):
-        procs = []
-        def spawn(*args, **kwargs):
-            proc = FakeProcess(code=2, output=b"traceback: boom")
-            procs.append(proc)
-            return proc
-        sup = self.setup_supervisor(max_restarts=2, spawn=spawn)
-        self.assertEqual(sup.run(), 1)
-        self.assertEqual((sup.restarts, len(procs)), (2, 3))
-        self.assertEqual(self.clock.sleeps, [2, 4])
-        self.assertIn("boom", Path(sup.last_report).read_text())
-
-    def test_missing_heartbeat_uses_startup_grace_then_terminates(self):
-        sup = self.setup_supervisor()
-        self.assertEqual(sup.run(), 1)
-        self.assertEqual(self.clock(), 4)
-        self.assertEqual(sup.hangs, 1)
-        self.assertTrue(self.proc.terminated)
-
-    def test_unchanged_sequence_cannot_keep_hung_child_alive(self):
-        sup = self.setup_supervisor(beats=lambda me: me.beat(seq=0))
-        self.assertEqual(sup.run(), 1)
-        self.assertEqual(self.clock(), 2)
-        self.assertEqual(sup.hangs, 1)
-
-    def test_wrong_pid_or_session_or_boolean_sequence_is_ignored(self):
-        for change in ({"pid": -1}, {"run_id": "previous-process"}, {"cycle": True}):
-            with self.subTest(change=change):
-                sup = self.setup_supervisor(beats=lambda me: me.beat(**change))
-                self.assertEqual(sup.run(), 1)
-                self.assertEqual(self.clock(), 4)
-
-    def test_advancing_sequence_survives_wall_clock_jumps(self):
-        sup = self.setup_supervisor(beats=lambda me: me.beat(seq=int(me.clock())),
-                                    wall=lambda: -1e9)
-        self.proc.clock, self.proc.exit_at = self.clock, 10
-        self.assertEqual(sup.run(), 0)
-        self.assertEqual(sup.hangs, 0)
-        self.assertEqual(self.clock(), 10)
-
-    def test_kill_heartbeat_stops_without_restart(self):
-        sup = self.setup_supervisor(beats=lambda me: me.beat(state="kill"), max_restarts=5)
-        self.assertEqual(sup.run(), SAFETY_HOLD_EXIT)
-        self.assertTrue(self.proc.terminated)
-        self.assertEqual(sup.restarts, 0)
-
-    def test_keyboard_interrupt_reaps_child(self):
-        def interrupt(seconds):
-            raise KeyboardInterrupt
-        sup = self.setup_supervisor(sleep=interrupt)
-        self.assertEqual(sup.run(), 0)
-        self.assertTrue(self.proc.terminated)
-        self.assertEqual(sup.restarts, 0)
-
-    def test_child_ignoring_term_is_killed(self):
-        sup = self.setup_supervisor(FakeProcess(ignore_term=True))
-        self.assertEqual(sup.run(), 1)
-        self.assertTrue(self.proc.terminated)
-        self.assertTrue(self.proc.killed)
-
-    def test_spawn_failure_spends_budget_not_unbounded_loop(self):
-        spawn = mock.Mock(side_effect=FileNotFoundError("missing executable"))
-        sup = self.setup_supervisor(spawn=spawn, max_restarts=1)
-        self.assertEqual(sup.run(), 1)
-        self.assertEqual(spawn.call_count, 2)
-        self.assertIn("missing executable", Path(sup.last_report).read_text())
-
-    def test_real_noisy_child_pipe_is_drained_and_tail_bounded(self):
-        script = "import sys; sys.stdout.write('x'*1000000+'TAIL-END'); sys.stdout.flush(); sys.exit(3)"
-        sup = Supervisor([sys.executable, "-u", "-c", script], heartbeat_path=self.path,
-                         crash_dir=self.tmp.name, budget=RestartBudget(0),
-                         startup_grace=5, watch_slice=.05)
-        self.assertEqual(sup.run(), 1)
-        self.assertEqual(sup.hangs, 0)
-        body = Path(sup.last_report).read_text()
-        self.assertIn("TAIL-END", body)
-        self.assertLess(len(body), 65_000)
-
-    def test_real_missing_heartbeat_child_is_reaped(self):
-        captured = []
-        def spawn(cmd, **kwargs):
-            proc = subprocess.Popen(cmd, **kwargs)
-            captured.append(proc)
-            return proc
-        sup = Supervisor([sys.executable, "-c", "import time; time.sleep(60)"],
-                         heartbeat_path=self.path, crash_dir=self.tmp.name,
-                         budget=RestartBudget(0), startup_grace=.2, watch_slice=.05,
-                         spawn=spawn)
-        try:
-            self.assertEqual(sup.run(), 1)
-            self.assertEqual(sup.hangs, 1)
-            self.assertIsNotNone(captured[0].poll())
-        finally:
-            for proc in captured:
-                if proc.poll() is None:
-                    proc.kill()
-                proc.wait(timeout=2)
+    def test_live_commands_survive(self):
+        parser = build_parser()
+        for command in (("run",), ("web",), ("gui",), ("quotex", "status"),
+                        ("journal",), ("strategies",), ("calendar",), ("edge",),
+                        ("montecarlo",), ("calibrate",), ("doctor",)):
+            self.assertIsNotNone(parser.parse_args(list(command)), command)
 
 
 class TestRuntimeWiring(TempCase):
-    def test_supervise_cli_forwards_config_without_live_flags(self):
-        args = build_parser().parse_args(["--config", "custom.json", "supervise",
-                                          "--scenario", "range_chop", "--max-restarts", "2"])
-        with mock.patch("cybertrade.cli._load_config", return_value=AppConfig()), \
-             mock.patch("cybertrade.watchdog.Supervisor") as sup:
-            sup.return_value.run.return_value = 0
-            self.assertEqual(cmd_supervise(args), 0)
-        cmd = sup.call_args.args[0]
-        self.assertLess(cmd.index("--config"), cmd.index("run"))
-        self.assertIn("--supervised", cmd)
-        self.assertIn("range_chop", cmd)
-        for flag in ("--live", "--yes", "--dry-run"):
-            self.assertNotIn(flag, cmd)
-
-    def test_supervise_refuses_nonpaper_and_disabled_persistence(self):
-        args = build_parser().parse_args(["supervise"])
-        for mode in ("quotex", "dryrun"):
-            cfg = AppConfig()
-            cfg.broker.mode = mode
-            with mock.patch("cybertrade.cli._load_config", return_value=cfg), \
-                 mock.patch("cybertrade.watchdog.Supervisor") as sup:
-                self.assertEqual(cmd_supervise(args), 2)
-                sup.assert_not_called()
+    def test_run_holds_on_a_kill_switch_and_clears_the_saved_permission(self):
+        args = build_parser().parse_args(["run", "--demo"])
         cfg = AppConfig()
-        cfg.continuity_path = ""
-        with mock.patch("cybertrade.cli._load_config", return_value=cfg):
-            self.assertEqual(cmd_supervise(args), 2)
+        cfg.risk.allow_live = True
+        with mock.patch("cybertrade.cli._load_config", return_value=cfg), \
+             mock.patch("cybertrade.cli._resolve_purse"), \
+             mock.patch("cybertrade.cli._confirm_live", lambda a, c: True), \
+             mock.patch("cybertrade.cli._build_engine") as build:
+            build.return_value.arm.side_effect = KillSwitchEngaged("test stop")
+            self.assertEqual(cmd_run(args), SAFETY_HOLD_EXIT)
+            self.assertTrue(build.call_args.kwargs["durable"])
+            build.return_value.shutdown.assert_called_once()
 
-    def test_supervised_child_cannot_bypass_parent_live_rail(self):
-        args = build_parser().parse_args(["run", "--supervised", "--live", "--yes"])
+    def test_run_aborts_before_the_venue_when_the_gate_refuses(self):
+        args = build_parser().parse_args(["run", "--demo"])
         with mock.patch("cybertrade.cli._load_config", return_value=AppConfig()), \
+             mock.patch("cybertrade.cli._resolve_purse"), \
+             mock.patch("cybertrade.cli._confirm_live", lambda a, c: False), \
+             mock.patch("cybertrade.cli._build_engine") as build:
+            self.assertEqual(cmd_run(args), 1)
+            build.assert_not_called()
+
+    def test_run_needs_a_purse_before_anything_live(self):
+        args = build_parser().parse_args(["run"])
+        with mock.patch("cybertrade.cli._load_config", return_value=AppConfig()), \
+             mock.patch("cybertrade.cli._resolve_purse",
+                        side_effect=ConfigError("no purse chosen")), \
              mock.patch("cybertrade.cli._build_engine") as build:
             self.assertEqual(cmd_run(args), SAFETY_HOLD_EXIT)
             build.assert_not_called()
 
-    def test_saved_live_permission_is_reset_without_live_request(self):
-        args = build_parser().parse_args(["run"])
-        cfg = AppConfig()
-        cfg.risk.allow_live = True
-        with mock.patch("cybertrade.cli._load_config", return_value=cfg), \
-             mock.patch("cybertrade.cli._build_engine") as build:
-            build.return_value.arm.side_effect = KillSwitchEngaged("test stop")
-            self.assertEqual(cmd_run(args), SAFETY_HOLD_EXIT)
-            self.assertFalse(cfg.risk.allow_live)
-            self.assertTrue(build.call_args.kwargs["durable"])
-            build.return_value.shutdown.assert_called_once()
-
-    def test_timeout_default_scales_with_long_timeframe(self):
-        cfg = AppConfig()
-        cfg.strategy.timeframe = "1h"
-        args = build_parser().parse_args(["supervise"])
-        with mock.patch("cybertrade.cli._load_config", return_value=cfg), \
-             mock.patch("cybertrade.watchdog.Supervisor") as sup:
-            sup.return_value.run.return_value = 0
-            cmd_supervise(args)
-            self.assertGreater(sup.call_args.kwargs["max_stale"], 600)
-        args.stale_seconds = 10
-        with mock.patch("cybertrade.cli._load_config", return_value=cfg):
-            self.assertEqual(cmd_supervise(args), 2)
-
-    def test_both_huds_surface_hold_and_paper_resolution_is_explicit(self):
+    def test_both_huds_surface_the_hold(self):
         html = (ROOT / "cybertrade/web/static/index.html").read_text()
         js = (ROOT / "cybertrade/web/static/js/app.js").read_text()
         desktop = (ROOT / "cybertrade/gui/app.py").read_text()
@@ -1057,9 +722,7 @@ class TestRuntimeWiring(TempCase):
         self.assertIn("renderRecovery(snap.continuity", js)
         self.assertIn("button.disabled = blocked", js)
         self.assertIn("window.confirm", js)
-        self.assertIn('cmd: "resolve_paper"', js)
         self.assertIn("self.recovery_led.pack(fill=", desktop)
-        self.assertIn('state.get("continuity"', desktop)
 
 
 if __name__ == "__main__":

@@ -3,6 +3,15 @@
 > **All-weather algorithmic trading terminal for Quotex-style binary options**
 > with a full cyberpunk HUD — desktop *and* browser editions — built on the
 > Python standard library alone. Zero third-party runtime dependencies.
+>
+> ### ⚠ THIS BUILD IS LIVE ONLY
+>
+> There is **no paper mode, no dry-run mode, and no synthetic market**. Every
+> order this program places is a **real order at Quotex**. The simulator, the
+> backtest lab, the crisis drills and the paper supervisor were removed
+> outright — they are not merely switched off. The sections below are the
+> phase-by-phase history of the project and describe features that no longer
+> exist; the tables at the top are current.
 
 ```
  ██████╗██╗   ██╗██████╗ ███████╗██████╗ ████████╗██████╗  █████╗ ██████╗ ███████╗
@@ -18,9 +27,10 @@
 - **No system survives every market condition.** "All-weather" here is a
   design posture (regime detection + a defensive playbook + hard circuit
   breakers), not a guarantee. See [`DISCLAIMER.md`](DISCLAIMER.md).
-- **Paper trading is the default.** Live order flow needs `risk.allow_live`,
-  `--live`, and an interactive `I UNDERSTAND` confirmation — and even then
-  prefer the broker's PRACTICE purse.
+- **Every boot is live.** Each trading command asks you to type
+  `I UNDERSTAND`, and asks which purse to trade (PRACTICE or REAL) — nothing
+  is defaulted for you. `--yes` skips the typing for scripted operators;
+  `--demo` / `--real` skip the purse question.
 - The Quotex bridge is **unofficial** (community-reverse-engineered protocol,
   see [`docs/QUOTEX_PROTOCOL.md`](docs/QUOTEX_PROTOCOL.md)). Automation may
   violate the broker's Terms of Service.
@@ -37,25 +47,25 @@ python -m cybertrade web --port 8899 --auto
 # desktop terminal (Tkinter; needs python3-tk)
 python run_gui.py
 
-# headless paper trading loop (durable risk governor + paper book)
-python -m cybertrade run
+# headless LIVE trading loop (durable risk governor + venue reconciliation)
+python -m cybertrade run --demo            # --real trades REAL MONEY
 
-# bounded crash/hang restarts — PAPER ONLY, never automatic live re-arming
-python -m cybertrade supervise --max-restarts 5 --restart-window 600
+# venue session: pair Chrome (human solves the CAPTCHA), then check/warm it
+python -m cybertrade quotex login
+python -m cybertrade quotex status
+python -m cybertrade quotex warm --bars 250
 
-# the ALL-WEATHER GAUNTLET — every market condition, 10 stress scenarios
-python -m cybertrade backtest --bars 600
-
-# walk-forward parameter search (with overfit tripwires)
-python -m cybertrade optimize --scenario regime_whipsaw
-
-# strategy / scenario catalogs and journal analytics
+# catalogs, journal analytics, payout math, risk lab, self-test
 python -m cybertrade strategies
-python -m cybertrade scenarios
 python -m cybertrade journal
+python -m cybertrade edge --payout 0.85 --winrate 0.55
+python -m cybertrade montecarlo --pnl "8.5,-10,8.5,-10" --json
+python -m cybertrade calibrate
+python -m cybertrade calendar
+python -m cybertrade doctor
 
-# run the 593-test verification suite
-python -m unittest discover -s tests
+# run the test suite (per module keeps each run bounded)
+python -m unittest tests.test_bot tests.test_phase32
 ```
 
 ## The stack
@@ -68,32 +78,31 @@ python -m unittest discover -s tests
 | **Regime engine** | Trend/range/vol/crisis/gap classifier fusing ADX, regression slope, vol percentile, GARCH, gap scans → `RegimeReading` + stress score |
 | **SURVIVOR playbook** | Condition → response matrix on a 5-rung posture ladder (ATTACK → NORMAL → GUARD → DEFENSE → LOCKDOWN): stake scaling, confidence floors, expiry caps, forbidden strategy families, news blackouts, weekend/friday locks, spread/liquidity vetoes |
 | **Risk fortress** | Stake bands, fractional-Kelly + vol-target sizing, drawdown governor (daily lock + total kill), loss-streak cooldowns, per-asset / correlation-cluster caps, rate limits, payout floor, strategy win-rate floors |
-| **Execution** | Broker ABC → PaperBroker (payout/latency/slippage/ATM-refund modelling) → DryRunBroker → QuotexBroker; OMS + ledger + SQLite journal |
-| **Recovery (Phase 32)** | Single-writer, fsynced risk/book checkpoints; intent/commit transaction markers; restart-preserved loss limits and kill; offline-expiry review; PID/run-bound completed-cycle heartbeats; bounded **paper-only** process supervision |
+| **Execution** | Broker ABC → QuotexBroker (real `api.buy`, venue reconciliation, an `allow_orders=False` data-only rail); OMS + ledger + SQLite journal |
+| **Recovery (Phase 32)** | Single-writer, fsynced risk/ledger/order-registry checkpoints; intent/commit transaction markers; restart-preserved loss limits and kill; PID/run-bound completed-cycle heartbeats; SIGTERM follows the Ctrl+C cleanup path (the paper-only process supervisor was removed) |
 | **Quotex integration** | Stdlib RFC6455 WebSocket client → Engine.IO v3 / Socket.IO codec → website `api/signin` session + `authorization` / `orders/open` / `sellOption` / `candleHistory` dialect with auto-reconnect and venue reconciliation; **Chrome pairing** (`quotex login`: human solves CAPTCHA, we read `sessionid` via localhost DevTools); live modes wire **venue candles only** — synthetic feeds structurally refused; **ghost wire** (Phase-30): human-paced frames, jittered reconnects, subscription replay, gap-only backfill, portfolio reconcile |
-| **Backtest lab** | Event-driven binary-option simulator + 10-scenario gauntlet (bull/bear trend, range chop, low-vol grind, high-vol expansion, flash crash, gap open, news spike, liquidity vacuum, regime whipsaw), survival scoring, walk-forward optimizer |
 | **HUDs** | Desktop Tkinter terminal (boot animation, canvas candlesticks, gauges, meters, blotter, 7 panels) **and** browser terminal (glitch typography, scanlines, grid bloom, canvas chart, SSE live feed, fire control) — both **resolution-aware** (Phase-31: shared `gui/layout.py` breakpoints, plan-driven buttons/stat placement, explicit grid areas, DPR canvas fitting) |
 
 ## Architecture
 
 ```
 cybertrade/
-├── data/        models · candle history & MTF resample · synthetic regimes · feeds
+├── data/        models · candle history & MTF resample · live venue feed · feeds
 ├── indicators/  core · trend · momentum · volatility · volume · patterns
 ├── regime/      RegimeDetector
 ├── strategies/  trend · meanrev · breakout · momentum · volatility · pattern · ensemble
 ├── risk/        manager · limits · sizing
-├── execution/   broker · paper · oms · ledger
+├── execution/   broker · oms · ledger
 ├── network/     websocket (RFC6455) · socketio (EIO v3) · http_client
 ├── brokers/quotex/  client · api · adapter · protocol · models
 ├── bot/         engine · survivor · watchdog · health
-├── backtest/    engine · scenarios · report · optimize
 ├── journal/     store (SQLite) · analytics
 ├── gui/         theme · widgets · chart · panels · app · boot
 ├── web/         server (HTTP+SSE) · static/ (cyberpunk dashboard)
-├── continuity.py  runtime risk/book checkpoints · fail-closed recovery
-├── watchdog.py    bounded process supervisor (PAPER ONLY)
-└── cli.py       gui · web · run · supervise · backtest · optimize · journal · doctor
+├── continuity.py  runtime risk/ledger checkpoints · fail-closed recovery
+├── shutdown.py    SIGTERM cleanup + SAFETY_HOLD_EXIT
+└── cli.py       gui · web · run · quotex · calibrate · calendar · journal ·
+                strategies · edge · montecarlo · doctor
 ```
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
@@ -102,8 +111,9 @@ See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the data-flow diagrams.
 
 `data/cybertrade_config.json` (auto-created; passwords are stripped on save).
 Key sections: `risk` (limits & sizing), `strategy` (universe, timeframe,
-ensemble mode), `survivor` (defense matrix), `broker` (paper|dryrun|quotex),
-`display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`), `backtest`.
+ensemble mode), `survivor` (defense matrix), `broker` (`mode` is `quotex` and
+nothing else; `demo_account` is your purse — `null` until you choose),
+`display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`).
 
 ## Phase 32 — the watchdog (crash recovery without risk amnesia)
 

@@ -17,12 +17,11 @@ from cybertrade.bot.engine import TradingEngine
 from cybertrade.bot.survivor import Survivor
 from cybertrade.config import AppConfig
 from cybertrade.constants import Side
-from cybertrade.data.feed import SyntheticFeed
 from cybertrade.data.models import Order, Signal, Tick
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.regime.detector import RegimeReading
 
 from cybertrade.risk.slippage import CAP_BPS, expected_slippage_bps
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 class TestExpectedSlippage(unittest.TestCase):
@@ -35,16 +34,15 @@ class TestExpectedSlippage(unittest.TestCase):
 
     def test_adverse_conditions_widen_monotonically(self):
         calm = expected_slippage_bps(base=0.5)
+        normal = expected_slippage_bps(base=0.5, session_liquidity="normal")
         thin = expected_slippage_bps(base=0.5, session_liquidity="thin")
-        drill = expected_slippage_bps(base=0.5, drill=True)
         storm = expected_slippage_bps(base=0.5, stress=1.0)
-        self.assertGreater(thin, calm)
-        self.assertGreater(drill, thin)
-        self.assertGreater(storm, drill)
+        self.assertGreater(normal, calm)
+        self.assertGreater(thin, normal)
+        self.assertGreater(storm, thin)
         self.assertGreaterEqual(storm, 40.0)
         self.assertLessEqual(
-            expected_slippage_bps(stress=1.0, drill=True,
-                                  session_liquidity="thin", base=0.5),
+            expected_slippage_bps(stress=1.0, session_liquidity="thin", base=0.5),
             CAP_BPS,
         )
 
@@ -76,9 +74,9 @@ class TestSurvivorSlipVeto(unittest.TestCase):
         self.assertIn("slippage_bps=decision.slippage_bps", src)
 
 
-class TestPaperPerOrderSlip(unittest.TestCase):
+class TestVenuePerOrderSlip(unittest.TestCase):
     def _broker(self, default_bps=0.0):
-        b = PaperBroker(1000.0, latency_ms=0, slippage_bps=default_bps, seed=1)
+        b = VenueStub(balance=1000.0)
         b.connect()
         return b
 

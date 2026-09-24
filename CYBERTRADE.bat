@@ -107,9 +107,9 @@ echo  CYBERTRADE READY - Choose what to run:
 echo ========================================================
 echo  1 - Web HUD - browser at http://localhost:8899 - recommended
 echo  2 - Desktop GUI - tkinter window
-echo  3 - Doctor only - 10 checks
-echo  4 - Backtest - 200 bars quick test
-echo  5 - Run paper trading - headless
+echo  3 - Doctor only - environment self-test
+echo  4 - Run LIVE trading - headless - REAL ORDERS
+echo  5 - Quotex session - login / status / warm
 echo.
 set /p CHOICE=Enter choice 1-5 [1]: 
 if "%CHOICE%"=="" set CHOICE=1
@@ -117,8 +117,8 @@ if "%CHOICE%"=="" set CHOICE=1
 if "%CHOICE%"=="1" goto :run_web
 if "%CHOICE%"=="2" goto :run_gui
 if "%CHOICE%"=="3" goto :run_doctor
-if "%CHOICE%"=="4" goto :run_backtest
-if "%CHOICE%"=="5" goto :run_paper
+if "%CHOICE%"=="4" goto :run_live
+if "%CHOICE%"=="5" goto :run_session
 if /I "%CHOICE%"=="W" goto :run_web
 if /I "%CHOICE%"=="WEB" goto :run_web
 if /I "%CHOICE%"=="G" goto :run_gui
@@ -149,17 +149,20 @@ python -m cybertrade doctor
 pause
 goto :end
 
-:run_backtest
+:run_live
 echo.
-echo Running Backtest 200 bars...
-python -m cybertrade backtest --bars 200
-pause
+echo LIVE TRADING - real orders at Quotex - Ctrl+C to stop
+python -m cybertrade run
 goto :end
 
-:run_paper
+:run_session
 echo.
-echo Running Paper Trading - headless - Ctrl+C to stop
-python -m cybertrade run
+echo Checking the Quotex session...
+python -m cybertrade quotex status
+echo.
+echo Warming the venue books...
+python -m cybertrade quotex warm --bars 250
+pause
 goto :end
 
 :end

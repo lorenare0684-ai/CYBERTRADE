@@ -2,7 +2,7 @@
 
 The venue publishes its instrument list over the ``instrument`` socket event;
 between syncs the static :data:`cybertrade.constants.ASSET_CATALOG` keeps
-payouts honest (paper mode and offline runs).
+payouts honest while a session is still connecting.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ class AssetCatalog:
 
     @classmethod
     def from_static(cls) -> "AssetCatalog":
-        """Seed from the bundled payout table (offline/paper default)."""
+        """Seed from the bundled payout table (offline default)."""
         cat = cls()
         for name, meta in ASSET_CATALOG.items():
             cat.upsert(QXAsset(

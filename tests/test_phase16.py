@@ -14,6 +14,7 @@ import tempfile
 import unittest
 
 from cybertrade.network.supervisor import ReconnectSupervisor
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 class FakeLink:
@@ -101,9 +102,6 @@ class TestEngineWiring(unittest.TestCase):
     def _engines(self):
         from cybertrade.bot.engine import TradingEngine
         from cybertrade.brokers.quotex.adapter import QuotexBroker
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.dryrun import DryRunBroker
-        from cybertrade.execution.paper import PaperBroker
         from cybertrade.config import AppConfig
 
         class _Api(FakeLink):
@@ -125,6 +123,19 @@ class TestEngineWiring(unittest.TestCase):
             def payout_for(self, asset, expiry_seconds=60):
                 return 0.9
 
+            def account_snapshot(self):
+                return type(
+                    "S", (),
+                    {"balance": 1000.0, "equity": 1000.0, "margin_used": 0.0,
+                     "open_positions": 0, "currency": "USD", "is_demo": True},
+                )()
+
+            def last_price(self, asset):
+                return 1.0
+
+            def close(self):
+                pass
+
             def close(self):
                 pass
 
@@ -133,24 +144,31 @@ class TestEngineWiring(unittest.TestCase):
             cfg.journal_path = os.path.join(tmp, "journal.db")
             cfg.calibration_path = os.path.join(tmp, "cal.json")
             venue = QuotexBroker(_Api(), allow_orders=False)
-            dry = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0),
-                                broker=DryRunBroker(venue=venue, starting_balance=1000.0))
+            wire = TradingEngine(cfg, feed=VenueFeed(), broker=venue)
             cfg2 = AppConfig()
             cfg2.journal_path = os.path.join(tmp, "j2.db")
             cfg2.calibration_path = os.path.join(tmp, "c2.json")
-            paper = TradingEngine(cfg2, feed=SyntheticFeed(tick_interval=60.0),
-                                  broker=PaperBroker())
-            yield dry, paper
+            stub = TradingEngine(cfg2, feed=VenueFeed(),
+                                 broker=VenueStub())
+            yield wire
+            yield stub
 
-    def test_supervisor_only_with_venue(self):
-        for dry, paper in self._engines():
-            dry.boot()
-            paper.boot()
-            self.assertIsNotNone(dry.supervisor)
-            self.assertIsNone(paper.supervisor)   # paper has no wire to heal
-            dry.cycle()
-            dry.shutdown()
-            paper.shutdown()
+    def test_venue_engine_heals_its_wire(self):
+        wire = list(self._engines())[0]
+        wire.boot()
+        # a live engine on a real venue wire supervises its reconnects
+        self.assertIsNotNone(wire.supervisor)
+        self.assertEqual(wire.supervisor.max_attempts,
+                         wire.config.broker.reconnect_max)
+        wire.cycle()
+        wire.shutdown()
+
+    def test_stub_venue_also_supervises(self):
+        stub = list(self._engines())[1]
+        stub.boot()
+        self.assertIsNotNone(stub.supervisor)   # a venue broker either way
+        stub.cycle()
+        stub.shutdown()
 
 
 if __name__ == "__main__":

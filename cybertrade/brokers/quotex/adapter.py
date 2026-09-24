@@ -28,7 +28,7 @@ class QuotexBroker(Broker):
                  salvage_rate: float = 0.25) -> None:
         super().__init__()
         self.api = api
-        self.allow_orders = allow_orders  # dry-run rail: False = data only
+        self.allow_orders = allow_orders  # safety rail: False = data only
         self.salvage_rate = float(salvage_rate)
         self._positions: Dict[str, Position] = {}
         self._fills: Dict[str, Fill] = {}
@@ -138,7 +138,8 @@ class QuotexBroker(Broker):
     # -- trading -----------------------------------------------------------
     def submit(self, order: Order) -> Fill:
         if not self.allow_orders:
-            raise OrderRejected("dry-run: live orders are disabled", code="DRY_RUN")
+            raise OrderRejected("live orders are disabled on this wire",
+                                 code="ORDERS_DISABLED")
         if not self.connected:
             raise OrderRejected("not connected to Quotex", code="NO_CONN")
         price = self.last_price(order.asset)

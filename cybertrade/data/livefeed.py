@@ -2,9 +2,9 @@
 
 Switching to live mode means switching the DATA: every candle, tick, and
 detector input comes from the venue websocket/session, never from a
-generator. ``SyntheticFeed.is_synthetic`` is True; this class is False, and
-``TradingEngine`` refuses to boot a live broker mode (``quotex``/``dryrun``)
-against any synthetic feed — no silent fallback, ever.
+generator.  A recorded replay feed is True; this class is False, and
+``TradingEngine`` refuses to boot a live broker mode against any synthetic
+feed — no silent fallback, ever.
 
 Warmup pulls real history through ``sync.warm_book``; the running stream
 rides ``QuotexAPI`` tick handlers into the same MultiTimeframeBook the

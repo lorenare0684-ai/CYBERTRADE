@@ -60,7 +60,7 @@ class TapeRecorder:
         if self._subscribed or not self.enabled:
             return
         for topic in (Topic.TICK, Topic.SIGNAL, Topic.SETTLE, Topic.ALERT,
-                      Topic.RISK, Topic.ORDER_SUBMIT, Topic.KILL, Topic.SCENARIO):
+                      Topic.RISK, Topic.ORDER_SUBMIT, Topic.KILL):
             bus.subscribe(topic, self._on_event)
         self._subscribed = True
 
@@ -68,7 +68,7 @@ class TapeRecorder:
         if not self._subscribed:
             return
         for topic in (Topic.TICK, Topic.SIGNAL, Topic.SETTLE, Topic.ALERT,
-                      Topic.RISK, Topic.ORDER_SUBMIT, Topic.KILL, Topic.SCENARIO):
+                      Topic.RISK, Topic.ORDER_SUBMIT, Topic.KILL):
             bus.unsubscribe(topic, self._on_event)
         self._subscribed = False
         self.close()

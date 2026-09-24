@@ -45,30 +45,9 @@
       <span>STRESS: <b id="stress">0.00</b></span>
       <span>VOL: <b id="volstate">—</b></span>
       <span>SESSION: <b id="session">—</b></span>
-      <span>SCENARIO:
-        <select id="scenario-select" class="neon-select">
-          <option value="">— live —</option>
-        </select>
-      </span>
-      <button class="btn sm cyan" id="btn-scenario">APPLY</button>
+      <span>FEED: <b class="ok">LIVE VENUE CANDLES</b></span>
+      <span>ORDERS: <b class="bad">REAL</b></span>
     </div>
-    <div class="ticker-row">
-      <span>DRILL:</span>
-      <button class="btn sm magenta" id="btn-drill-crash">FLASH CRASH</button>
-      <button class="btn sm magenta" id="btn-drill-gap">GAP</button>
-      <button class="btn sm magenta" id="btn-drill-news">NEWS</button>
-      <button class="btn sm magenta" id="btn-drill-vac">VACUUM</button>
-      <button class="btn sm magenta" id="btn-drill-whip">WHIPSAW</button>
-      <button class="btn sm yellow" id="btn-drill-stop">STOP</button>
-      <span class="mini" id="drill">drill idle</span>
-    </div>
-    <div class="ticker-row">
-      <span>SCORE:</span>
-      <button class="btn sm cyan" id="btn-run-bt">RUN BACKTEST</button>
-      <button class="btn sm magenta" id="btn-run-gauntlet">RUN GAUNTLET</button>
-      <span class="mini" id="job">JOB IDLE</span>
-    </div>
-    <pre class="console" id="scorecard" style="max-height:190px;margin-top:6px;display:none;"></pre>
   </section>
 
   <!-- ============ RIGHT: SYSTEM ============ -->
@@ -111,7 +90,7 @@
       <div class="panel-head"><h2>◈ FIRE CONTROL</h2></div>
       <div class="recovery-status" id="recovery-status" role="status" aria-live="polite">RECOVERY · checking…</div>
       <div class="btn-row">
-        <button class="btn green" id="btn-arm">ARM ▶</button>
+        <button class="btn green" id="btn-arm" title="Arms LIVE trading (real orders)">ARM LIVE ▶</button>
         <button class="btn cyan" id="btn-disarm">DISARM</button>
         <button class="btn red glitchy" id="btn-kill">KILL ✖</button>
       </div>
@@ -192,7 +171,7 @@
 <footer class="statusline">
   <span id="engine-state">STATE: BOOT</span>
   <span id="regime-detail">—</span>
-  <span class="warn">PAPER MODE BY DEFAULT · NO SYSTEM SURVIVES EVERY MARKET · SEE DISCLAIMER</span>
+  <span class="warn">LIVE ONLY · REAL ORDER FLOW · NO SYSTEM SURVIVES EVERY MARKET · SEE DISCLAIMER</span>
   <span id="fps">SSE: connecting…</span>
 </footer>
 

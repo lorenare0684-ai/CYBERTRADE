@@ -2,6 +2,13 @@
 
 Configuration loads/saves as plain JSON so operators can diff and audit it.
 Every dataclass validates itself; invalid config fails fast at startup.
+
+**This build is LIVE ONLY.**  There is no paper mode and no dry-run mode:
+``broker.mode`` accepts exactly one value (``quotex``), ``risk.allow_live``
+ships on, and the only remaining human gate is the ``I UNDERSTAND``
+confirmation.  The purse (practice vs real balance) is deliberately *not*
+defaulted — an operator must choose it once, in config or on the command
+line, so no money decision is ever baked into a default.
 """
 
 from __future__ import annotations
@@ -53,7 +60,7 @@ class RiskConfig:
     crisis_salvage: bool = True           # lifeboat: liquidate open risk on LOCKDOWN
     salvage_rate: float = 0.25            # stake fraction a losing contract sells back for
     crisis_stake_scale: float = 0.5       # cut size in crisis regime
-    allow_live: bool = False              # must be flipped consciously
+    allow_live: bool = True               # live-only build; the I-UNDERSTAND gate is the human check
 
     def validate(self) -> None:
         if self.starting_balance <= 0:
@@ -144,15 +151,21 @@ class SurvivorConfig:
 
 @dataclass
 class BrokerConfig:
-    """Connection settings.  Paper is the default mode on purpose."""
+    """Connection settings.  This build trades LIVE at Quotex only.
 
-    mode: str = "paper"                       # paper | quotex | dryrun
+    ``mode`` exists purely so an old config file fails loudly instead of
+    silently running something else: the only accepted value is ``quotex``.
+    ``demo_account`` is deliberately ``None`` — the operator must choose the
+    purse (practice balance or real money) rather than inherit a default.
+    """
+
+    mode: str = "quotex"                   # live-only: quotex (paper/dryrun removed)
     ws_url: str = ""
     http_base: str = ""
     username: str = ""
     password: str = ""                        # never serialized to disk
     ssid: str = ""                            # session cookie — never serialized to disk
-    demo_account: bool = True                 # prefer broker demo balance
+    demo_account: Optional[bool] = None       # None = not chosen yet (must be explicit)
     payout_default: float = 0.85
     latency_ms: int = 180
     slippage_bps: float = 0.5
@@ -165,8 +178,13 @@ class BrokerConfig:
     max_orders_per_min: int = 10              # sliding window cap (never burst)
 
     def validate(self) -> None:
-        if self.mode not in {"paper", "quotex", "dryrun"}:
-            raise ConfigError(f"unknown broker mode {self.mode!r}")
+        if self.mode != "quotex":
+            raise ConfigError(
+                f"broker.mode={self.mode!r} is not supported — this build is LIVE ONLY; "
+                "set broker.mode to \"quotex\" (paper and dry-run modes were removed)"
+            )
+        if self.demo_account is not None and not isinstance(self.demo_account, bool):
+            raise ConfigError("demo_account must be true (practice), false (real), or null (choose)")
         if not 0.0 < self.payout_default < 1.0:
             raise ConfigError("payout_default must be in (0, 1)")
         if self.latency_ms < 0:
@@ -175,6 +193,16 @@ class BrokerConfig:
             raise ConfigError("ghost pacing timings must be >= 0 ms")
         if self.max_orders_per_min < 1:
             raise ConfigError("max_orders_per_min must be >= 1")
+
+    @property
+    def purse_chosen(self) -> bool:
+        return self.demo_account is not None
+
+    @property
+    def purse_label(self) -> str:
+        if self.demo_account is None:
+            return "UNCHOSEN"
+        return "PRACTICE" if self.demo_account else "REAL MONEY"
 
     def redacted(self) -> Dict[str, Any]:
         data = dataclasses.asdict(self)
@@ -208,37 +236,6 @@ class DisplayConfig:
 
 
 @dataclass
-class BacktestConfig:
-    starting_balance: float = 1000.0
-    payout: float = 0.85
-    spread_bps: float = 0.5
-    latency_ms: int = 150
-    warmup_bars: int = 120
-    scenarios: List[str] = field(
-        default_factory=lambda: [
-            "bull_trend",
-            "bear_trend",
-            "range_chop",
-            "low_vol_grind",
-            "high_vol_expansion",
-            "flash_crash",
-            "gap_open",
-            "news_spike",
-            "liquidity_vacuum",
-            "regime_whipsaw",
-        ]
-    )
-
-    def validate(self) -> None:
-        if self.starting_balance <= 0:
-            raise ConfigError("backtest starting_balance must be > 0")
-        if not 0.0 < self.payout < 1.0:
-            raise ConfigError("backtest payout must be in (0, 1)")
-        if self.warmup_bars < 1:
-            raise ConfigError("warmup_bars must be >= 1")
-
-
-@dataclass
 class AlertConfig:
     """Alert center delivery settings."""
 
@@ -267,7 +264,6 @@ class AppConfig:
     survivor: SurvivorConfig = field(default_factory=SurvivorConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
-    backtest: BacktestConfig = field(default_factory=BacktestConfig)
     alerts: AlertConfig = field(default_factory=AlertConfig)
     journal_path: str = os.path.join("data", "journal.db")
     plugins_dir: str = os.path.join("~", ".cybertrade", "plugins")
@@ -288,7 +284,6 @@ class AppConfig:
         self.survivor.validate()
         self.broker.validate()
         self.display.validate()
-        self.backtest.validate()
         for name in ("continuity_path", "heartbeat_path"):
             if not isinstance(getattr(self, name), str):
                 raise ConfigError(f"{name} must be a path string (empty disables it)")
@@ -311,7 +306,6 @@ class AppConfig:
             "survivor": dataclasses.asdict(self.survivor),
             "broker": dataclasses.asdict(self.broker),
             "display": dataclasses.asdict(self.display),
-            "backtest": dataclasses.asdict(self.backtest),
             "journal_path": self.journal_path,
             "operator_path": self.operator_path,
             "qx_session_path": self.qx_session_path,
@@ -333,7 +327,6 @@ class AppConfig:
                 survivor=SurvivorConfig(**data.get("survivor", {})),
                 broker=BrokerConfig(**data.get("broker", {})),
                 display=DisplayConfig(**data.get("display", {})),
-                backtest=BacktestConfig(**data.get("backtest", {})),
                 journal_path=data.get("journal_path", cls.journal_path),
                 operator_path=data.get("operator_path", cls.operator_path),
                 qx_session_path=data.get("qx_session_path", cls.qx_session_path),
@@ -371,6 +364,19 @@ class AppConfig:
     def timeframe(self) -> Timeframe:
         return Timeframe(self.strategy.timeframe)
 
+    def require_purse(self) -> bool:
+        """The purse is never defaulted — an operator must choose it.
+
+        Returns the chosen value; raises :class:`ConfigError` while it is
+        still unset so no money decision is inherited from a default.
+        """
+        if self.broker.demo_account is None:
+            raise ConfigError(
+                "no purse chosen — set broker.demo_account to true (PRACTICE "
+                "balance) or false (REAL money), or pass --demo / --real"
+            )
+        return bool(self.broker.demo_account)
+
     def copy(self) -> "AppConfig":
         return AppConfig.from_dict(self.to_dict(include_secrets=True))
 
@@ -382,6 +388,5 @@ __all__ = [
     "SurvivorConfig",
     "BrokerConfig",
     "DisplayConfig",
-    "BacktestConfig",
     "DEFAULT_CONFIG_PATH",
 ]

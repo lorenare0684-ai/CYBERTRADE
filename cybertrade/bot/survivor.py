@@ -332,7 +332,7 @@ class Survivor:
 
 
 def scenario_expectations() -> Dict[str, str]:
-    """Documented survivor response per stress scenario (used in reports)."""
+    """Documented survivor response per market condition (used in reports)."""
     return {
         "bull_trend": "NORMAL — ride with trend family, trail confidence",
         "bear_trend": "NORMAL — ride puts, forbid knife-catch longs",

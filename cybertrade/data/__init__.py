@@ -1,8 +1,8 @@
-"""Market data: models, history, feeds, and synthetic regimes."""
+"""Market data: models, history, and venue/replay feeds (no synthetic regimes)."""
 
 from __future__ import annotations
 
-from .feed import Feed, QuoteBook, ReplayFeed, SyntheticFeed
+from .feed import Feed, QuoteBook, ReplayFeed
 from .history import (
     CandleSeries,
     HistoryBuffer,
@@ -25,14 +25,6 @@ from .models import (
     confidence_to_strength,
     summarize_trades,
 )
-from .synthetic import (
-    MarketParams,
-    MarketSimulator,
-    SCENARIO_NAMES,
-    generate_candles,
-    make_process,
-    scenario_catalog,
-)
 
 __all__ = [
     "Tick",
@@ -54,13 +46,6 @@ __all__ = [
     "resample",
     "load_history",
     "Feed",
-    "SyntheticFeed",
     "ReplayFeed",
     "QuoteBook",
-    "MarketParams",
-    "MarketSimulator",
-    "SCENARIO_NAMES",
-    "generate_candles",
-    "make_process",
-    "scenario_catalog",
 ]

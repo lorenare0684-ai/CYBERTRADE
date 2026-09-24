@@ -16,11 +16,10 @@ import unittest
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
 from cybertrade.constants import Side
-from cybertrade.data.feed import SyntheticFeed
 from cybertrade.data.models import Tick
 from cybertrade.events import Topic, default_bus
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.web.server import EngineHub, WebTerminal
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _engine() -> TradingEngine:
@@ -30,9 +29,8 @@ def _engine() -> TradingEngine:
     cfg.calibration_path = os.path.join(tmp, "c.json")
     return TradingEngine(
         cfg,
-        feed=SyntheticFeed(tick_interval=60.0,
-                           assets=["EURUSD_otc", "GBPUSD_otc"]),
-        broker=PaperBroker(starting_balance=1000.0),
+        feed=VenueFeed(assets=["EURUSD_otc", "GBPUSD_otc"]),
+        broker=VenueStub(balance=1000.0),
     )
 
 

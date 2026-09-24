@@ -11,7 +11,6 @@ from cybertrade.data.models import Order, Tick
 from cybertrade.exceptions import OrderRejected, RiskRejection
 from cybertrade.execution.ledger import Ledger
 from cybertrade.execution.oms import OrderManager
-from cybertrade.execution.paper import DryRunBroker, PaperBroker
 from cybertrade.risk.manager import RiskManager
 from cybertrade.risk.sizing import (
     confidence_scaled,
@@ -22,6 +21,7 @@ from cybertrade.risk.sizing import (
     vol_scaled,
 )
 from cybertrade.bot.watchdog import Anomaly, Watchdog
+from tests.venue_stubs import VenueStub
 
 
 class TestSizing(unittest.TestCase):
@@ -130,9 +130,9 @@ class TestRiskManager(unittest.TestCase):
         self.assertGreater(d.stake, 0)
 
 
-class TestPaperBroker(unittest.TestCase):
+class TestVenueBroker(unittest.TestCase):
     def setUp(self):
-        self.b = PaperBroker(1000.0, latency_ms=0, slippage_bps=0.0, seed=1)
+        self.b = VenueStub(balance=1000.0)
         self.b.connect()
         self.b.on_tick(Tick("EURUSD_otc", 1.1, bid=1.1, ask=1.1))
 
@@ -155,19 +155,28 @@ class TestPaperBroker(unittest.TestCase):
         p = self.b.payout_for("EURUSD_otc", 60)
         self.assertGreater(p, 0.5)
 
-    def test_dry_run_tags(self):
-        d = DryRunBroker(500, latency_ms=0)
-        d.connect()
-        d.on_tick(Tick("EURUSD_otc", 1.1))
-        order = Order("EURUSD_otc", Side.PUT, 5.0, payout=0.85)
-        fill = d.submit(order)
-        self.assertTrue(order.meta.get("dry_run"))
+    def test_put_wins_when_price_falls(self):
+        order = Order("EURUSD_otc", Side.PUT, 10.0, expiry_seconds=60, payout=0.85)
+        fill = self.b.submit(order)
+        self.b.on_tick(Tick("EURUSD_otc", 1.0))
+        sets = self.b.settle_due(now=fill.ts + 61)
+        self.assertTrue(sets[0].won)
+        self.assertAlmostEqual(self.b.account().balance, 1000 + 8.5)
+
+    def test_atm_refunds_the_stake(self):
+        order = Order("EURUSD_otc", Side.CALL, 10.0, expiry_seconds=60, payout=0.85)
+        fill = self.b.submit(order)
+        self.b.on_tick(Tick("EURUSD_otc", 1.1))
+        sets = self.b.settle_due(now=fill.ts + 61)
+        self.assertTrue(sets[0].refunded)
+        self.assertEqual(sets[0].pnl, 0.0)
+        self.assertAlmostEqual(self.b.account().balance, 1000.0)
 
 
 class TestOMS(unittest.TestCase):
     def test_full_lifecycle(self):
         rm = RiskManager(RiskConfig())
-        b = PaperBroker(1000, latency_ms=0, slippage_bps=0.0)
+        b = VenueStub(balance=1000.0)
         b.connect()
         b.on_tick(Tick("EURUSD_otc", 1.1))
         oms = OrderManager(b, rm)
@@ -180,7 +189,7 @@ class TestOMS(unittest.TestCase):
 
     def test_risk_reject_returns_none(self):
         rm = RiskManager(RiskConfig())
-        b = PaperBroker(1000, latency_ms=0)
+        b = VenueStub(balance=1000.0)
         b.connect()
         b.on_tick(Tick("EURUSD_otc", 1.1))
         oms = OrderManager(b, rm)

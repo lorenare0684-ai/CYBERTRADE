@@ -139,11 +139,12 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
   (fraction or percent), open state `open`/`isOpen`, and asset class via
   `type`/`kind` into `AssetCatalog` (`brokers/quotex/catalog.py`).
 - `payout_for()` consults the live catalog first, then
-  `cybertrade.constants.ASSET_CATALOG` (offline/paper fallback).
+  `cybertrade.constants.ASSET_CATALOG` (offline fallback while a
+  session is still connecting).
 - History warm-start: `candleHistory` fills `QuotexAPI`'s cache;
   `brokers/quotex/sync.py` pushes it into `CandleSeries`/`HistoryBuffer`
   books (dupe-safe, failure-tolerant) so live strategies get indicator warmup
-  exactly like paper mode.
+  exactly like the live feed does.
 - Ticks tolerate dict rows, bare price scalars, and `[asset, price, ts?]`
   rows; balances tolerate scalar pushes.
 
@@ -160,7 +161,9 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
 
 ## 8. Ethical / ToS posture
 
-- Default mode of CYBERTRADE is **paper simulation**; no network traffic.
+- This build is **live only**: there is no paper mode, no dry-run mode and
+  no synthetic market. Nothing runs offline by default — a venue session is
+  required before anything trades.
 - `--live` requires flipping `risk.allow_live` in config **and** an interactive
   confirmation.  Even then, prefer `PRACTICE`.
 - You are responsible for compliance with Quotex's Terms of Service and with
@@ -184,12 +187,11 @@ cybertrade quotex login
 
 - Standard library only: `urllib` + `cybertrade.network.websocket`.
   No Playwright, no Selenium, no automation of the challenge itself.
-- **Live modes refuse synthetic data**: `broker.mode = quotex | dryrun`
-  wires `LiveQuotexFeed` (is_synthetic=False) from a strict session
+- **The engine refuses synthetic data**: `broker.mode = quotex` wires
+  `LiveQuotexFeed` (is_synthetic=False) from a strict session
   resolver; `TradingEngine.__init__` raises `ConfigError` if handed any
   generator-backed feed. Missing session → loud startup error naming
-  `quotex login` — never a silent paper/synthetic fallback.
-- Paper mode (the default) is unchanged: fully offline synthetic tape.
+  `quotex login` — never a silent fallback.
 
 ## 10. Ghost wire — organic traffic discipline (Phase-30)
 

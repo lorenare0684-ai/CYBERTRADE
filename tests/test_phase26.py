@@ -15,12 +15,12 @@ import unittest
 
 from cybertrade.bot.engine import TradingEngine
 from cybertrade.config import AppConfig
-from cybertrade.data.feed import SyntheticFeed
 from cybertrade.data.models import Settlement, Side, TradeRecord
-from cybertrade.execution.paper import PaperBroker
 from cybertrade.web.server import EngineHub, WebTerminal
 
 from cybertrade.strategies.registry import build_all_weather
+from tests.venue_stubs import venue_candles
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _rec(i: int, won: bool, strategy: str) -> TradeRecord:
@@ -63,8 +63,8 @@ class TestStrategyCommand(unittest.TestCase):
         cfg.journal_path = os.path.join(tmp, "j.db")
         cfg.calibration_path = os.path.join(tmp, "c.json")
         self.eng = TradingEngine(
-            cfg, feed=SyntheticFeed(tick_interval=60.0),
-            broker=PaperBroker(starting_balance=1000.0),
+            cfg, feed=VenueFeed(),
+            broker=VenueStub(balance=1000.0),
         )
         self.term = WebTerminal(EngineHub(self.eng), host="127.0.0.1", port=0)
 
@@ -100,10 +100,9 @@ class TestStrategyCommand(unittest.TestCase):
         ens = build_all_weather()
         for m in ens.members:
             m.enabled = False
-        from cybertrade.data.synthetic import generate_candles
         from cybertrade.regime.detector import RegimeReading
         from cybertrade.strategies.base import StrategyContext
-        cs = generate_candles("bull_trend", bars=250)
+        cs = venue_candles(n=250, shape="trend_up")
         ctx = StrategyContext(
             asset="EURUSD_otc", candles=cs, regime=RegimeReading(),
             timeframe_seconds=60, expiry_seconds=60, payout=0.85, ts=1.0,

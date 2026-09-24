@@ -111,15 +111,18 @@ sig = MyEdge().generate(ctx)
 assert sig is None or sig.side in (Side.CALL, Side.PUT)
 ```
 
-Then face the gauntlet — the only opinion that matters:
+Then check the payout math — the only opinion that matters before you risk
+anything:
 
 ```bash
-python3 -m cybertrade backtest --bars 600 --scenario regime_whipsaw
-python3 -m cybertrade montecarlo --edge 0.02 --payout 0.85
+python3 -m cybertrade edge --payout 0.85 --confidence <your claim>
+python3 -m cybertrade montecarlo --payout 0.85 --wins 55 --losses 45
 ```
 
-If the Monte Carlo verdict is not `SURVIVABLE`, the edge is not ready. If the
-walk-forward optimizer reports an overfit gap, distrust it. Honesty is the
+A 0.85 payout needs **more than 52.6% wins** just to break even, so a strategy
+that is merely "usually right" still loses money. There is no backtest lab in
+this build: a strategy earns its keep on the venue's own fills, recorded in
+the SQLite journal (`cybertrade journal`), or it does not. Honesty is the
 house style — see `DISCLAIMER.md`.
 
 ## 6. Divergence toolbox (Phase-2)

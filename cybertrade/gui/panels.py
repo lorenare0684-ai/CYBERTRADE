@@ -1,4 +1,4 @@
-"""GUI panels: dashboard, trader, strategies, risk, backtest, settings, connection."""
+"""GUI panels: dashboard, trader, strategies, risk, lab, settings, connection."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ from tkinter import messagebox
 from typing import Any, Callable, Dict, List, Optional
 
 from ..constants import Side
-from ..data.synthetic import SCENARIO_NAMES
 from ..utils.mathx import clamp
 from .chart import CandleChart
 from .theme import MONO, MONO_BOLD, MONO_SMALL, BIG_NUM, Theme
@@ -217,25 +216,9 @@ class TraderPanel(tk.Frame):
             btn.pack(side="left", padx=4)
             self.fire_btns.append(btn)
 
-        # Phase-2: live scenario hot-swap
-        row3 = tk.Frame(self, bg=theme["bg"])
-        row3.pack(fill="x", padx=6, pady=2)
-        tk.Label(row3, text="SCENARIO", bg=theme["bg"], fg=theme["dim"],
-                 font=MONO_SMALL).pack(side="left")
-        self.scenario_var = tk.StringVar(value="gbm")
-        self.scenario_menu = tk.OptionMenu(row3, self.scenario_var, *SCENARIO_NAMES)
-        self.scenario_menu.config(
-            bg="#0a0c18", fg=theme["cyan"], font=MONO_SMALL,
-            highlightthickness=1, highlightbackground=theme["cyan"],
-            activebackground="#0a0c18", activeforeground=theme["cyan"],
-        )
-        self.scenario_menu["menu"].config(bg="#0a0c18", fg=theme["cyan"])
-        self.scenario_menu.pack(side="left", padx=6)
-        NeonButton(row3, theme, "SWAP ⤵", color=theme["yellow"],
-                   command=self._scenario, width=100).pack(side="left", padx=4)
-
-        self.status = tk.Label(self, text="◈ paper mode", bg=theme["bg"],
-                               fg=theme["dim"], font=MONO_SMALL, anchor="w")
+        self.status = tk.Label(self, text="◈ LIVE — real order flow",
+                               bg=theme["bg"], fg=theme["red"],
+                               font=MONO_SMALL, anchor="w")
         self.status.pack(fill="x", padx=8)
 
     def apply_layout(self, plan) -> None:
@@ -252,14 +235,6 @@ class TraderPanel(tk.Frame):
             "asset": self.asset_var.get().strip(),
             "amount": float(self.stake_var.get() or 5),
             "expiry": int(self.expiry_var.get() or 60),
-        })
-
-    def _scenario(self) -> None:
-        """Hot-swap the selected asset into a stress regime (Phase-2)."""
-        self.command_cb({
-            "cmd": "scenario",
-            "asset": self.asset_var.get().strip(),
-            "scenario": self.scenario_var.get(),
         })
 
     def update_state(self, state: Dict[str, Any]) -> None:
@@ -348,8 +323,8 @@ class RiskPanel(tk.Frame):
             )
 
 
-class BacktestPanel(tk.Frame):
-    """Run the stress gauntlet and render the survival matrix."""
+class RiskLabPanel(tk.Frame):
+    """Monte Carlo risk lab over the engine's OWN settled trades."""
 
     def __init__(self, master, theme: Theme, run_cb: Callable[[], str],
                  mc_cb: Optional[Callable[[], str]] = None, **kw) -> None:
@@ -357,34 +332,26 @@ class BacktestPanel(tk.Frame):
         self.theme = theme
         row = tk.Frame(self, bg=theme["bg"])
         row.pack(fill="x", padx=6, pady=4)
-        NeonButton(row, theme, "▶ RUN GAUNTLET", color=theme["cyan"],
-                   command=self._run, width=180).pack(side="left", padx=4)
-        NeonButton(row, theme, "◈ MC LAB", color=theme["magenta"],
+        NeonButton(row, theme, "â MC LAB", color=theme["magenta"],
                    command=self._mc, width=140).pack(side="left", padx=4)
         self.run_cb = run_cb
         self.mc_cb = mc_cb
         self.out = LogConsole(self, theme, height=24)
         self.out.pack(fill="both", expand=True, padx=6, pady=4)
+        self.out.append(
+            "risk lab bootstraps the settled-trade ledger only — no invented "
+            "samples, no simulated market.", "INFO")
 
     def apply_layout(self, plan) -> None:
         """Phase-31: lab console scales with the plan."""
         self.out.set_height(max(12, plan.console_lines))
 
-    def _run(self) -> None:
-        self.out.append("… running stress matrix (every market condition)", "INFO")
-        try:
-            text = self.run_cb()
-            for line in text.splitlines():
-                self.out.append(line, "INFO")
-        except Exception as exc:  # noqa: BLE001
-            self.out.append(f"backtest failed: {exc}", "ERROR")
-
     def _mc(self) -> None:
-        """Phase-2: Monte Carlo risk-lab summary from settled trades."""
+        """Monte Carlo risk-lab summary from settled trades."""
         if self.mc_cb is None:
             self.out.append("MC lab unavailable in this view", "WARN")
             return
-        self.out.append("… bootstrapping Monte Carlo risk lab", "INFO")
+        self.out.append("â bootstrapping Monte Carlo risk lab", "INFO")
         try:
             text = self.mc_cb()
             for line in text.splitlines():
@@ -443,7 +410,7 @@ class SettingsPanel(tk.Frame):
 
 
 class ConnectionPanel(tk.Frame):
-    """Broker connection: paper / dry-run / quotex ssid login surface."""
+    """Venue session surface — Quotex SSID pairing (the only venue)."""
 
     def __init__(self, master, theme: Theme, connect_cb: Callable[[dict], Any], **kw) -> None:
         super().__init__(master, bg=theme["bg"], **kw)
@@ -452,42 +419,48 @@ class ConnectionPanel(tk.Frame):
         form = tk.Frame(self, bg=theme["bg"])
         form.pack(fill="both", expand=True, padx=14, pady=10)
 
-        self.mode = tk.StringVar(value="paper")
-        for i, mode in enumerate(("paper", "dryrun", "quotex")):
-            tk.Radiobutton(form, text=mode.upper(), variable=self.mode, value=mode,
-                           bg=theme["bg"], fg=theme["cyan"], selectcolor=theme["bg2"],
-                           activebackground=theme["bg"], font=MONO_BOLD).grid(row=0, column=i, padx=10)
+        tk.Label(form, text="VENUE", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).grid(row=0, column=0, sticky="w")
+        tk.Label(form, text="QUOTEX (LIVE ONLY)", bg=theme["bg"], fg=theme["red"],
+                 font=MONO_BOLD).grid(row=0, column=1, sticky="w")
 
         self.ssid_var = tk.StringVar()
         tk.Label(form, text="QUOTEX SSID", bg=theme["bg"], fg=theme["dim"],
                  font=MONO_SMALL).grid(row=1, column=0, sticky="w", pady=6)
-        tk.Entry(form, textvariable=self.ssid_var, width=46, font=MONO, show="•",
+        tk.Entry(form, textvariable=self.ssid_var, width=46, font=MONO, show="â¢",
                  bg="#0a0c18", fg=theme["text"],
-                 insertbackground=theme["cyan"]).grid(row=1, column=1, columnspan=2, pady=6)
+                 insertbackground=theme["cyan"]).grid(row=1, column=1, pady=6)
 
-        self.demo = tk.BooleanVar(value=True)
-        tk.Checkbutton(form, text="PRACTICE ACCOUNT", variable=self.demo,
-                       bg=theme["bg"], fg=theme["yellow"], selectcolor=theme["bg2"],
-                       activebackground=theme["bg"], font=MONO).grid(row=2, column=1, sticky="w")
+        # the purse is never defaulted: "" until the operator picks one
+        self.purse = tk.StringVar(value="")
+        tk.Radiobutton(form, text="PRACTICE BALANCE", variable=self.purse,
+                       value="practice", bg=theme["bg"], fg=theme["cyan"],
+                       selectcolor=theme["bg2"], activebackground=theme["bg"],
+                       font=MONO).grid(row=2, column=1, sticky="w")
+        tk.Radiobutton(form, text="REAL MONEY", variable=self.purse,
+                       value="real", bg=theme["bg"], fg=theme["red"],
+                       selectcolor=theme["bg2"], activebackground=theme["bg"],
+                       font=MONO).grid(row=3, column=1, sticky="w")
 
-        NeonButton(form, theme, "◈ CONNECT", color=theme["green"],
-                   command=self._connect, width=180).grid(row=3, column=1, pady=14)
+        NeonButton(form, theme, "â CONNECT", color=theme["green"],
+                   command=self._connect, width=180).grid(row=4, column=1, pady=14)
         self.status = tk.Label(form, text="disconnected", bg=theme["bg"],
                                fg=theme["dim"], font=MONO_SMALL)
-        self.status.grid(row=4, column=1, sticky="w")
+        self.status.grid(row=5, column=1, sticky="w")
         self.warn = tk.Label(
             form,
-            text="⚠ Unofficial integration. Automation may violate Quotex ToS.\n"
-                 "No system survives every market condition — see DISCLAIMER.md.",
+            text="â Unofficial integration. Automation may violate Quotex ToS.\n"
+                 "LIVE ONLY build — orders are real. No system survives every "
+                 "market condition — see DISCLAIMER.md.",
             bg=theme["bg"], fg=theme["yellow"], font=MONO_SMALL, justify="left",
         )
-        self.warn.grid(row=5, column=0, columnspan=3, sticky="w", pady=18)
+        self.warn.grid(row=6, column=0, columnspan=2, sticky="w", pady=18)
 
     def _connect(self) -> None:
         self.connect_cb({
-            "mode": self.mode.get(),
+            "mode": "quotex",
             "ssid": self.ssid_var.get().strip(),
-            "demo": bool(self.demo.get()),
+            "demo": self.purse.get() == "practice",
         })
 
     def set_status(self, text: str, color: Optional[str] = None) -> None:
@@ -499,7 +472,7 @@ __all__ = [
     "TraderPanel",
     "StrategiesPanel",
     "RiskPanel",
-    "BacktestPanel",
+    "RiskLabPanel",
     "SettingsPanel",
     "ConnectionPanel",
 ]

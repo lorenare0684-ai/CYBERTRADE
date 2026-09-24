@@ -6,7 +6,7 @@ import unittest
 
 from cybertrade.constants import MarketRegime, Side
 from cybertrade.data.models import Signal
-from cybertrade.data.synthetic import generate_candles
+from tests.venue_stubs import venue_candles as generate_candles
 from cybertrade.regime.detector import RegimeDetector
 from cybertrade.strategies.base import StrategyContext
 from cybertrade.strategies.ensemble import AllWeatherEnsemble
@@ -33,27 +33,27 @@ def _ctx(candles, regime=None):
 
 class TestRegime(unittest.TestCase):
     def test_bull_detected(self):
-        cs = generate_candles("bull_trend", bars=300, seed=1)
+        cs = generate_candles(shape="trend_up", n=300, seed=1)
         r = RegimeDetector().assess(cs)
         self.assertIn(r.regime, (MarketRegime.BULL_TREND, MarketRegime.HIGH_VOL))
 
     def test_bear_detected(self):
-        cs = generate_candles("bear_trend", bars=300, seed=1)
+        cs = generate_candles(shape="trend_down", n=300, seed=1)
         r = RegimeDetector().assess(cs)
         self.assertIn(r.regime, (MarketRegime.BEAR_TREND, MarketRegime.HIGH_VOL))
 
     def test_range_detected(self):
-        cs = generate_candles("range_chop", bars=300, seed=1)
+        cs = generate_candles(shape="range", n=300, seed=1)
         r = RegimeDetector().assess(cs)
         self.assertIn(r.regime, (MarketRegime.RANGE, MarketRegime.LOW_VOL))
 
     def test_short_series_unknown(self):
-        cs = generate_candles("gbm", bars=10)
+        cs = generate_candles(shape="mixed", n=10)
         r = RegimeDetector().assess(cs)
         self.assertEqual(r.regime, MarketRegime.UNKNOWN)
 
     def test_reading_dict(self):
-        cs = generate_candles("gbm", bars=200)
+        cs = generate_candles(shape="mixed", n=200)
         d = RegimeDetector().assess(cs).to_dict()
         self.assertIn("stress", d)
         self.assertIn("regime", d)
@@ -69,8 +69,8 @@ class TestStrategies(unittest.TestCase):
             self.assertTrue(hasattr(strat, "decide"))
 
     def test_every_strategy_runs_without_crash(self):
-        for scenario in ("bull_trend", "bear_trend", "range_chop", "flash_crash"):
-            cs = generate_candles(scenario, bars=250, seed=11)
+        for shape in ("trend_up", "trend_down", "range", "mixed"):
+            cs = generate_candles(shape=shape, n=250, seed=11)
             regime = RegimeDetector().assess(cs)
             ctx = _ctx(cs[-150:], regime)
             for strat in build_universe():
@@ -80,7 +80,7 @@ class TestStrategies(unittest.TestCase):
                     self.assertEqual(result.asset, "SIM")
 
     def test_signal_side_valid(self):
-        cs = generate_candles("bull_trend", bars=250, seed=2)
+        cs = generate_candles(shape="trend_up", n=250, seed=2)
         ctx = _ctx(cs)
         for strat in build_universe():
             sig = strat.generate(ctx)
@@ -101,14 +101,14 @@ class TestEnsemble(unittest.TestCase):
         for member in ens.members:
             for _ in range(12):
                 member.record_result(False, -1.0)
-        cs = generate_candles("bull_trend", bars=250)
+        cs = generate_candles(shape="trend_up", n=250)
         sig = ens.generate(_ctx(cs))
         # all members quarantined -> no signal
         self.assertIsNone(sig)
 
     def test_confidence_gate(self):
         ens = build_all_weather(min_confidence=1.1)
-        cs = generate_candles("bull_trend", bars=250)
+        cs = generate_candles(shape="trend_up", n=250)
         self.assertIsNone(ens.generate(_ctx(cs)))
 
     def test_reinforce_changes_weights(self):

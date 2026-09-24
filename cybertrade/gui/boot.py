@@ -15,10 +15,11 @@ BOOT_LINES: List[str] = [
     "wiring risk governor .......... ARMED",
     "survivor playbook ............. ALL-WEATHER",
     "regime detector ............... ONLINE",
-    "paper venue ................... SIM",
-    "quotex bridge ................. STANDBY (unofficial)",
+    "quotex bridge ................. LIVE (unofficial)",
+    "order flow .................... REAL — paper/dry-run modes removed",
+    "purse ......................... UNCHOSEN — you pick PRACTICE or REAL",
     "warning: no trading system survives every market condition",
-    "warning: paper mode by default — live mode is your funeral",
+    "warning: live trading risks real money — see DISCLAIMER.md",
     "BOOT COMPLETE — WELCOME, OPERATOR",
 ]
 

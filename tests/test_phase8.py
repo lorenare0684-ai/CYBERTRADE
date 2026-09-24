@@ -15,6 +15,7 @@ from cybertrade.constants import MarketRegime, Side
 from cybertrade.data.models import Signal, Tick
 from cybertrade.regime.detector import RegimeReading
 from cybertrade.utils import timex
+from tests.venue_stubs import VenueFeed, VenueStub
 
 
 def _engine(quote: float, adaptive: bool = False) -> TradingEngine:
@@ -22,7 +23,7 @@ def _engine(quote: float, adaptive: bool = False) -> TradingEngine:
     cfg.risk.win_rate_floor = 0.0
     if adaptive:
         cfg.risk.expiry_select = "adaptive"
-    eng = TradingEngine(cfg)
+    eng = TradingEngine(cfg, feed=VenueFeed(), broker=VenueStub())
     eng.broker.connect()
     eng._on_tick(Tick(asset=eng.feed.assets[0], price=1.0))
     eng.broker.payout_for = lambda asset, expiry: quote  # the venue quote
@@ -68,18 +69,18 @@ class TestRuntimePayoutGate(unittest.TestCase):
         self.assertIsNone(order)
 
 
-class TestPaperQuoteShape(unittest.TestCase):
-    def test_paper_payout_bounds(self):
-        eng = TradingEngine(AppConfig())
+class TestVenueQuoteShape(unittest.TestCase):
+    def test_venue_payout_bounds(self):
+        eng = TradingEngine(AppConfig(), feed=VenueFeed(), broker=VenueStub())
         q = eng.broker.payout_for("EURUSD_otc", 60)
         self.assertGreaterEqual(q, 0.5)
         self.assertLessEqual(q, 0.95)
 
-    def test_longer_expiry_pays_less(self):
-        eng = TradingEngine(AppConfig())
-        short = eng.broker.payout_for("EURUSD_otc", 60)
-        long_ = eng.broker.payout_for("EURUSD_otc", 3600)
-        self.assertLessEqual(long_, short + 0.02)  # decay ± jitter tolerance
+    def test_venue_quote_is_the_gate_input(self):
+        # the gate must read the venue's own quote, not a config default
+        eng = TradingEngine(AppConfig(), feed=VenueFeed(),
+                            broker=VenueStub(payout=0.62))
+        self.assertEqual(eng.broker.payout_for("EURUSD_otc", 60), 0.62)
 
 
 if __name__ == "__main__":

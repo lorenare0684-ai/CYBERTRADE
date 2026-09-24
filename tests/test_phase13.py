@@ -18,6 +18,7 @@ from cybertrade.data.models import Settlement, Side, TradeRecord
 from cybertrade.journal import TradeJournal
 from cybertrade.risk.montecarlo import simulate_from_records
 
+from tests.venue_stubs import VenueFeed, VenueStub
 CONF = 0.8
 
 
@@ -73,14 +74,12 @@ class TestJournalStore(unittest.TestCase):
 class TestEngineFeedsJournal(unittest.TestCase):
     def _engine(self, tmp):
         from cybertrade.bot.engine import TradingEngine
-        from cybertrade.data.feed import SyntheticFeed
-        from cybertrade.execution.paper import PaperBroker
-
+                
         cfg = AppConfig()
         cfg.journal_path = os.path.join(tmp, "journal.db")
         cfg.calibration_path = os.path.join(tmp, "cal.json")
-        eng = TradingEngine(cfg, feed=SyntheticFeed(tick_interval=60.0),
-                            broker=PaperBroker())
+        eng = TradingEngine(cfg, feed=VenueFeed(),
+                            broker=VenueStub())
         return cfg, eng
 
     def test_settle_lands_in_journal_and_sessions_close(self):

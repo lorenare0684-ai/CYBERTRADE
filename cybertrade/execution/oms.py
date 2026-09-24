@@ -208,16 +208,12 @@ class OrderManager:
         return True
 
     def resolve_recovery(self, position_id: str, expiry_price: float) -> bool:
-        from .paper import PaperBroker
-        from ..statestore import finite
-        expiry_price = finite(expiry_price, "expiry_price", 1e-12)
-        if not isinstance(self.broker, PaperBroker):
-            return False  # never fabricate a settlement at a live venue
-        with self.transaction("resolve-paper"):
-            if not self.broker.resolve_recovery(position_id, expiry_price):
-                return False
-            self.pump()
-            return True
+        """Removed with paper mode — a live venue owns its own settlements.
+
+        Kept as an explicit refusal so old callers get ``False`` (never a
+        fabricated settlement at a venue) instead of an AttributeError.
+        """
+        return False  # never fabricate a settlement at a live venue
 
     # -- views -------------------------------------------------------------
     def account(self) -> AccountSnapshot:
