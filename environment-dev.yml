@@ -1,0 +1,17 @@
+# CYBERTRADE // NEON PROTOCOL — full dev conda env
+# Includes additional dev tools
+name: cybertrade
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip>=23
+  - tk=8.6
+  - pytest>=7
+  - pytest-cov
+  - black
+  - ruff
+  - mypy
+  - pip:
+    - -e .[dev]

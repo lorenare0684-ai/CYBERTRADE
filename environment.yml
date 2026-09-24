@@ -1,0 +1,32 @@
+# CYBERTRADE // NEON PROTOCOL — conda environment
+# Name: cybertrade
+# Python: 3.11 (requires >=3.10, tested on 3.11)
+# 100% standard library runtime — no third-party deps required
+# tk provides tkinter for desktop GUI (python run_gui.py)
+# pytest for the 593-test suite
+#
+# Usage:
+#   conda env create -f environment.yml        # create
+#   conda activate cybertrade                  # activate
+#   python -m cybertrade doctor                # self-test (10 checks)
+#   python -m cybertrade web --port 8899 --auto  # browser HUD
+#   python run_gui.py                          # desktop HUD (needs tk)
+#   python -m unittest discover -s tests       # full verification suite
+#
+# Update:
+#   conda env update -f environment.yml --prune
+#
+# Remove:
+#   conda env remove -n cybertrade
+#
+name: cybertrade
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip>=23
+  - tk=8.6  # tkinter support — Debian/Ubuntu also needs: apt install python3-tk
+  - pytest>=7
+  - pip:
+    - -e .[dev]

@@ -19,3 +19,9 @@ dist/
 # virtualenvs
 .venv/
 venv/
+
+# conda / local venvs
+.venv-cybertrade/
+.conda/
+conda-envs/
+
