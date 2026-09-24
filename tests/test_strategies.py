@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import unittest
 
 from cybertrade.constants import MarketRegime, Side
@@ -181,6 +182,140 @@ class TestSurvivor(unittest.TestCase):
         self.assertEqual(
             Posture.most_defensive(Posture.ATTACK, Posture.DEFENSE), Posture.DEFENSE
         )
+
+
+class TestDisabledStrategiesAreActuallyDisabled(unittest.TestCase):
+    """``strategy.enabled`` / ``strategy.disabled`` were accepted and ignored.
+
+    Both fields sat in ``StrategyConfig``, were documented in the config
+    file, and never reached the ensemble -- the engine built it from every
+    registered strategy. An operator who disabled a strategy that was
+    losing them money got no effect at all, and had no way to notice from
+    the terminal because ``cybertrade strategies`` listed everything.
+    """
+
+    def setUp(self):
+        from cybertrade.config import StrategyConfig
+        from cybertrade.strategies import STRATEGY_REGISTRY, list_strategies
+
+        self.cfg_cls = StrategyConfig
+        self.registry = STRATEGY_REGISTRY
+        self.everything = list_strategies()
+
+    def test_the_default_config_runs_every_strategy(self):
+        from cybertrade.strategies import configured_members
+
+        self.assertEqual(sorted(configured_members(self.cfg_cls())),
+                         sorted(self.everything))
+
+    def test_a_disabled_strategy_leaves_the_ensemble(self):
+        from cybertrade.strategies import configured_members
+
+        scfg = self.cfg_cls(disabled=["ema_cross_trend", "macd_trend_rider"])
+        members = configured_members(scfg)
+        self.assertNotIn("ema_cross_trend", members)
+        self.assertNotIn("macd_trend_rider", members)
+        self.assertEqual(len(members), len(self.everything) - 2)
+
+    def test_enabled_narrows_to_the_named_strategies(self):
+        from cybertrade.strategies import configured_members
+
+        scfg = self.cfg_cls(enabled=["rsi_stretch", "bollinger_revert"])
+        self.assertEqual(sorted(configured_members(scfg)),
+                         ["bollinger_revert", "rsi_stretch"])
+
+    def test_the_all_weather_sentinel_means_everything(self):
+        from cybertrade.strategies import ALL_WEATHER, configured_members
+
+        scfg = self.cfg_cls(enabled=[ALL_WEATHER])
+        self.assertEqual(len(configured_members(scfg)), len(self.everything))
+
+    def test_unknown_names_do_not_silently_empty_the_ensemble(self):
+        """A typo'd list must not stop trading without saying so."""
+        from cybertrade.strategies import configured_members
+
+        scfg = self.cfg_cls(enabled=["no_such_strategy"])
+        self.assertEqual(len(configured_members(scfg)), len(self.everything))
+
+    def test_disabling_every_enabled_strategy_is_a_config_error(self):
+        """Falling back to "all of them" would re-enable what was turned off."""
+        from cybertrade.exceptions import ConfigError
+        from cybertrade.strategies import configured_members
+
+        scfg = self.cfg_cls(enabled=["rsi_stretch"], disabled=["rsi_stretch"])
+        with self.assertRaises(ConfigError) as ctx:
+            configured_members(scfg)
+        self.assertIn("leave no strategies", str(ctx.exception))
+
+    def test_a_typo_in_disabled_is_rejected_at_validation(self):
+        from cybertrade.exceptions import ConfigError
+
+        scfg = self.cfg_cls(disabled=["ema_cros_trend"])
+        with self.assertRaises(ConfigError) as ctx:
+            scfg.validate()
+        self.assertIn("unknown strategy", str(ctx.exception))
+
+    def test_a_real_name_in_disabled_validates(self):
+        self.cfg_cls(disabled=["ema_cross_trend"]).validate()
+
+    def test_the_engine_ensemble_excludes_disabled_members(self):
+        import json
+        import os
+        import tempfile
+
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig()
+            for attr in ("qx_session_path", "journal_path", "calibration_path",
+                         "operator_path", "continuity_path", "heartbeat_path",
+                         "log_path"):
+                setattr(cfg, attr, os.path.join(tmp, attr))
+            cfg.broker.ssid = "QX." + "a" * 32
+            cfg.broker.demo_account = True
+            cfg.strategy.disabled = ["ema_cross_trend", "macd_trend_rider"]
+            cfg.validate()
+
+            feed = VenueFeed(assets=list(cfg.strategy.universe[:2]), n=200,
+                             start_price=1.0850)
+            stub = VenueStub(balance=1000.0)
+            feed.api = stub
+            eng = TradingEngine(cfg, feed=feed, broker=stub)
+            try:
+                eng.boot()
+                names = {m.name for m in eng.ensemble.members}
+                self.assertNotIn("ema_cross_trend", names)
+                self.assertNotIn("macd_trend_rider", names)
+                self.assertEqual(len(names), len(self.everything) - 2)
+            finally:
+                eng.shutdown()
+
+    def test_the_cli_reports_the_active_set(self):
+        """The operator must be able to check from the terminal."""
+        import os
+        import subprocess
+        import sys
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "c.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump({"strategy": {"disabled": ["ema_cross_trend"]}}, fh)
+            proc = subprocess.run(
+                [sys.executable, "-m", "cybertrade", "--config", path,
+                 "strategies"],
+                capture_output=True, timeout=120,
+                env=dict(os.environ, PYTHONPATH=os.getcwd()),
+                stdin=subprocess.DEVNULL)
+            out = proc.stdout.decode("utf-8", "replace")
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode()[-300:])
+            self.assertIn("OFF ema_cross_trend", out)
+            self.assertIn("disabled by config: ema_cross_trend", out)
+            self.assertIn(f"active: {len(self.everything) - 1}/"
+                          f"{len(self.everything)}", out)
+
 
 
 if __name__ == "__main__":

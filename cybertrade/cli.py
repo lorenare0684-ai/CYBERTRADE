@@ -759,9 +759,14 @@ def cmd_journal_real(args: argparse.Namespace) -> int:
 
 
 def cmd_strategies(args: argparse.Namespace) -> int:
-    from .strategies import STRATEGY_REGISTRY, list_strategies
+    from .strategies import STRATEGY_REGISTRY, configured_members, list_strategies
 
     print(BANNER)
+    cfg = _load_config(args)
+    # Show which of them are actually live. `strategy.disabled` used to be
+    # accepted and ignored, so an operator had no way to check from the
+    # terminal whether a strategy they turned off was still running.
+    active = set(configured_members(cfg.strategy))
     by_family: dict = {}
     for name in list_strategies():
         cls = STRATEGY_REGISTRY[name]
@@ -770,8 +775,15 @@ def cmd_strategies(args: argparse.Namespace) -> int:
         print(f"  [{family.upper()}]")
         for name in sorted(names):
             label = getattr(STRATEGY_REGISTRY[name], "label", name)
-            print(f"    {name:<22} {label}")
-    print(f"\n  total: {len(list_strategies())} strategies + 1 ensemble")
+            mark = "on " if name in active else "OFF"
+            print(f"    {mark} {name:<20} {label}")
+    off = sorted(set(list_strategies()) - active)
+    print(f"\n  active: {len(active)}/{len(list_strategies())} strategies"
+          f" + 1 ensemble ({cfg.strategy.ensemble_mode})")
+    if off:
+        print(f"  disabled by config: {', '.join(off)}")
+    else:
+        print("  disabled by config: none")
     return 0
 
 

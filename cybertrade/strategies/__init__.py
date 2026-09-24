@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 from ..exceptions import StrategyError
 from .base import Strategy, StrategyContext
@@ -125,6 +125,42 @@ def build_universe(names: Optional[List[str]] = None) -> List[Strategy]:
         if name in STRATEGY_REGISTRY:
             out.append(create(name))
     return out
+
+
+#: The sentinel in ``StrategyConfig.enabled`` that means "run them all".
+#: It is deliberately not a registry name: an operator who writes a list of
+#: real strategy names narrows the ensemble, and anything else -- including
+#: the default -- leaves it whole.
+ALL_WEATHER = "ensemble_all_weather"
+
+
+def configured_members(scfg: Any) -> List[str]:
+    """Resolve ``strategy.enabled`` / ``strategy.disabled`` to member names.
+
+    Both fields existed in the config and neither reached the ensemble: the
+    engine built it from every registered strategy, so an operator who
+    disabled a strategy that was losing them money got no effect at all.
+    ``enabled`` defaults to the ``ensemble_all_weather`` sentinel, which is
+    not a registry name -- only a list of real names narrows the set.
+    """
+    everything = list_strategies()
+    asked = [n for n in (getattr(scfg, "enabled", None) or [])
+             if n in STRATEGY_REGISTRY]
+    narrowed = bool(asked)
+    names = asked or list(everything)
+    drop = set(getattr(scfg, "disabled", None) or [])
+    if drop:
+        names = [n for n in names if n not in drop]
+    if narrowed and not names:
+        # The operator named real strategies and then disabled every one of
+        # them. Falling back to "all of them" would silently re-enable the
+        # very strategies they asked to turn off.
+        from ..exceptions import ConfigError
+
+        raise ConfigError(
+            "strategy.enabled and strategy.disabled together leave no "
+            "strategies to run; remove one of them")
+    return names or everything
 
 
 def build_all_weather(

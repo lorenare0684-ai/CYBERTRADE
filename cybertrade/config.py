@@ -123,6 +123,22 @@ class StrategyConfig:
             raise ConfigError(f"unknown ensemble_mode {self.ensemble_mode!r}")
         if not self.universe:
             raise ConfigError("universe must not be empty")
+        # A typo in `disabled` used to be silently ignored -- the strategy
+        # kept trading and the operator believed they had turned it off.
+        # `enabled` keeps the ensemble_all_weather sentinel legal, so only
+        # names that look like registry entries are checked.
+        from .strategies import ALL_WEATHER, STRATEGY_REGISTRY
+
+        for name in self.disabled:
+            if name not in STRATEGY_REGISTRY:
+                raise ConfigError(
+                    f"strategy.disabled names an unknown strategy {name!r} "
+                    f"(run `cybertrade strategies` to list them)")
+        for name in self.enabled:
+            if name != ALL_WEATHER and name not in STRATEGY_REGISTRY:
+                raise ConfigError(
+                    f"strategy.enabled names an unknown strategy {name!r} "
+                    f"(run `cybertrade strategies` to list them)")
 
 
 @dataclass

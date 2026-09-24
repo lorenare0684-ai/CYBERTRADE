@@ -35,7 +35,7 @@ from ..statestore import (StateError, load_operator_state, write_heartbeat,
                           save_operator_state as persist_operator_state)
 from ..strategies.base import StrategyContext
 from ..strategies.ensemble import AllWeatherEnsemble
-from ..strategies.registry import build_all_weather
+from ..strategies.registry import build_all_weather, configured_members
 from ..utils import timex
 from ..utils.mathx import clamp
 from .health import HealthMonitor, HealthSnapshot
@@ -98,6 +98,7 @@ class TradingEngine:
                 "synthetic feeds are refused"
             )
         self.ensemble = ensemble or build_all_weather(
+            member_names=configured_members(self.config.strategy),
             mode=self.config.strategy.ensemble_mode,
             adaptive=self.config.strategy.adaptive_weights,
             min_confidence=self.config.strategy.min_confidence,
