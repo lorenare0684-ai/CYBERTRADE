@@ -719,5 +719,78 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
         self.assertEqual(captured["after"], "QX.secret")   # memory only
 
 
+class TestAFailedCallbackIsVisible(unittest.TestCase):
+    """A Tk callback that raises must not vanish.
+
+    Tk's default handler writes the traceback to stderr and carries on. On
+    Windows the console belongs to the double-clicked .bat, so it closes the
+    instant the process exits -- a button that silently stops working is
+    indistinguishable from a button that was never wired up.
+    """
+
+    def _source(self) -> str:
+        return open("cybertrade/gui/app.py", encoding="utf-8").read()
+
+    def test_the_app_overrides_report_callback_exception(self):
+        self.assertIn("def report_callback_exception", self._source())
+
+    def test_it_logs_and_surfaces_in_the_console(self):
+        src = self._source()
+        self.assertIn('log.exception("gui callback failed"', src)
+        self.assertIn("console.console.append(", src)
+
+    def test_the_console_write_itself_cannot_re_raise(self):
+        src = self._source()
+        start = src.index("def report_callback_exception")
+        end = src.index("def __init__", start)
+        body = src[start:end]
+        # the try/except around the console write must be inside the method
+        self.assertIn("except Exception", body)
+        self.assertIn("reporting must not re-raise", body)
+
+    def test_it_runs_for_real_when_a_callback_blows_up(self):
+        """Drive the override with a genuine exception, headless."""
+        with fake_tk():
+            from cybertrade.gui.app import CybertradeApp
+
+            class Probe(CybertradeApp):
+                def __init__(self):  # noqa: super-init-not-called
+                    self.calls: List[str] = []
+
+                def _dummy(self):
+                    raise RuntimeError("boom")
+
+            probe = Probe()
+            # a fake console that records what the operator would see
+            class FakeConsole:
+                def __init__(self):
+                    self.lines = []
+
+                def append(self, text, level="INFO"):
+                    self.lines.append((level, text))
+
+            probe.risk_p = type("P", (), {"console": FakeConsole()})()
+            probe.report_callback_exception(RuntimeError, RuntimeError("boom"),
+                                           None)
+            self.assertEqual(len(probe.risk_p.console.lines), 1)
+            level, text = probe.risk_p.console.lines[0]
+            self.assertEqual(level, "ERROR")
+            self.assertIn("boom", text)
+
+    def test_a_missing_console_is_not_fatal(self):
+        """The override runs before ``risk_p`` exists during __init__."""
+        with fake_tk():
+            from cybertrade.gui.app import CybertradeApp
+
+            class Probe(CybertradeApp):
+                def __init__(self):  # noqa: super-init-not-called
+                    pass
+
+            probe = Probe()
+            # no risk_p at all: must still not raise
+            probe.report_callback_exception(RuntimeError, RuntimeError("x"), None)
+
+
+
 if __name__ == "__main__":
     unittest.main()

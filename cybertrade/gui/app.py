@@ -54,6 +54,27 @@ def enable_dpi_awareness() -> None:
 class CybertradeApp(tk.Tk):
     """Main window: tabbed neon console bound to a live TradingEngine."""
 
+    def report_callback_exception(self, exc, val, tb):  # noqa: N802
+        """Never let a failed callback disappear.
+
+        Tk's default handler writes the traceback to stderr and carries on.
+        On Windows the console is a child of the double-clicked .bat, so it
+        closes the instant the process exits -- and even while it is open it
+        scrolls away behind the window. A button that silently stops working
+        is indistinguishable from a button that was never wired up.
+
+        Log it where the operator can actually find it: the log file, and the
+        GUI's own risk console, which is on screen.
+        """
+        log.exception("gui callback failed", exc_info=(exc, val, tb))
+        console = getattr(self, "risk_p", None)
+        if console is not None:
+            try:
+                console.console.append(
+                    f"gui error: {val}", "ERROR")
+            except Exception:  # noqa: BLE001 - reporting must not re-raise
+                pass
+
     def __init__(self, engine, config: Optional[AppConfig] = None) -> None:
         super().__init__()
         self.engine = engine
