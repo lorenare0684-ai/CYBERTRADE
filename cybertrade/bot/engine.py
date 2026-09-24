@@ -97,11 +97,21 @@ class TradingEngine:
                 "session (`cybertrade quotex login`) and rebuild; replay and "
                 "synthetic feeds are refused"
             )
+        scfg = self.config.strategy
+        # trade_on_weak drops the confidence floor into the WEAK band, which
+        # is the only thing the flag can honestly mean: min_confidence is the
+        # floor, and WEAK sits just below it.
+        floor = scfg.min_confidence
+        if scfg.trade_on_weak:
+            # SignalStrength.WEAK is the band (0.30, min_confidence]; the
+            # floor has to reach its lower edge for those to get through.
+            floor = min(floor, 0.30)
         self.ensemble = ensemble or build_all_weather(
             member_names=configured_members(self.config.strategy),
-            mode=self.config.strategy.ensemble_mode,
-            adaptive=self.config.strategy.adaptive_weights,
-            min_confidence=self.config.strategy.min_confidence,
+            mode=scfg.ensemble_mode,
+            adaptive=scfg.adaptive_weights,
+            min_confidence=floor,
+            max_votes=scfg.max_signals_per_candle,
         )
         scfg = self.config.survivor
         self.survivor = Survivor(
@@ -114,6 +124,7 @@ class TradingEngine:
             panic_deleverage=scfg.panic_deleverage,
             max_slippage_bps=scfg.max_slippage_bps,
             regime_rotation=scfg.regime_rotation,
+            trend_filter=scfg.trend_filter,
         )
         self.watchdog = Watchdog(
             max_stale_seconds=self.config.timeframe().seconds * 3 + 10,
@@ -794,6 +805,11 @@ class TradingEngine:
             # Phase-22: thin tape takes a smaller share — session × survivor.
             regime_scale=(
                 decision.stake_scale * session_for(signal.asset, signal.ts).scale
+                # risk.crisis_stake_scale: shrink in a stressed tape as well
+                # as under a survivor posture. The field existed and reached
+                # nothing, so an operator who set it got full-size stakes in
+                # exactly the conditions it was written for.
+                * (cfg.risk.crisis_stake_scale if reading.is_defensive else 1.0)
             ),
         )
         stake = sizing.stake

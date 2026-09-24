@@ -30,7 +30,7 @@ from .panels import (
     StrategiesPanel,
     TraderPanel,
 )
-from .theme import MONO_BOLD, MONO_SMALL, Theme
+from .theme import MONO_BOLD, MONO_SMALL, Theme, set_display_options
 
 log = logging.getLogger("cybertrade.gui")
 
@@ -80,6 +80,13 @@ class CybertradeApp(tk.Tk):
         self.engine = engine
         self.config = config or AppConfig()
         self.theme = Theme(self.config.display.theme)
+        # display.glow / scanlines / show_grid are honoured here, once, rather
+        # than being accepted and ignored.
+        set_display_options(
+            glow=self.config.display.glow,
+            scanlines=self.config.display.scanlines,
+            grid=self.config.display.show_grid,
+        )
         self.title("CYBERTRADE // NEON PROTOCOL")
         self.configure(bg=self.theme["bg"])
         self._ui_queue: "queue.Queue" = queue.Queue(maxsize=500)
@@ -120,7 +127,8 @@ class CybertradeApp(tk.Tk):
             self.bind("<Configure>", self._on_configure)
 
         # boot screen overlay
-        self.boot = BootScreen(self, self.theme, on_done=self._drop_boot)
+        self.boot = BootScreen(self, self.theme, on_done=self._drop_boot,
+                               animate=self.config.display.animate)
         self.boot.place(relx=0, rely=0, relwidth=1, relheight=1)
 
         # telemetry marshaling (bus threads -> Tk main loop)

@@ -13,6 +13,7 @@ import io
 import os
 import sqlite3
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -91,12 +92,28 @@ class TestConsoleEncoding(unittest.TestCase):
             self.assertIsNot(wrapped, out)
             self.assertEqual(wrapped.errors, "replace")
 
-    def test_an_explicit_operator_choice_is_respected(self):
-        out = _FakeStream()
+    def test_a_wide_codec_is_left_alone_whatever_the_environment(self):
+        """A stream that already carries the art needs no help -- with or
+        without PYTHONIOENCODING set."""
+        for env in ({}, {"PYTHONIOENCODING": "utf-8"}, {"PYTHONUTF8": "1"}):
+            out = _FakeStream(encoding="utf-8")
+            with mock.patch.object(sys, "stdout", out), \
+                    mock.patch.object(sys, "stderr", _FakeStream("utf-8")), \
+                    mock.patch.dict(os.environ, env, clear=False):
+                compat.ensure_console_encoding()
+            self.assertIsNone(out.reconfigured)
+
+    def test_an_operator_chosen_narrow_codec_is_still_rescued(self):
+        """PYTHONIOENCODING=cp1252 is the standard Windows fix for mojibake,
+        and with it set an earlier version bailed out of the rescue and every
+        banner-printing command died with a UnicodeEncodeError. The art has to
+        degrade to '?' rather than take the process down."""
+        out = _FakeStream(encoding="cp1252")
         with mock.patch.object(sys, "stdout", out), \
-                mock.patch.dict(os.environ, {"PYTHONUTF8": "1"}):
+                mock.patch.object(sys, "stderr", _FakeStream("cp1252")), \
+                mock.patch.dict(os.environ, {"PYTHONIOENCODING": "cp1252"}):
             compat.ensure_console_encoding()
-        self.assertIsNone(out.reconfigured)     # untouched: they already chose
+        self.assertEqual(out.reconfigured, {"errors": "replace"})
 
     def test_ensure_is_safe_on_a_broken_stream(self):
         class Broken:
@@ -727,3 +744,50 @@ class TestLongPathsArePrefixedAtTheOpenCall(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheCLISurvivesANarrowConsole(unittest.TestCase):
+    """The real Windows case, run as a real process.
+
+    The banner is drawn in box-drawing glyphs that no single-byte codepage
+    carries. Whatever the console says, the art must degrade -- never raise.
+    """
+
+    REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+    def _run(self, argv, env_extra, narrow=True):
+        code = (
+            "import io, sys\n"
+            "for _n in ('stdout', 'stderr'):\n"
+            "    _s = getattr(sys, _n)\n"
+            "    setattr(sys, _n, io.TextIOWrapper("
+            "_s.buffer, encoding=%r, errors='strict'))\n"
+            "from cybertrade.cli import main\n"
+            "sys.exit(main(sys.argv[1:]))\n" % ("cp1252" if narrow else "utf-8")
+        )
+        env = dict(os.environ, PYTHONPATH=self.REPO, **env_extra)
+        return subprocess.run([sys.executable, "-c", code] + argv,
+                              capture_output=True, timeout=180, env=env,
+                              stdin=subprocess.DEVNULL, cwd=self.REPO)
+
+    def test_the_banner_survives_a_cp1252_console(self):
+        p = self._run(["strategies"], {})
+        out = (p.stdout + p.stderr).decode("utf-8", "replace")
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("UnicodeEncodeError", out)
+        self.assertEqual(p.returncode, 0, out[-400:])
+        self.assertIn("active:", out)
+
+    def test_the_banner_survives_a_cp1252_console_the_operator_chose(self):
+        """PYTHONIOENCODING=cp1252 must not disable the rescue."""
+        p = self._run(["strategies"], {"PYTHONIOENCODING": "cp1252"})
+        out = (p.stdout + p.stderr).decode("utf-8", "replace")
+        self.assertNotIn("Traceback", out)
+        self.assertNotIn("UnicodeEncodeError", out)
+        self.assertEqual(p.returncode, 0, out[-400:])
+
+    def test_a_wide_console_is_unaffected(self):
+        p = self._run(["strategies"], {}, narrow=False)
+        out = p.stdout.decode("utf-8", "replace")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("\u2588", out)          # the art survives intact

@@ -8,7 +8,7 @@ import unittest
 from cybertrade.constants import MarketRegime, Side
 from cybertrade.data.models import Signal
 from tests.venue_stubs import venue_candles as generate_candles
-from cybertrade.regime.detector import RegimeDetector
+from cybertrade.regime.detector import RegimeDetector, RegimeReading
 from cybertrade.strategies.base import StrategyContext
 from cybertrade.strategies.ensemble import AllWeatherEnsemble
 from cybertrade.strategies.registry import (
@@ -320,3 +320,201 @@ class TestDisabledStrategiesAreActuallyDisabled(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheDeadConfigKnobsActuallyDoSomething(unittest.TestCase):
+    """Config fields that were accepted, stored, round-tripped -- and ignored.
+
+    ``from_dict`` rejects unknown keys, so these could not simply be deleted
+    without breaking existing configs. They are wired instead.
+    """
+
+    def _engine(self, **strategy_kw):
+        from cybertrade.config import AppConfig, StrategyConfig
+        from cybertrade.bot.engine import TradingEngine
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        cfg.strategy = StrategyConfig(**strategy_kw)
+        feed = VenueFeed(assets=["EURUSD"], n=120, timeframe_seconds=60)
+        return cfg, TradingEngine(cfg, feed=feed, broker=VenueStub())
+
+    def test_max_signals_per_candle_defaults_to_no_cap(self):
+        """The old default of 2 was never enforced -- honouring it now would
+        have silently halved the default vote set."""
+        _, eng = self._engine()
+        self.assertEqual(eng.ensemble.max_votes, 0)
+
+    def test_max_signals_per_candle_actually_caps_the_vote_set(self):
+        for cap in (1, 3, 7):
+            _, eng = self._engine(max_signals_per_candle=cap)
+            self.assertEqual(eng.ensemble.max_votes, cap)
+
+    def test_the_cap_keeps_the_strongest_votes(self):
+        """Real strategies, real Signals: the cap blends the strongest N."""
+        from cybertrade.strategies.ensemble import AllWeatherEnsemble
+
+        bases = list(STRATEGY_REGISTRY.values())
+        members = []
+        for i in range(40):
+            m = type(f"Capped{i}", (bases[i % len(bases)],), {})()
+            m.name = f"capped_{i}"
+            members.append(m)
+
+        for cap, expected in ((0, 40), (3, 3), (7, 7)):
+            ens = AllWeatherEnsemble(members=members, max_votes=cap,
+                                     min_confidence=0.5)
+            for i, m in enumerate(ens.members):
+                # confidence descends with index, so quality does too
+                conf = 0.95 - (i * 0.015)
+
+                def gen(ctx, c=conf):
+                    return Signal(asset="EURUSD", side=Side.CALL,
+                                  confidence=c, strategy="capped",
+                                  timeframe_seconds=60)
+                m.generate = gen
+            seen = []
+            ens._blend = lambda c, vs: (seen.append([v.confidence for v in vs]),
+                                        (Side.CALL, 0.9, []))[1]
+            ens.decide(StrategyContext(asset="EURUSD", candles=[]))
+            self.assertEqual(len(seen[0]), expected)
+            if expected < 40:
+                # the cap must not drop the best evidence
+                self.assertEqual(max(seen[0]), 0.95)
+                self.assertGreater(min(seen[0]), 0.95 - expected * 0.015)
+
+    def test_a_bad_cap_is_a_config_error_not_a_traceback(self):
+        from cybertrade.config import AppConfig, ConfigError
+
+        for bad in ("abc", None):
+            cfg = AppConfig()
+            cfg.strategy.max_signals_per_candle = bad
+            with self.assertRaises(ConfigError):
+                cfg.strategy.validate()
+
+    def test_a_negative_cap_becomes_no_cap(self):
+        from cybertrade.config import AppConfig
+
+        cfg = AppConfig()
+        cfg.strategy.max_signals_per_candle = -5
+        cfg.strategy.validate()
+        self.assertEqual(cfg.strategy.max_signals_per_candle, 0)
+
+    def test_trade_on_weak_drops_the_floor_into_the_weak_band(self):
+        _, off = self._engine(trade_on_weak=False)
+        _, on = self._engine(trade_on_weak=True)
+        self.assertEqual(off.ensemble.min_confidence, 0.55)
+        self.assertEqual(on.ensemble.min_confidence, 0.30)
+
+    def test_trade_on_weak_cannot_lift_the_floor(self):
+        _, eng = self._engine(min_confidence=0.9, trade_on_weak=True)
+        self.assertEqual(eng.ensemble.min_confidence, 0.30)
+
+    def test_a_weak_signal_is_admitted_only_with_the_flag(self):
+        """A 0.40-confidence signal is WEAK at the 0.55 floor; the flag is the
+        only thing that lets it through."""
+        sig = Signal(asset="EURUSD", side=Side.CALL, confidence=0.40,
+                     strategy="weak_one", timeframe_seconds=60)
+        self.assertLess(sig.confidence, 0.55)
+        for weak, expected in ((False, False), (True, True)):
+            _, eng = self._engine(trade_on_weak=weak)
+            ens = eng.ensemble
+
+            m = type("One", (next(iter(STRATEGY_REGISTRY.values())),), {})()
+            m.name = "weak_one"
+            m.generate = lambda ctx: sig
+
+            ens.members = [m]
+            ens._weights = {"weak_one": 1.0}
+            ens._scores = {"weak_one": 0.5}
+            out = ens.decide(StrategyContext(asset="EURUSD", candles=[]))
+            self.assertEqual(bool(out), expected,
+                             f"trade_on_weak={weak} -> {out!r}")
+
+    def test_crisis_stake_scale_reaches_the_stake(self):
+        """risk.crisis_stake_scale was accepted and ignored -- an operator who
+        cut it to 0.25 to shrink risk in a crisis got full-size stakes in
+        exactly the conditions it was written for (source lock)."""
+        import inspect
+        from cybertrade.bot.engine import TradingEngine
+
+        src = inspect.getsource(TradingEngine._try_execute)
+        self.assertIn("crisis_stake_scale if reading.is_defensive else 1.0", src)
+        self.assertIn("decision.stake_scale *", src)
+
+    def test_crisis_stake_scale_shrinks_the_stake_in_a_defensive_regime(self):
+        """And it really does move the number, not just the source."""
+        from cybertrade.config import AppConfig, StrategyConfig, RiskConfig
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.regime.detector import RegimeReading
+        from cybertrade.constants import MarketRegime
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        def engine(scale):
+            cfg = AppConfig()
+            cfg.strategy = StrategyConfig()
+            cfg.risk = RiskConfig(crisis_stake_scale=scale)
+            return TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=60),
+                                 broker=VenueStub())
+
+        # a defensive reading is what makes the knob bite
+        r = RegimeReading()
+        r.regime = MarketRegime.CRISIS
+        r.stress = 1.0
+        self.assertTrue(r.is_defensive)
+
+        # same conditions, two scales -> the scaled stake is a quarter of it
+        full = engine(1.0).risk.size_stake(
+            balance=1000.0, payout=0.85, confidence=0.8, win_rate=0.6,
+            drawdown=0.0, regime_scale=1.0).stake
+        quarter = engine(0.25).risk.size_stake(
+            balance=1000.0, payout=0.85, confidence=0.8, win_rate=0.6,
+            drawdown=0.0, regime_scale=0.25).stake
+        self.assertLess(quarter, full)
+        self.assertAlmostEqual(quarter, full * 0.25, places=6)
+
+    def test_trend_filter_blocks_the_knife_catch(self):
+        """In a bull trend a put is forbidden, in a bear trend a long is
+        forbidden -- that is what `trend_filter` buys."""
+        from cybertrade.bot.survivor import Survivor
+
+        def reading(regime):
+            r = RegimeReading()
+            r.regime = regime
+            r.trend_strength = 0.9
+            r.trend_direction = -1 if regime is MarketRegime.BEAR_TREND else 1
+            return r
+
+        def call():
+            return Signal(asset="EURUSD", side=Side.CALL, confidence=0.8,
+                          strategy="s", timeframe_seconds=60)
+
+        def put():
+            return Signal(asset="EURUSD", side=Side.PUT, confidence=0.8,
+                          strategy="s", timeframe_seconds=60)
+
+        def allowed(survivor, sig, regime):
+            d = survivor.evaluate(sig, reading(regime))
+            return d.allow, " ".join(d.reasons)
+
+        on, off = Survivor(trend_filter=True), Survivor(trend_filter=False)
+        # bear trend: the long is the knife-catch, the put is the ride
+        self.assertIn("trend filter", allowed(on, call(), MarketRegime.BEAR_TREND)[1])
+        self.assertTrue(allowed(on, put(), MarketRegime.BEAR_TREND)[0])
+        # bull trend: the put is the counter-trend entry
+        self.assertIn("trend filter", allowed(on, put(), MarketRegime.BULL_TREND)[1])
+        self.assertTrue(allowed(on, call(), MarketRegime.BULL_TREND)[0])
+        # with the flag off, none of that is vetoed
+        for sig, reg in ((call(), MarketRegime.BEAR_TREND),
+                         (put(), MarketRegime.BULL_TREND)):
+            self.assertNotIn("trend filter", allowed(off, sig, reg)[1])
+
+    def test_regime_rotation_gates_the_family_table(self):
+        from cybertrade.bot.survivor import Survivor
+
+        for posture in ("ATTACK", "NORMAL", "GUARD", "DEFENSE", "LOCKDOWN"):
+            off = Survivor(regime_rotation=False).strategy_filter(posture)
+            on = Survivor(regime_rotation=True).strategy_filter(posture)
+            if posture != "LOCKDOWN":
+                self.assertEqual(off["weights"], {})
+                self.assertTrue(on["weights"])

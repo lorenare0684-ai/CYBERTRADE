@@ -794,3 +794,113 @@ class TestAFailedCallbackIsVisible(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheDisplayTogglesActuallyToggle(unittest.TestCase):
+    """display.scanlines/glow/animate/show_grid were accepted, stored and
+    round-tripped -- then never read. The glow blend, the scanline layer and
+    the chart grid were drawn unconditionally, so an operator who turned them
+    off to save a frame got exactly the frames they were trying to avoid."""
+
+    class _Canvas:
+        def __init__(self):
+            self.lines = 0
+
+        def create_line(self, *a, **kw):
+            self.lines += 1
+
+    def _theme(self):
+        from cybertrade.gui.theme import Theme
+        return Theme("neon_abyss")
+
+    def tearDown(self):
+        from cybertrade.gui import theme
+        theme.set_display_options(glow=True, scanlines=True, grid=True)
+
+    def test_glow_off_is_the_plain_colour(self):
+        with fake_tk():
+            from cybertrade.gui import theme
+            theme.set_display_options(glow=True)
+            on = theme.glow("#00fff9", 0.45)
+            theme.set_display_options(glow=False)
+            off = theme.glow("#00fff9", 0.45)
+            self.assertNotEqual(on, off)
+            self.assertEqual(off, "#00fff9")
+
+    def test_grid_off_draws_nothing(self):
+        with fake_tk():
+            from cybertrade.gui import theme
+            theme.set_display_options(grid=True)
+            on = self._Canvas()
+            theme.draw_grid(on, 200, 200, "#ffffff")
+            theme.set_display_options(grid=False)
+            off = self._Canvas()
+            theme.draw_grid(off, 200, 200, "#ffffff")
+            self.assertGreater(on.lines, 0)
+            self.assertEqual(off.lines, 0)
+
+    def test_scanlines_off_draw_nothing(self):
+        with fake_tk():
+            from cybertrade.gui import theme
+            theme.set_display_options(scanlines=True)
+            on = self._Canvas()
+            theme.draw_scanlines(on, 200, 200)
+            theme.set_display_options(scanlines=False)
+            off = self._Canvas()
+            theme.draw_scanlines(off, 200, 200)
+            self.assertGreater(on.lines, 0)
+            self.assertEqual(off.lines, 0)
+
+    def test_animate_off_skips_the_boot_timer(self):
+        with fake_tk():
+            from cybertrade.gui.boot import BootScreen
+            calls = []
+            BootScreen.after = lambda self, ms, fn=None, *a: calls.append(
+                (ms, getattr(fn, "__name__", None)))
+            BootScreen(None, self._theme(), on_done=lambda: None, animate=True)
+            animated = list(calls)
+            calls.clear()
+            BootScreen(None, self._theme(), on_done=lambda: None, animate=False)
+            instant = list(calls)
+            # animated starts a timer; instant goes straight to on_done
+            self.assertEqual(animated[0][1], "_tick")
+            self.assertNotIn("_tick", [n for _, n in instant])
+
+    def test_animate_defaults_to_on(self):
+        with fake_tk():
+            from cybertrade.gui.boot import BootScreen
+            calls = []
+            BootScreen.after = lambda self, ms, fn=None, *a: calls.append(
+                (ms, getattr(fn, "__name__", None)))
+            BootScreen(None, self._theme(), on_done=lambda: None)
+            self.assertEqual(calls[0][1], "_tick")
+
+    def test_the_app_applies_the_config_to_the_theme(self):
+        """CybertradeApp is the one place that knows the config; it must push
+        display.glow/scanlines/show_grid into the renderer."""
+        import inspect
+        from cybertrade.gui.app import CybertradeApp
+        src = inspect.getsource(CybertradeApp.__init__)
+        self.assertIn("set_display_options(", src)
+        self.assertIn("self.config.display.glow", src)
+        self.assertIn("self.config.display.scanlines", src)
+        self.assertIn("self.config.display.show_grid", src)
+
+    def test_a_configured_off_display_really_reaches_the_renderer(self):
+        """End to end through the config object, not just the setter."""
+        cfg = AppConfig()
+        cfg.display.glow = False
+        cfg.display.scanlines = False
+        cfg.display.show_grid = False
+        with fake_tk():
+            from cybertrade.gui import theme
+            theme.set_display_options(glow=cfg.display.glow,
+                                      scanlines=cfg.display.scanlines,
+                                      grid=cfg.display.show_grid)
+            self.assertEqual(theme.glow("#00fff9", 0.45), "#00fff9")
+            grid = self._Canvas()
+            theme.draw_grid(grid, 200, 200, "#fff")
+            self.assertEqual(grid.lines, 0)
+            scan = self._Canvas()
+            theme.draw_scanlines(scan, 200, 200)
+            self.assertEqual(scan.lines, 0)

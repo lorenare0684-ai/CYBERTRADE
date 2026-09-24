@@ -90,7 +90,9 @@ python -m cybertrade doctor
   cannot be carried degrades to `?` instead of killing the process. On a real
   console CPython writes UTF-8 through `WriteConsoleW` and the art renders as
   drawn; in a pipe or a log file you get the degraded form. Either way the
-  command completes.
+  command completes. This holds whether or not you have set
+  `PYTHONIOENCODING` yourself — `PYTHONIOENCODING=cp1252` is the usual fix
+  for mojibake, and it is not allowed to switch the safety net off.
 - **File locking.** The state lease uses `fcntl.flock` on POSIX and
   `msvcrt.locking` on Windows — one writer per state file, both ways.
 - **`0600` session files.** POSIX enforces it; Windows does not. `os.chmod`

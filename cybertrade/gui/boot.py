@@ -27,13 +27,22 @@ BOOT_LINES: List[str] = [
 class BootScreen(tk.Canvas):
     """Full-window canvas that types the boot sequence then calls on_done."""
 
-    def __init__(self, master, theme: Theme, on_done, **kw) -> None:
+    def __init__(self, master, theme: Theme, on_done, animate: bool = True, **kw) -> None:
         super().__init__(master, bg=theme["bg"], highlightthickness=0, **kw)
         self.theme = theme
         self.on_done = on_done
+        self.animate = animate
         self._index = 0
         self.bind("<Configure>", lambda e: self._draw())
-        self.after(120, self._tick)
+        if animate:
+            self.after(120, self._tick)
+        else:
+            # display.animate off: show the whole sequence at once. The flag
+            # was accepted and ignored, so the only way to skip the boot
+            # animation was to not look at it.
+            self._index = len(BOOT_LINES)
+            self._draw()
+            self.after(60, self.on_done)
 
     def _tick(self) -> None:
         self._index += 1

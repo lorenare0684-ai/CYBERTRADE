@@ -41,6 +41,7 @@ class AllWeatherEnsemble(Strategy):
         min_dominance: float = 0.60,
         win_rate_floor: float = 0.40,
         decay: float = 0.985,
+        max_votes: int = 0,
         **kw,
     ) -> None:
         self.members: List[Strategy] = list(members or [])
@@ -50,6 +51,9 @@ class AllWeatherEnsemble(Strategy):
         self.min_dominance = min_dominance
         self.win_rate_floor = win_rate_floor
         self.decay = decay
+        # 0 = no cap: the ensemble blends every member by design, and the
+        # old default of 2 was never enforced at all.
+        self.max_votes = max(0, int(max_votes))
         self._weights: Dict[str, float] = {m.name: 1.0 for m in self.members}
         self._scores: Dict[str, float] = {m.name: 0.5 for m in self.members}
         self.quarantined_votes = set()  # Phase-25: decay ward (engine-synced)
@@ -82,6 +86,12 @@ class AllWeatherEnsemble(Strategy):
 
         if not votes:
             return None
+        if self.max_votes and len(votes) > self.max_votes:
+            # strategy.max_signals_per_candle: blend the strongest N votes
+            # rather than all of them. Strongest first, so the cap can only
+            # drop the weakest evidence, never the best.
+            votes = sorted(votes, key=lambda s: s.quality, reverse=True)
+            votes = votes[: self.max_votes]
 
         weighted = self._blend(ctx, votes)
         if weighted is None:

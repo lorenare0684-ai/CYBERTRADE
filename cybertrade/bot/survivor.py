@@ -135,6 +135,7 @@ class Survivor:
         panic_deleverage: bool = True,
         max_slippage_bps: float = 8.0,
         regime_rotation: bool = True,
+        trend_filter: bool = True,
     ) -> None:
         self.enabled = enabled
         self.weekend_lock = weekend_lock
@@ -145,6 +146,7 @@ class Survivor:
         self.panic_deleverage = panic_deleverage
         self.max_slippage_bps = max_slippage_bps
         self.regime_rotation = regime_rotation
+        self.trend_filter = trend_filter
         self._news_blackout_until = 0.0
         self._manual_lockdown = False
         self.lockdown_reason: str = ""
@@ -213,6 +215,16 @@ class Survivor:
         if regime.regime in (MarketRegime.CRISIS, MarketRegime.GAP):
             if strategy_family in {"meanrev", "pattern"}:
                 reasons.append("no knife-catching in crisis")
+
+        # survivor.trend_filter: in a clear trend, do not trade against it.
+        # This is the playbook's own "bear_trend -- ride puts, forbid
+        # knife-catch longs", and the flag was accepted and ignored, so an
+        # operator who turned it on got counter-trend entries anyway.
+        if self.trend_filter and regime.is_trend:
+            if regime.regime is MarketRegime.BEAR_TREND and signal.side.is_long:
+                reasons.append("long into a bear trend — trend filter")
+            elif regime.regime is MarketRegime.BULL_TREND and not signal.side.is_long:
+                reasons.append("put into a bull trend — trend filter")
         if posture == Posture.LOCKDOWN and not reasons:
             reasons.append("posture is LOCKDOWN")
 
@@ -272,7 +284,7 @@ class Survivor:
     def strategy_filter(self, posture: str) -> Dict[str, Any]:
         """What the engine ensemble should emphasize right now."""
         table = _POSTURE_TABLE.get(posture, _POSTURE_TABLE[Posture.GUARD])
-        rotation = {
+        rotation = {} if not self.regime_rotation else {
             Posture.ATTACK: {"trend": 1.2, "momentum": 1.15, "breakout": 1.1},
             Posture.NORMAL: {"trend": 1.0, "momentum": 1.0, "breakout": 1.0,
                              "meanrev": 1.0, "pattern": 0.9, "volatility": 0.9},

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 # --- core palettes ----------------------------------------------------------
 PALETTES: Dict[str, Dict[str, str]] = {
@@ -79,8 +79,30 @@ def rgb_to_hex(rgb: Tuple[float, float, float]) -> str:
     return "#{:02x}{:02x}{:02x}".format(*(max(0, min(255, int(v))) for v in rgb))
 
 
+# Rendering switches, set once from DisplayConfig at app start. The widgets
+# take a Theme and not a config, so a per-widget flag would mean plumbing the
+# whole tree; one module-level switch is the same control with none of it.
+_DISPLAY: Dict[str, bool] = {"glow": True, "scanlines": True, "grid": True}
+
+
+def set_display_options(*, glow: Optional[bool] = None,
+                        scanlines: Optional[bool] = None,
+                        grid: Optional[bool] = None) -> None:
+    """Apply ``display.glow`` / ``display.scanlines`` / ``display.show_grid``.
+
+    All three were accepted in the config and then never read -- the glow
+    blend, the scanline layer and the chart grid were drawn unconditionally,
+    so an operator who turned them off to save a frame got no effect.
+    """
+    for key, value in (("glow", glow), ("scanlines", scanlines), ("grid", grid)):
+        if value is not None:
+            _DISPLAY[key] = bool(value)
+
+
 def glow(color: str, intensity: float = 0.45) -> str:
     """Blend a neon color toward white — cheap 'glow' for canvas text."""
+    if not _DISPLAY["glow"]:
+        return color
     r, g, b = hex_to_rgb(color)
     blend = lambda c: c + (255 - c) * max(0.0, min(1.0, intensity))
     return rgb_to_hex((blend(r), blend(g), blend(b)))
@@ -94,11 +116,15 @@ def dim(color: str, amount: float = 0.5) -> str:
 
 def draw_scanlines(canvas, width: int, height: int, color: str = "#000000", step: int = 3) -> None:
     """Draw CRT scanlines as a low layer (call before content)."""
+    if not _DISPLAY["scanlines"]:
+        return
     for y in range(0, height, step):
         canvas.create_line(0, y, width, y, fill=color, dash=(1, 2))
 
 
 def draw_grid(canvas, width: int, height: int, color: str, step: int = 32) -> None:
+    if not _DISPLAY["grid"]:
+        return
     for x in range(0, width, step):
         canvas.create_line(x, 0, x, height, fill=color)
     for y in range(0, height, step):
@@ -106,6 +132,7 @@ def draw_grid(canvas, width: int, height: int, color: str, step: int = 32) -> No
 
 
 __all__ = [
+    "set_display_options",
     "PALETTES",
     "Theme",
     "MONO",

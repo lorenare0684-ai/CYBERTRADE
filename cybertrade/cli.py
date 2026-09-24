@@ -113,6 +113,7 @@ def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
         order_think_ms=cfg.broker.order_think_ms,
         order_min_gap_ms=cfg.broker.order_min_gap_ms,
         max_orders_per_min=cfg.broker.max_orders_per_min,
+        timeout=cfg.broker.request_timeout,
     )
 
 

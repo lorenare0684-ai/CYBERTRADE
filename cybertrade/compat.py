@@ -75,8 +75,13 @@ def ensure_console_encoding(errors: str = "replace") -> None:
     — ``python -m cybertrade``, ``run_gui.py``, ``run_web.py`` and the
     installed ``cybertrade`` console script — is covered by the same fix.
     """
-    if os.environ.get("PYTHONUTF8") or os.environ.get("PYTHONIOENCODING"):
-        return                          # the operator already chose
+    # An earlier version bailed out when PYTHONIOENCODING was already set,
+    # on the theory that "the operator already chose". It buys nothing and
+    # costs a crash: PYTHONIOENCODING=cp1252 is the standard Windows fix for
+    # mojibake, and with it set every banner-printing command died with a
+    # UnicodeEncodeError instead of degrading to '?'. A stream that already
+    # encodes the art is skipped by _can_encode below, so an operator who
+    # chose a wide codec is unaffected either way.
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         if stream is None or _can_encode(stream):

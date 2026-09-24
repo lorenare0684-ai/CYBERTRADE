@@ -107,7 +107,12 @@ class StrategyConfig:
     min_confidence: float = 0.55
     ensemble_mode: str = "regime_weighted"   # | majority | best | unanimous
     adaptive_weights: bool = True
-    max_signals_per_candle: int = 2
+    # 0 = no cap. The ensemble blends every member by design; the old default
+    # of 2 was never enforced, so honouring it would have silently changed
+    # every existing config. Set it to N to blend only the strongest N votes.
+    max_signals_per_candle: int = 0
+    # Admit signals the confidence floor would otherwise call WEAK
+    # (0.30 < confidence < min_confidence). Off by default.
     trade_on_weak: bool = False
 
     def validate(self) -> None:
@@ -123,6 +128,14 @@ class StrategyConfig:
             raise ConfigError(f"unknown ensemble_mode {self.ensemble_mode!r}")
         if not self.universe:
             raise ConfigError("universe must not be empty")
+        # This one reaches the ensemble, so a bad value is a ConfigError at
+        # the boundary rather than a raw int() traceback deeper in.
+        try:
+            self.max_signals_per_candle = max(0, int(self.max_signals_per_candle))
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "strategy.max_signals_per_candle must be an integer >= 0 "
+                "(0 means no cap)") from exc
         # A typo in `disabled` used to be silently ignored -- the strategy
         # kept trading and the operator believed they had turned it off.
         # `enabled` keeps the ensemble_all_weather sentinel legal, so only
