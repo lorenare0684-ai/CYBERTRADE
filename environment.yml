@@ -3,7 +3,7 @@
 # Python: 3.11 (requires >=3.10, tested on 3.11)
 # 100% standard library runtime — no third-party deps required
 # tk provides tkinter for desktop GUI (python run_gui.py)
-# pytest for the 592-test suite
+# pytest for the 687-test suite
 #
 # === MINICONDA (Windows) QUICK START ===
 #   1. Install Miniconda for Windows: https://docs.anaconda.com/miniconda/install/
@@ -22,7 +22,7 @@
 # Usage after activation (all platforms):
 #   python -m cybertrade web --port 8899 --auto  # browser HUD
 #   python run_gui.py                            # desktop HUD
-#   python -m unittest discover -s tests         # 592 tests
+#   python -m unittest discover -s tests         # 687 tests
 #
 # Update:
 #   conda env update -f environment.yml --prune
@@ -31,9 +31,12 @@
 #   conda env remove -n cybertrade
 #
 name: cybertrade
+# conda-forge is listed first on purpose: every package here exists there,
+# and putting it ahead of `defaults` avoids the mixed-channel priority solves
+# that can stall for a very long time on a fresh Windows install.
 channels:
-  - defaults
   - conda-forge
+  - defaults
 dependencies:
   - python=3.11
   - pip>=23
