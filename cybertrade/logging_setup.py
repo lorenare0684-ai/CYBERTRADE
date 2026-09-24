@@ -114,14 +114,25 @@ def setup_logging(
             _INSTALLED = True
 
         if log_file:
-            os.makedirs(os.path.dirname(os.path.abspath(log_file)) or ".", exist_ok=True)
-            fh = logging.handlers.RotatingFileHandler(
-                log_file, maxBytes=4 * 1024 * 1024, backupCount=5, encoding="utf-8"
-            )
-            fh.setFormatter(
-                logging.Formatter("%(asctime)s %(levelname)-5s %(name)s | %(message)s")
-            )
-            root.addHandler(fh)
+            # A log file is diagnostics, not a dependency. If it cannot be
+            # opened -- a protected install directory, a full disk, a synced
+            # folder -- the program still runs and still reports on stderr.
+            # Losing the log is never a reason to lose the process.
+            try:
+                parent = os.path.dirname(os.path.abspath(log_file)) or "."
+                os.makedirs(parent, exist_ok=True)
+                fh = logging.handlers.RotatingFileHandler(
+                    log_file, maxBytes=4 * 1024 * 1024, backupCount=5,
+                    encoding="utf-8"
+                )
+                fh.setFormatter(
+                    logging.Formatter(
+                        "%(asctime)s %(levelname)-5s %(name)s | %(message)s")
+                )
+                root.addHandler(fh)
+            except OSError as exc:
+                root.warning("cannot write the log file %s: %s "
+                             "(continuing without it)", log_file, exc)
 
         # Avoid double logging through the root logger.
         root.propagate = False

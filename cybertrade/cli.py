@@ -54,8 +54,43 @@ BANNER = r"""
 """
 
 
+def _require_writable_data_dir(cfg: AppConfig) -> None:
+    """The runtime writes under ``data/``; a protected install must say so.
+
+    Windows operators extract the repo into ``C:\\Program Files``, a
+    OneDrive-synced folder, or a locked-down profile often enough that this
+    is a real first-run failure -- and a raw ``PermissionError`` traceback
+    names the directory and nothing else, while the operator has no idea
+    which of the six files it was trying to write.
+    """
+    paths = [cfg.log_path, cfg.journal_path, cfg.qx_session_path,
+             cfg.calibration_path, cfg.operator_path,
+             cfg.continuity_path, cfg.heartbeat_path]
+    checked = set()
+    for path in paths:
+        parent = os.path.dirname(os.path.abspath(path))
+        if not parent or parent in checked:
+            continue
+        checked.add(parent)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except OSError as exc:
+            raise ConfigError(
+                f"cannot create the data directory {parent} ({exc.strerror or exc}). "
+                f"Install CYBERTRADE somewhere writable -- not C:\\Program Files "
+                f"or a synced folder -- or point --config at a writable location.")
+        if not os.access(parent, os.W_OK):
+            raise ConfigError(
+                f"the data directory {parent} is not writable. Install "
+                f"CYBERTRADE somewhere writable -- not C:\\Program Files or a "
+                f"synced folder -- or point --config at a writable location.")
+
+
 def _load_config(args: argparse.Namespace) -> AppConfig:
     cfg = AppConfig.load(getattr(args, "config", None))
+    # Checked before logging so the message the operator reads is about the
+    # install directory, not about a log file that could not be opened.
+    _require_writable_data_dir(cfg)
     setup_logging(level=cfg.display.log_level, log_file=cfg.log_path)
     return cfg
 

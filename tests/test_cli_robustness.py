@@ -212,5 +212,107 @@ class TestThePortIsCheckedBeforeItIsBound(unittest.TestCase):
 
 
 
+class TestAProtectedInstallDirectory(unittest.TestCase):
+    """Windows users extract into C:\\Program Files often enough to matter.
+
+    A raw ``PermissionError`` traceback names the directory and nothing else,
+    behind a console that closes before it can be read. Six of twelve
+    commands used to die that way.
+    """
+
+    def _protected_tree(self):
+        """A read-only copy of the package, like a protected install."""
+        import shutil
+        import stat
+
+        base = tempfile.mkdtemp(prefix="ctro ")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        work = os.path.join(base, "CYBERTRADE")
+        os.makedirs(work)
+        shutil.copytree("cybertrade", os.path.join(work, "cybertrade"))
+        os.chmod(work, stat.S_IRUSR | stat.S_IXUSR)
+        self.addCleanup(os.chmod, work, 0o755)
+        return work
+
+    def _run_in(self, work, argv, timeout=60):
+        env = dict(os.environ, PYTHONPATH=work, PYTHONIOENCODING="utf-8")
+        return subprocess.run(
+            [sys.executable, "-m", "cybertrade"] + list(argv),
+            capture_output=True, timeout=timeout, env=env,
+            stdin=subprocess.DEVNULL, cwd=work)
+
+    def test_no_command_leaks_a_permission_error(self):
+        work = self._protected_tree()
+        leaks = []
+        for argv in (["doctor"], ["journal"], ["quotex", "status"],
+                     ["calibrate"], ["run", "--demo", "--yes"],
+                     ["web", "--demo", "--yes", "--port", "0"],
+                     ["gui", "--demo", "--yes"], ["strategies"]):
+            with self.subTest(argv=argv):
+                try:
+                    proc = self._run_in(work, argv, timeout=60)
+                except subprocess.TimeoutExpired:
+                    continue          # a server that started is a pass
+                out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+                if "Traceback (most recent call last)" in out:
+                    leaks.append((argv, out.strip().splitlines()[-1][:80]))
+                if "PermissionError" in out:
+                    leaks.append((argv, "PermissionError leaked"))
+        self.assertEqual(leaks, [])
+
+    def test_the_message_says_what_to_do_about_it(self):
+        work = self._protected_tree()
+        proc = self._run_in(work, ["journal"])
+        out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+        self.assertNotIn("Traceback", out)
+        self.assertIn("writable", out)
+        # actionable, not just diagnostic
+        self.assertTrue("--config" in out or "Install" in out, out)
+
+    def test_the_preflight_finds_the_real_directory(self):
+        """The check must report the directory it actually failed on."""
+        from cybertrade.cli import _require_writable_data_dir
+        from cybertrade.config import AppConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig()
+            cfg.journal_path = os.path.join(tmp, "sub", "journal.db")
+            # a writable tree: must pass silently
+            _require_writable_data_dir(cfg)
+
+            # now a file where the directory needs to be
+            blocker = os.path.join(tmp, "blocker")
+            open(blocker, "w").close()
+            cfg.journal_path = os.path.join(blocker, "journal.db")
+            with self.assertRaises(ConfigError) as ctx:
+                _require_writable_data_dir(cfg)
+            self.assertIn("blocker", str(ctx.exception))
+
+    def test_a_writable_data_dir_is_not_reported(self):
+        from cybertrade.cli import _require_writable_data_dir
+        from cybertrade.config import AppConfig
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = AppConfig()
+            for attr in ("log_path", "journal_path", "qx_session_path",
+                         "calibration_path", "operator_path",
+                         "continuity_path", "heartbeat_path"):
+                setattr(cfg, attr, os.path.join(tmp, attr))
+            _require_writable_data_dir(cfg)      # must not raise
+
+    def test_a_missing_log_file_does_not_stop_the_program(self):
+        """Losing the log is never a reason to lose the run."""
+        from cybertrade.logging_setup import setup_logging
+
+        with tempfile.TemporaryDirectory() as tmp:
+            blocker = os.path.join(tmp, "blocker")
+            open(blocker, "w").close()
+            # the log path cannot be created; setup must still return a logger
+            root = setup_logging(level="INFO",
+                                 log_file=os.path.join(blocker, "x.log"))
+            self.assertIsNotNone(root)
+
+
+
 if __name__ == "__main__":
     unittest.main()
