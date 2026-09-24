@@ -191,24 +191,62 @@ def _build_engine(cfg: AppConfig, api_factory=None, *, durable=False):
     return engine
 
 
-def cmd_gui(args: argparse.Namespace) -> int:
-    cfg = _load_config(args)
-    _resolve_purse(cfg, args)
+def _gui_missing_session(exc: Exception) -> bool:
+    """True when the only thing wrong is that no venue session exists yet.
+
+    Anything else (a dead venue, an unchosen purse, a corrupt config) still
+    fails loudly — the gate is for the one recoverable case.
+    """
+    return "no quotex session" in str(exc).lower()
+
+
+def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """Open the desktop terminal, pairing a session first if none exists.
+
+    A first run has no session, and an engine cannot boot without venue
+    candles — which need a session. Rather than dead-ending the operator in a
+    shell, the GUI opens its own pre-flight pairing window (``SessionGate``),
+    pairs with Chrome, then builds the engine and opens the real terminal.
+    """
     from .gui import GUI_AVAILABLE, run_app
 
     if not GUI_AVAILABLE:
         print("tkinter unavailable — install python3-tk or use `python -m cybertrade web`",
               file=sys.stderr)
         return 2
-    print(BANNER)
-    if not _confirm_live(args, cfg):
-        return 1
-    engine = _build_engine(cfg, durable=True)
+    try:
+        engine = _build_engine(cfg, durable=True)
+    except ConfigError as exc:
+        if not _gui_missing_session(exc):
+            raise
+        print(f"  no venue session yet — opening the pairing window ({exc})")
+        from .gui.session_gate import run_gate
+
+        ready = []
+
+        def _on_ready(ssid: str, purse: bool) -> None:
+            cfg.broker.ssid = ssid               # session-only, never on disk
+            cfg.broker.demo_account = purse
+            ready.append(True)
+
+        run_gate(cfg, on_ready=_on_ready)
+        if not ready:
+            return 1
+        engine = _build_engine(cfg, durable=True)
     try:
         run_app(engine, cfg)
     finally:
         engine.shutdown()
     return 0
+
+
+def cmd_gui(args: argparse.Namespace) -> int:
+    cfg = _load_config(args)
+    _resolve_purse(cfg, args)
+    print(BANNER)
+    if not _confirm_live(args, cfg):
+        return 1
+    return _run_gui(cfg, args)
 
 
 def cmd_web(args: argparse.Namespace) -> int:

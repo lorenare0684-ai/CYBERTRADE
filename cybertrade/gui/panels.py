@@ -9,8 +9,18 @@ from typing import Any, Callable, Dict, List, Optional
 from ..constants import Side
 from ..utils.mathx import clamp
 from .chart import CandleChart
+from .pairing import (
+    DEFAULT_CDP_PORT, DEFAULT_PROFILE, DEFAULT_TIMEOUT, pairing_form,
+)
 from .theme import MONO, MONO_BOLD, MONO_SMALL, BIG_NUM, Theme
 from .widgets import DataTable, Gauge, LogConsole, Meter, NeonButton, NeonPanel, StatBox
+
+# glyphs the panel draws (kept as names so the source stays ASCII-clean)
+BULLET = "\u2022"
+PLAY = "\u25b6"
+FLAG = "\u2691"
+WARN = "\u26a0"
+ELLIPSIS = "\u2026"
 
 
 def _reflow(parent, widgets, per_row: int, bg: str) -> None:
@@ -410,12 +420,26 @@ class SettingsPanel(tk.Frame):
 
 
 class ConnectionPanel(tk.Frame):
-    """Venue session surface — Quotex SSID pairing (the only venue)."""
+    """Venue session surface — Quotex pairing (the only venue).
 
-    def __init__(self, master, theme: Theme, connect_cb: Callable[[dict], Any], **kw) -> None:
+    Two ways in: paste an SSID you already hold, or let Chrome do the login
+    (``pair_session``) and read the cookie it hands back. Both end at the same
+    ``connect_cb`` with a purse, because both end at the same live wire.
+    """
+
+    def __init__(
+        self,
+        master,
+        theme: Theme,
+        connect_cb: Callable[[dict], Any],
+        login_cb: Optional[Callable[[dict], Any]] = None,
+        **kw,
+    ) -> None:
         super().__init__(master, bg=theme["bg"], **kw)
         self.theme = theme
         self.connect_cb = connect_cb
+        self.login_cb = login_cb
+        self._pairing = False
         form = tk.Frame(self, bg=theme["bg"])
         form.pack(fill="both", expand=True, padx=14, pady=10)
 
@@ -427,8 +451,8 @@ class ConnectionPanel(tk.Frame):
         self.ssid_var = tk.StringVar()
         tk.Label(form, text="QUOTEX SSID", bg=theme["bg"], fg=theme["dim"],
                  font=MONO_SMALL).grid(row=1, column=0, sticky="w", pady=6)
-        tk.Entry(form, textvariable=self.ssid_var, width=46, font=MONO, show="â¢",
-                 bg="#0a0c18", fg=theme["text"],
+        tk.Entry(form, textvariable=self.ssid_var, width=46, font=MONO,
+                 show=BULLET, bg="#0a0c18", fg=theme["text"],
                  insertbackground=theme["cyan"]).grid(row=1, column=1, pady=6)
 
         # the purse is never defaulted: "" until the operator picks one
@@ -442,26 +466,135 @@ class ConnectionPanel(tk.Frame):
                        selectcolor=theme["bg2"], activebackground=theme["bg"],
                        font=MONO).grid(row=3, column=1, sticky="w")
 
-        NeonButton(form, theme, "â CONNECT", color=theme["green"],
-                   command=self._connect, width=180).grid(row=4, column=1, pady=14)
+        buttons = tk.Frame(form, bg=theme["bg"])
+        buttons.grid(row=4, column=1, sticky="w", pady=14)
+        self.connect_btn = NeonButton(buttons, theme, PLAY + " CONNECT",
+                                      color=theme["green"], command=self._connect,
+                                      width=150)
+        self.connect_btn.pack(side="left", padx=(0, 10))
+        self.login_btn = NeonButton(buttons, theme, FLAG + " CHROME LOGIN",
+                                    color=theme["yellow"], command=self._login,
+                                    width=190)
+        self.login_btn.pack(side="left")
+        if self.login_cb is None:      # no pairing wired — hide the button
+            self.login_btn.pack_forget()
+
         self.status = tk.Label(form, text="disconnected", bg=theme["bg"],
                                fg=theme["dim"], font=MONO_SMALL)
         self.status.grid(row=5, column=1, sticky="w")
+
+        # -- Chrome pairing: profile dir, DevTools port, wait budget --------
+        tk.Label(form, text="CHROME PAIRING", bg=theme["bg"], fg=theme["yellow"],
+                 font=MONO_SMALL).grid(row=6, column=0, sticky="w", pady=(14, 2))
+        pair = tk.Frame(form, bg=theme["bg"])
+        pair.grid(row=6, column=1, sticky="w", pady=(14, 2))
+        tk.Label(pair, text="profile", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).pack(side="left")
+        self.profile_var = tk.StringVar(value=DEFAULT_PROFILE)
+        tk.Entry(pair, textvariable=self.profile_var, width=22, font=MONO,
+                 bg="#0a0c18", fg=theme["text"],
+                 insertbackground=theme["cyan"]).pack(side="left", padx=4)
+        tk.Label(pair, text="cdp port", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).pack(side="left", padx=(10, 0))
+        self.port_var = tk.StringVar(value=str(DEFAULT_CDP_PORT))
+        tk.Entry(pair, textvariable=self.port_var, width=7, font=MONO,
+                 bg="#0a0c18", fg=theme["text"],
+                 insertbackground=theme["cyan"]).pack(side="left", padx=4)
+        tk.Label(pair, text="wait s", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).pack(side="left", padx=(10, 0))
+        self.timeout_var = tk.StringVar(value=str(DEFAULT_TIMEOUT))
+        tk.Entry(pair, textvariable=self.timeout_var, width=6, font=MONO,
+                 bg="#0a0c18", fg=theme["text"],
+                 insertbackground=theme["cyan"]).pack(side="left", padx=4)
+
+        self.hint = tk.Label(
+            form,
+            text="Chrome opens qxbroker.com in that profile — sign in and solve\n"
+                 "the CAPTCHA yourself; we only read the sessionid cookie\n"
+                 "Chrome grants over localhost DevTools. Nothing is bypassed.",
+            bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL, justify="left",
+        )
+        self.hint.grid(row=7, column=0, columnspan=2, sticky="w", pady=(4, 8))
+
         self.warn = tk.Label(
             form,
-            text="â Unofficial integration. Automation may violate Quotex ToS.\n"
+            text=WARN + " Unofficial integration. Automation may violate Quotex ToS.\n"
                  "LIVE ONLY build — orders are real. No system survives every "
                  "market condition — see DISCLAIMER.md.",
             bg=theme["bg"], fg=theme["yellow"], font=MONO_SMALL, justify="left",
         )
-        self.warn.grid(row=6, column=0, columnspan=2, sticky="w", pady=18)
+        self.warn.grid(row=8, column=0, columnspan=2, sticky="w", pady=10)
+
+    # -- actions ----------------------------------------------------------
+    def _purse(self) -> Optional[bool]:
+        purse = self.purse.get()
+        if purse not in ("practice", "real"):
+            self.set_status("pick a purse: PRACTICE or REAL MONEY", "yellow")
+            return None
+        return purse == "practice"
 
     def _connect(self) -> None:
+        if self._pairing:
+            self.set_status("a Chrome pairing is already running", "yellow")
+            return
+        purse = self._purse()
+        if purse is None:
+            return
         self.connect_cb({
             "mode": "quotex",
             "ssid": self.ssid_var.get().strip(),
-            "demo": self.purse.get() == "practice",
+            "demo": purse,
         })
+
+    def _login(self) -> None:
+        """Chrome-assisted pairing — the human solves the CAPTCHA."""
+        if self._pairing:
+            self.set_status("a Chrome pairing is already running", "yellow")
+            return
+        purse = self._purse()
+        if purse is None:
+            return
+        if self.login_cb is None:
+            self.set_status("Chrome pairing unavailable in this build", "red")
+            return
+        ok, error, values = pairing_form(
+            profile=self.profile_var.get(),
+            port=self.port_var.get(),
+            timeout=self.timeout_var.get(),
+        )
+        if not ok:
+            self.set_status(error, "yellow")
+            return
+        self.set_busy(True, "launching Chrome — log in and solve the CAPTCHA…")
+        self.login_cb({
+            "mode": "quotex",
+            "demo": purse,
+            "profile": values["profile"],
+            "port": values["port"],
+            "timeout": values["timeout"],
+        })
+
+    # -- views ------------------------------------------------------------
+    def set_busy(self, busy: bool, message: str = "") -> None:
+        """Toggle the pairing state so a blocked UI never looks frozen."""
+        self._pairing = busy
+        self.login_btn.set_label(ELLIPSIS + " PAIRING" if busy
+                                 else FLAG + " CHROME LOGIN")
+        self.login_btn.set_color(self.theme["dim"] if busy else self.theme["yellow"])
+        self.connect_btn.set_color(self.theme["green"] if not busy
+                                   else self.theme["dim"])
+        if message:
+            self.set_status(message, "yellow" if busy else "dim")
+
+    def adopt_session(self, ssid: str, label: str = "session captured") -> None:
+        """Fill the SSID field with a freshly paired cookie.
+
+        Adopting a session ends the pairing by definition, so the busy state
+        is cleared here too — a caller cannot forget to.
+        """
+        self.set_busy(False)
+        self.ssid_var.set(ssid)
+        self.set_status(label, "green")
 
     def set_status(self, text: str, color: Optional[str] = None) -> None:
         self.status.config(text=text, fg=self.theme[color or "dim"])

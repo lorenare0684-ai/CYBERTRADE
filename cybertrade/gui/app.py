@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 import tkinter as tk
 from typing import Any, Dict, Optional, Tuple
 
@@ -19,6 +20,7 @@ from ..config import AppConfig
 from ..events import Topic, default_bus
 from . import layout as layout_mod
 from .boot import BootScreen
+from .pairing import pairing_form, run_pairing
 from .panels import (
     ConnectionPanel,
     DashboardPanel,
@@ -226,7 +228,8 @@ class CybertradeApp(tk.Tk):
         self.risk_p = RiskPanel(self.panes, t)
         self.bt_p = RiskLabPanel(self.panes, t, run_cb=self._mc_summary,
                                  mc_cb=self._mc_summary)
-        self.link = ConnectionPanel(self.panes, t, connect_cb=self._connect)
+        self.link = ConnectionPanel(self.panes, t, connect_cb=self._connect,
+                                    login_cb=self._login)
         self.cfg_p = SettingsPanel(self.panes, t, save_cb=self._save_config)
 
         self._panes = {
@@ -342,6 +345,63 @@ class CybertradeApp(tk.Tk):
                                  else "quotex session live (REAL!)", "green" if api.demo else "red")
         except Exception as exc:  # noqa: BLE001
             self.link.set_status(f"connect failed: {exc}", "red")
+
+    def _login(self, body: Dict[str, Any]) -> None:
+        """Chrome-assisted Quotex pairing — the CAPTCHA stays the human's job.
+
+        ``pair_session`` blocks for as long as the operator takes to log in,
+        so it runs on a worker thread (``gui.pairing.run_pairing``) and the
+        result is marshalled back onto the Tk thread with ``after`` — a frozen
+        UI during a 240s wait would look exactly like a hang.
+        """
+        purse = body.get("demo")
+        if purse is None:
+            self.link.set_busy(False)
+            self.link.set_status("pick a purse: PRACTICE or REAL", "yellow")
+            return
+        ok, error, values = pairing_form(
+            profile=body.get("profile", ""),
+            port=body.get("port"),
+            timeout=body.get("timeout"),
+        )
+        if not ok:
+            self.link.set_busy(False)
+            self.link.set_status(error, "yellow")
+            return
+        run_pairing(
+            session_path=self.config.qx_session_path,
+            profile=values["profile"],
+            port=values["port"],
+            timeout=values["timeout"],
+            on_done=lambda sess: self.after(
+                0, lambda: self._login_done(sess, purse)),
+            on_error=lambda exc: self.after(
+                0, lambda: self._login_failed(exc)),
+        )
+
+    def _login_done(self, sess: Dict[str, str], purse: bool) -> None:
+        """Cookie captured — adopt it and wire the live session in place."""
+        ssid = str(sess.get("ssid", ""))
+        self.link.set_busy(False)
+        if not ssid:
+            self.link.set_status("Chrome closed without a sessionid cookie", "red")
+            return
+        self.link.adopt_session(ssid, "session captured — connecting…")
+        self._connect({"mode": "quotex", "ssid": ssid, "demo": purse})
+
+    def _login_failed(self, exc: Exception) -> None:
+        self.link.set_busy(False)
+        reason = str(exc) or exc.__class__.__name__
+        self.link.set_status(f"pairing failed: {reason}", "red")
+        try:
+            # surface it in the operator's own alert feed, not just the label
+            from ..bot.alerts import Alert
+
+            self.engine.alerts.fire(
+                Alert(kind="session", title="chrome pairing failed",
+                      body=reason, severity="warn"))
+        except Exception:  # noqa: BLE001 — the status line already says it
+            log.debug("alert feed unavailable", exc_info=True)
 
     def _save_config(self, form: Dict[str, Dict[str, str]]) -> None:
         import dataclasses

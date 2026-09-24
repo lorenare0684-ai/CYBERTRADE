@@ -222,7 +222,15 @@ polls `Storage.getCookies` over a stdlib websocket (with
 (0600) and verifies via `set_ssid + connect + account_snapshot`. No
 Playwright, no headless browser, no CAPTCHA bypass.
 
-**Live modes refuse synthetic tape.** `broker.mode = quotex | dryrun`
+**The GUI pairs too.** `cybertrade gui` needs venue candles, which need a
+session — so instead of dead-ending a first-time operator in a shell it
+opens its own pre-flight window: pick a purse (never defaulted), set the
+profile/port/timeout, hit **CHROME LOGIN**, and the terminal boots the
+moment the cookie lands. The LINK pane carries the same button for
+re-pairing mid-session. Nothing trades, and nothing is simulated, until
+a real session exists.
+
+**Live modes refuse synthetic tape.** `broker.mode = quotex`
 now wire `LiveQuotexFeed` (`is_synthetic=False`) from a strict
 `_live_api` resolver: `cfg.broker.ssid` → `QX_SSID` env → paired
 session file → username/password; nothing present → `ConfigError`
@@ -231,8 +239,8 @@ naming `quotex login`. `TradingEngine.__init__` re-checks the contract
 zero venue candles raises `FeedError` instead of booting on empty
 books. The boot tick wiring skips the direct api handler when a live
 feed already forwards venue ticks (no double-count), and
-`quotex status/warm` pick the session file up too. Paper (the default)
-stays fully offline synthetic.
+`quotex status/warm` pick the session file up too. There is no offline mode
+left — live is the only mode.
 
 Suite at **479 green** (`tests/test_phase29.py` 16 tests; phase9/15
 rewired to the no-silent-fallback contract).
