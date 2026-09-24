@@ -86,6 +86,12 @@ def chrome_argv(url: str, profile_dir: str, port: int, chrome: str) -> List[str]
 def launch_chrome(url: str, profile_dir: str, port: int,
                   chrome: str = "") -> "subprocess.Popen":
     binary = find_chrome(chrome)
+    # Chrome resolves a *relative* --user-data-dir against its own working
+    # directory, which on Windows is not reliably ours. A relative path can
+    # therefore make Chrome open a throwaway profile somewhere else: the
+    # operator logs in, and pairing then polls DevTools for a cookie that was
+    # never written to the profile we are watching. Absolute, always.
+    profile_dir = os.path.abspath(profile_dir)
     os.makedirs(profile_dir, exist_ok=True)
     argv = chrome_argv(url, profile_dir, port, binary)
     log.info("launching chrome: %s", " ".join(argv))

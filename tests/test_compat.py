@@ -17,6 +17,9 @@ import unittest
 import unittest.mock as mock
 
 from cybertrade import compat
+from cybertrade.config import AppConfig
+from cybertrade.exceptions import ConfigError
+from cybertrade.shutdown import SAFETY_HOLD_EXIT
 
 
 class _FakeStream:
@@ -286,6 +289,67 @@ class TestChromeDiscovery(unittest.TestCase):
         self.assertTrue(seen.get("start_new_session"))
 
 
+class TestChromeProfileIsAbsolute(unittest.TestCase):
+    """A relative --user-data-dir makes Chrome open a profile we never watch."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, self.cwd)
+        self.seen = {}
+
+        def popen(argv, **kw):
+            self.seen["argv"] = argv
+            return None
+
+        self.popen = popen
+
+    def _launch(self, profile):
+        from cybertrade.brokers.quotex import pairing
+
+        with mock.patch.object(pairing, "find_chrome", return_value="chrome"), \
+                mock.patch.object(pairing.subprocess, "Popen", self.popen):
+            pairing.launch_chrome("https://qxbroker.com", profile, 9333)
+        return self.seen["argv"]
+
+    def test_a_relative_profile_is_made_absolute(self):
+        argv = self._launch("data/chrome-profile")
+        profile = argv[2].split("=", 1)[1]
+        self.assertTrue(os.path.isabs(profile), profile)
+        self.assertTrue(profile.endswith(os.path.join("data", "chrome-profile")))
+
+    def test_the_profile_directory_is_created(self):
+        argv = self._launch(os.path.join("data", "chrome-profile"))
+        profile = argv[2].split("=", 1)[1]
+        self.assertTrue(os.path.isdir(profile))
+
+    def test_an_absolute_profile_is_left_alone(self):
+        absolute = os.path.join(self.tmp.name, "already-absolute")
+        argv = self._launch(absolute)
+        self.assertEqual(argv[2].split("=", 1)[1], absolute)
+
+    def test_the_argv_flag_is_well_formed(self):
+        argv = self._launch("data/chrome-profile")
+        self.assertTrue(argv[2].startswith("--user-data-dir="))
+        self.assertIn("--remote-debugging-port=9333", argv)
+
+    def test_profile_exists_agrees_with_the_launcher(self):
+        """Both must resolve the same way, or the UI lies about a login."""
+        from cybertrade.gui.pairing import profile_exists
+
+        argv = self._launch("data/chrome-profile")
+        profile = argv[2].split("=", 1)[1]
+        # an empty profile dir means Chrome has never logged in here
+        self.assertFalse(profile_exists("data/chrome-profile"))
+        with open(os.path.join(profile, "Preferences"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{}")
+        self.assertTrue(profile_exists("data/chrome-profile"))
+        self.assertFalse(profile_exists("data/never-used"))
+
+
 class TestStateLockPicksTheRightPrimitive(unittest.TestCase):
     """fcntl on POSIX, msvcrt on Windows — never both, never neither."""
 
@@ -390,6 +454,99 @@ def _ns():
     import argparse
 
     return argparse.Namespace(config=None)
+
+
+class TestClosedStdinHoldsRatherThanCrashes(unittest.TestCase):
+    """A closed stdin must hold, never proceed and never traceback.
+
+    Double-clicking CYBERTRADE.bat, a pipe, a service, or CI all give the
+    process a stdin that answers EOF. Guessing PRACTICE, or worse proceeding
+    past the live gate, would trade money nobody chose to risk.
+    """
+
+    def _cli(self):
+        import cybertrade.cli as cli
+
+        return cli
+
+    def _ns(self, **kw):
+        import argparse
+
+        return argparse.Namespace(**kw)
+
+    def test_the_purse_prompt_holds_on_eof(self):
+        cli = self._cli()
+        cfg = AppConfig()
+        with mock.patch("builtins.input", side_effect=EOFError):
+            with self.assertRaises(ConfigError) as ctx:
+                cli._resolve_purse(cfg, self._ns(demo=False, real=False))
+        self.assertIn("no purse chosen", str(ctx.exception))
+
+    def test_the_live_gate_holds_on_eof(self):
+        cli = self._cli()
+        cfg = AppConfig()
+        cfg.broker.demo_account = True
+        with mock.patch("builtins.input", side_effect=EOFError):
+            with self.assertRaises(ConfigError) as ctx:
+                cli._confirm_live(self._ns(yes=False), cfg)
+        self.assertIn("live confirmation not given", str(ctx.exception))
+        # the gate never reached its arming line, so the config is untouched
+        self.assertEqual(cfg.risk.allow_live, AppConfig().risk.allow_live)
+
+    def test_yes_still_skips_the_prompt(self):
+        cli = self._cli()
+        cfg = AppConfig()
+        cfg.broker.demo_account = False
+        self.assertTrue(cli._confirm_live(self._ns(yes=True), cfg))
+        self.assertTrue(cfg.risk.allow_live)
+
+    def test_a_config_error_exits_as_a_safety_hold_not_a_traceback(self):
+        cli = self._cli()
+        args = self._ns(func=mock.Mock(side_effect=ConfigError(
+            "no purse chosen - pass --demo or --real")))
+        parser = mock.Mock(parse_args=lambda a: args)
+        with mock.patch.object(cli, "build_parser", return_value=parser), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(cli.main([]), SAFETY_HOLD_EXIT)
+
+    def test_an_eof_from_a_command_is_a_hold(self):
+        cli = self._cli()
+        args = self._ns(func=mock.Mock(side_effect=EOFError))
+        parser = mock.Mock(parse_args=lambda a: args)
+        with mock.patch.object(cli, "build_parser", return_value=parser), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(cli.main([]), SAFETY_HOLD_EXIT)
+
+    def test_ctrl_c_is_reported_not_raised(self):
+        cli = self._cli()
+        args = self._ns(func=mock.Mock(side_effect=KeyboardInterrupt))
+        parser = mock.Mock(parse_args=lambda a: args)
+        with mock.patch.object(cli, "build_parser", return_value=parser), \
+                mock.patch("sys.stderr"):
+            self.assertEqual(cli.main([]), 130)
+
+    def test_an_unexpected_bug_still_raises(self):
+        """A real defect must stay loud; only expected failures are tidied."""
+        cli = self._cli()
+        args = self._ns(func=mock.Mock(side_effect=ValueError("boom")))
+        parser = mock.Mock(parse_args=lambda a: args)
+        with mock.patch.object(cli, "build_parser", return_value=parser):
+            with self.assertRaises(ValueError):
+                cli.main([])
+
+    def test_no_command_leaks_a_traceback_on_a_closed_stdin(self):
+        """End to end: the exact double-click scenario, in a subprocess."""
+        import subprocess
+
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for cmd in (["run", "--demo"], ["gui"], ["web", "--port", "8944"]):
+            with self.subTest(cmd=cmd):
+                r = subprocess.run(
+                    [sys.executable, "-m", "cybertrade", *cmd],
+                    capture_output=True, cwd=repo, stdin=subprocess.DEVNULL,
+                    timeout=180)
+                self.assertNotIn(b"Traceback", r.stdout + r.stderr, cmd)
+                self.assertEqual(r.returncode, SAFETY_HOLD_EXIT, cmd)
 
 
 if __name__ == "__main__":

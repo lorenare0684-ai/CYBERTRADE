@@ -35,6 +35,7 @@ from .compat import (
     default_chrome_profile,
     ensure_console_encoding,
 )
+from .shutdown import SAFETY_HOLD_EXIT
 from .config import AppConfig
 from .exceptions import ConfigError
 from .logging_setup import setup_logging
@@ -137,7 +138,15 @@ def _resolve_purse(cfg: AppConfig, args: argparse.Namespace) -> None:
     print("  ── WHICH PURSE? ─────────────────────────────────────────────")
     print("  [p] PRACTICE — real order flow, broker demo balance (no real money)")
     print("  [r] REAL     — real order flow, real account balance (REAL MONEY)")
-    answer = input("  purse [p/r]: ").strip().lower()
+    try:
+        answer = input("  purse [p/r]: ").strip().lower()
+    except EOFError:
+        # A closed or redirected stdin is not a "no": it is an operator who
+        # never got asked. Guessing PRACTICE here would trade with money they
+        # did not choose to risk, so this is a hold, not a default.
+        raise ConfigError(
+            "no purse chosen — stdin gave no answer (pass --demo or --real, "
+            "or set broker.demo_account in the config file)") from None
     if answer in ("p", "practice", "demo"):
         cfg.broker.demo_account = True
     elif answer in ("r", "real", "money"):
@@ -157,7 +166,15 @@ def _confirm_live(args: argparse.Namespace, cfg: AppConfig) -> bool:
     print(f"  ⚠ purse        : {cfg.broker.purse_label}")
     print("  ⚠ Automated trading may violate Quotex's Terms of Service.")
     if not getattr(args, "yes", False):
-        answer = input("  type 'I UNDERSTAND' to continue: ")
+        try:
+            answer = input("  type 'I UNDERSTAND' to continue: ")
+        except EOFError:
+            # Same reasoning as the purse prompt: nobody confirmed, so nothing
+            # trades. A closed stdin must hold, never proceed by default.
+            raise ConfigError(
+                "live confirmation not given — stdin gave no answer "
+                "(pass --yes for scripted operators who already know)"
+            ) from None
         if answer.strip() != "I UNDERSTAND":
             print("  aborted.")
             return False
@@ -915,7 +932,24 @@ def main(argv: Optional[List[str]] = None) -> int:
     ensure_console_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
-    return int(args.func(args) or 0)
+    try:
+        return int(args.func(args) or 0)
+    except ConfigError as exc:
+        # A typed, expected failure. Commands that catch these themselves map
+        # them to SAFETY_HOLD_EXIT; this is the same rule for the ones that
+        # don't, so `gui` and `run` agree and no operator sees a traceback.
+        sys.stdout.flush()
+        print(f"  SAFETY HOLD — {exc}", file=sys.stderr)
+        return SAFETY_HOLD_EXIT
+    except KeyboardInterrupt:
+        sys.stdout.flush()
+        print("\n  interrupted.", file=sys.stderr)
+        return 130
+    except EOFError:
+        sys.stdout.flush()
+        print("  SAFETY HOLD — no input available to confirm with",
+              file=sys.stderr)
+        return SAFETY_HOLD_EXIT
 
 
 if __name__ == "__main__":

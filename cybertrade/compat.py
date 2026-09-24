@@ -39,12 +39,18 @@ _PROBE = "\u2588"  # █
 
 
 def _can_encode(stream: IO) -> bool:
-    encoding = getattr(stream, "encoding", None) or ""
-    if not encoding:
-        return True
+    """False when the stream's codec has no code point for the banner art.
+
+    Never raises: an odd wrapper (a test double, a stream shim) can expose a
+    non-string ``encoding``, and a cosmetics check must not be the thing that
+    takes the process down.
+    """
     try:
+        encoding = getattr(stream, "encoding", None) or ""
+        if not encoding or not isinstance(encoding, str):
+            return True
         _PROBE.encode(encoding)
-    except (UnicodeEncodeError, LookupError):
+    except Exception:  # noqa: BLE001 - see the docstring
         return False
     return True
 
