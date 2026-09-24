@@ -1,89 +1,64 @@
 @echo off
-REM CYBERTRADE // NEON PROTOCOL — ONE-CLICK LAUNCHER (Miniconda, no Anaconda Prompt needed)
-REM Just double-click this file — it finds Miniconda, creates env if needed, and runs web HUD
-REM No need to open Anaconda Prompt, no need to add conda to PATH
+REM CYBERTRADE — ONE-CLICK (Miniconda, no Anaconda Prompt) — FIXED for "was unexpected" error
+REM Just double-click — finds Miniconda, creates env if needed, runs web HUD
 
-setlocal enabledelayedexpansion
+setlocal
 
 set ENV_NAME=cybertrade
 set ENV_FILE=environment.yml
 
 echo ========================================================
-echo  CYBERTRADE // NEON PROTOCOL — ONE-CLICK START
-echo  Miniconda only, no Anaconda Prompt needed
+echo  CYBERTRADE — ONE-CLICK START (Miniconda, fixed)
 echo  Just double-click — auto-finds Miniconda, creates env, runs
 echo ========================================================
 echo.
 
-REM Step 1: Find conda.exe (Miniconda) even if not in PATH
+REM Step 1: Find conda.exe — check common locations one by one (no for+goto)
 set CONDA_EXE=
-set MINICONDA_ROOT=
 
-echo [*] Searching for Miniconda...
+if exist "%USERPROFILE%\miniconda3\Scripts\conda.exe" set CONDA_EXE=%USERPROFILE%\miniconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "%USERPROFILE%\Miniconda3\Scripts\conda.exe" set CONDA_EXE=%USERPROFILE%\Miniconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "%LOCALAPPDATA%\miniconda3\Scripts\conda.exe" set CONDA_EXE=%LOCALAPPDATA%\miniconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "%USERPROFILE%\anaconda3\Scripts\conda.exe" set CONDA_EXE=%USERPROFILE%\anaconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "C:\ProgramData\miniconda3\Scripts\conda.exe" set CONDA_EXE=C:\ProgramData\miniconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "C:\miniconda3\Scripts\conda.exe" set CONDA_EXE=C:\miniconda3\Scripts\conda.exe
+if not defined CONDA_EXE if exist "%USERPROFILE%\miniconda3\condabin\conda.bat" set CONDA_EXE=%USERPROFILE%\miniconda3\condabin\conda.bat
+if not defined CONDA_EXE if exist "%USERPROFILE%\Miniconda3\condabin\conda.bat" set CONDA_EXE=%USERPROFILE%\Miniconda3\condabin\conda.bat
 
-for %%P in (
-    "%USERPROFILE%\miniconda3\Scripts\conda.exe"
-    "%USERPROFILE%\Miniconda3\Scripts\conda.exe"
-    "%LOCALAPPDATA%\miniconda3\Scripts\conda.exe"
-    "%USERPROFILE%\anaconda3\Scripts\conda.exe"
-    "C:\ProgramData\miniconda3\Scripts\conda.exe"
-    "C:\miniconda3\Scripts\conda.exe"
-    "C:\Miniconda3\Scripts\conda.exe"
-    "%USERPROFILE%\miniconda3\condabin\conda.bat"
-    "%USERPROFILE%\Miniconda3\condabin\conda.bat"
-) do (
-    if exist %%~P (
-        set CONDA_EXE=%%~P
-        for %%F in ("%%~P") do set MINICONDA_ROOT=%%~dpF\..
-        echo [*] Found Miniconda: !CONDA_EXE!
-        goto :found_conda
-    )
+REM Fallback: try conda in PATH
+if not defined CONDA_EXE (
+    where conda >nul 2>&1
+    if %errorlevel% equ 0 set CONDA_EXE=conda
 )
 
-REM Also try conda in PATH as last resort
-where conda >nul 2>&1
-if %errorlevel% equ 0 (
-    for /f "delims=" %%i in ('where conda') do set CONDA_EXE=%%i
-    echo [*] Found conda in PATH: !CONDA_EXE!
-    goto :found_conda
+if not defined CONDA_EXE (
+    echo [!] Miniconda NOT found
+    echo     Install: https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe
+    echo     Then double-click CYBERTRADE.bat again
+    pause
+    exit /b 1
 )
 
-echo.
-echo [!] Miniconda NOT found
-echo.
-echo     Please install Miniconda first (one time):
-echo     https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe
-echo     Download and run installer, choose "Just Me", keep defaults
-echo.
-echo     After install, double-click this file again: CYBERTRADE.bat
-echo.
-pause
-exit /b 1
+echo [*] Found Miniconda: %CONDA_EXE%
+call "%CONDA_EXE%" --version
 
-:found_conda
-echo [*] Using: %CONDA_EXE%
-
-REM Step 2: Check if env exists, if not create it
+REM Step 2: Check if env exists by looking for python.exe
 echo [*] Checking for env %ENV_NAME%...
 
-REM Find env python to check existence
 set ENV_PYTHON=
-for %%P in (
-    "%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe"
-    "%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe"
-    "%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe"
-    "C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe"
-    "C:\miniconda3\envs\%ENV_NAME%\python.exe"
-) do (
-    if exist %%~P set ENV_PYTHON=%%~P
-)
+
+if exist "%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe
+if not defined ENV_PYTHON if exist "%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe
+if not defined ENV_PYTHON if exist "%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe
+if not defined ENV_PYTHON if exist "C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe
+if not defined ENV_PYTHON if exist "C:\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=C:\miniconda3\envs\%ENV_NAME%\python.exe
 
 if not defined ENV_PYTHON (
     echo [*] Env %ENV_NAME% not found — creating (first time, 1-2 min)...
     echo [*] Running: conda env create -f %ENV_FILE%
     call "%CONDA_EXE%" env create -f "%ENV_FILE%"
     if %errorlevel% neq 0 (
-        echo [!] Failed to create env. Trying with --force...
+        echo [!] Failed, trying with --force...
         call "%CONDA_EXE%" env create -f "%ENV_FILE%" --force
         if %errorlevel% neq 0 (
             echo [!] Still failed. Try in Anaconda Prompt:
@@ -94,21 +69,13 @@ if not defined ENV_PYTHON (
         )
     )
     echo [OK] Env %ENV_NAME% created
+    REM Find python again after creation
+    if exist "%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe
+    if not defined ENV_PYTHON if exist "%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe
+    if not defined ENV_PYTHON if exist "%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe
+    if not defined ENV_PYTHON if exist "C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe" set ENV_PYTHON=C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe
 ) else (
-    echo [*] Env %ENV_NAME% exists at !ENV_PYTHON!
-)
-
-REM Step 3: Find env python again after creation
-set ENV_PYTHON=
-for %%P in (
-    "%USERPROFILE%\miniconda3\envs\%ENV_NAME%\python.exe"
-    "%USERPROFILE%\Miniconda3\envs\%ENV_NAME%\python.exe"
-    "%LOCALAPPDATA%\miniconda3\envs\%ENV_NAME%\python.exe"
-    "C:\ProgramData\miniconda3\envs\%ENV_NAME%\python.exe"
-    "C:\miniconda3\envs\%ENV_NAME%\python.exe"
-    "C:\Miniconda3\envs\%ENV_NAME%\python.exe"
-) do (
-    if exist %%~P set ENV_PYTHON=%%~P
+    echo [*] Env %ENV_NAME% exists at %ENV_PYTHON%
 )
 
 if not defined ENV_PYTHON (
@@ -117,18 +84,26 @@ if not defined ENV_PYTHON (
     exit /b 1
 )
 
-for %%F in ("%ENV_PYTHON%") do set ENV_DIR=%%~dpF
-for %%F in ("%ENV_DIR%..") do set ENV_ROOT=%%~fF
-
 echo [*] Env python: %ENV_PYTHON%
+
+REM Get env root from python path (remove \python.exe)
+set ENV_ROOT=%ENV_PYTHON%
+set ENV_ROOT=%ENV_ROOT:\python.exe=%
+REM Now ENV_ROOT is ...\envs\cybertrade, need to handle \Scripts\python.exe case? Already handled
+REM Actually python.exe is in env root, so ENV_ROOT should be dir of python.exe
+REM Let's get dir via for loop without goto
+for %%F in ("%ENV_PYTHON%") do set ENV_ROOT=%%~dpF
+REM Remove trailing backslash
+if "%ENV_ROOT:~-1%"=="\" set ENV_ROOT=%ENV_ROOT:~0,-1%
+
 echo [*] Env root: %ENV_ROOT%
 
-REM Step 4: Activate env by setting PATH (no conda activate needed, works in normal CMD)
+REM Step 3: Activate by PATH (no conda activate needed)
 set PATH=%ENV_ROOT%;%ENV_ROOT%\Scripts;%ENV_ROOT%\Library\bin;%PATH%
 set CONDA_DEFAULT_ENV=%ENV_NAME%
 set CONDA_PREFIX=%ENV_ROOT%
 
-echo [*] Activated env %ENV_NAME% via PATH (no Anaconda Prompt needed)
+echo [*] Activated env %ENV_NAME% via PATH
 python --version
 python -m cybertrade doctor
 
@@ -136,12 +111,10 @@ echo.
 echo ========================================================
 echo  [OK] Starting CYBERTRADE web terminal...
 echo  Browser will open at http://localhost:8899
-echo  Press Ctrl+C to stop, close window to exit
+echo  Press Ctrl+C to stop
 echo ========================================================
 echo.
 
-REM Step 5: Run web terminal (one-click)
-REM --auto will open browser automatically
 python -m cybertrade web --port 8899 --auto
 
 pause
