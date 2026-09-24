@@ -547,6 +547,23 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bounded_int(raw: Any, lo: int, hi: int, what: str) -> int:
+    """Clamp a count into a sane range instead of trusting it.
+
+    ``--runs 999999999`` used to try a billion paths and simply never
+    return -- a terminal that hangs looks exactly like one that works.
+    """
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        raise ConfigError(f"{what} must be a whole number, not {raw!r}")
+    if val < lo:
+        raise ConfigError(f"{what} must be at least {lo}")
+    if val > hi:
+        raise ConfigError(f"{what} must be at most {hi} (got {val})")
+    return val
+
+
 def cmd_montecarlo(args: argparse.Namespace) -> int:
     """Bootstrap a real P&L sample forward and report survivability honestly.
 
@@ -560,8 +577,8 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
     if getattr(args, "wins", None) is not None or getattr(args, "losses", None) is not None:
         from .risk.montecarlo import simulate_posterior
 
-        w = int(args.wins or 0)
-        l = int(args.losses or 0)
+        w = _bounded_int(args.wins or 0, 0, 10_000_000, "--wins")
+        l = _bounded_int(args.losses or 0, 0, 10_000_000, "--losses")
         report = simulate_posterior(w, l, payout=payout)
         print(f"  posterior: Beta({w + 2}, {l + 2}) over P(win) | payout {payout:.2f}"
               f" | breakeven {1.0 / (1.0 + payout):.4f}")
@@ -576,12 +593,21 @@ def cmd_montecarlo(args: argparse.Namespace) -> int:
         print("  pass --pnl \"+8.5,-10,+8.5,...\" (settled trades) or "
               "--wins/--losses from your journal.", file=sys.stderr)
         return 2
-    pnls = [float(x) for x in args.pnl.split(",") if x.strip()]
+    try:
+        pnls = [float(x) for x in args.pnl.split(",") if x.strip()]
+    except ValueError as exc:
+        print(f"  --pnl must be comma-separated numbers, not {args.pnl!r}: {exc}",
+              file=sys.stderr)
+        return 2
+    if not pnls:
+        print("  --pnl parsed to nothing — pass at least one number.",
+              file=sys.stderr)
+        return 2
     report = simulate(
         pnls,
         starting_balance=float(args.starting_balance),
-        runs=int(args.runs),
-        horizon=int(args.horizon),
+        runs=_bounded_int(args.runs, 1, 100_000, "--runs"),
+        horizon=_bounded_int(args.horizon, 1, 10_000, "--horizon"),
     )
     if args.json:
         import json
