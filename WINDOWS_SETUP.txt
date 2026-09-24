@@ -1,0 +1,80 @@
+CYBERTRADE // NEON PROTOCOL — Windows Setup (conda env cybertrade)
+====================================================================
+
+QUICK START FOR WINDOWS 10/11
+------------------------------
+1. Install Miniforge (free, open-source conda):
+   Download: https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe
+   Run installer, keep defaults, optionally check "Add to PATH"
+
+2. Open Miniforge Prompt from Start Menu (search "Miniforge Prompt")
+
+3. In Miniforge Prompt:
+   cd /d C:\Users\YourName\Downloads\CYBERTRADE
+   conda env create -f environment.yml
+
+   OR double-click setup_conda.bat in Explorer
+
+4. Activate:
+   conda activate cybertrade
+
+5. Verify:
+   python -m cybertrade doctor
+   -> Should show 10/10 checks passed
+
+6. Run:
+   Browser HUD (recommended, no extra setup):
+     run_web.bat
+     OR python -m cybertrade web --port 8899 --auto
+     Open http://localhost:8899 in Chrome/Edge
+
+   Desktop HUD:
+     run_gui.bat
+     OR python run_gui.py
+
+   Tests:
+     python -m unittest discover -s tests
+
+DAILY USE
+---------
+Open Miniforge Prompt:
+  conda activate cybertrade
+  python -m cybertrade run              (paper trading, safe default)
+  python -m cybertrade backtest --bars 200
+  python -m cybertrade journal
+
+To exit:
+  conda deactivate
+
+To remove env:
+  conda env remove -n cybertrade
+
+FILES
+-----
+environment.yml          - conda env definition (name: cybertrade, python 3.11)
+setup_conda.bat          - double-click to create env (CMD)
+setup_conda.ps1          - PowerShell version
+activate_cybertrade.bat  - double-click to activate env
+run_gui.bat              - launch desktop GUI
+run_web.bat              - launch browser HUD
+CONDA.md                 - full documentation
+WINDOWS_SETUP.txt        - this file
+
+TROUBLESHOOTING
+---------------
+- 'conda' not recognized: Use Miniforge Prompt, not normal CMD
+- PowerShell blocks .ps1: Run Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+- tkinter missing: conda install -n cybertrade tk
+- Port 8899 busy: python -m cybertrade web --port 0 --auto
+
+REQUIREMENTS
+------------
+- Windows 10/11 64-bit
+- 500MB free disk for Miniforge + env
+- No admin needed (installs to %USERPROFILE%\miniforge3)
+- Project is 100% Python stdlib + tk + pytest (no compiled deps)
+
+SUPPORT
+-------
+See CONDA.md for detailed guide, Linux/macOS instructions, and troubleshooting.
+See README.md for trading system documentation.
