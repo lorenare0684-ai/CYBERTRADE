@@ -97,6 +97,23 @@ python -m cybertrade doctor
   there honours only the read-only flag, so `compat.harden_path` does what it
   can and logs a warning telling you the session file is not private. Keep
   `data/` out of shared folders.
+- **A closed stdin.** Double-clicking the `.bat` gives the process no
+  keyboard, so the purse prompt and the `I UNDERSTAND` gate cannot be
+  answered. Rather than crash with an `EOFError` traceback that vanishes with
+  the console, both hold: one `SAFETY HOLD — …` line and exit code 78. Run
+  from a prompt if you want the prompts.
+- **Deep paths.** `data/…` is relative and short, but if you point
+  `--config` at an absolute path the `\?\` prefix is applied at every open,
+  so a location past 260 characters works instead of raising an `OSError`
+  that names no cause.
+- **Paths with spaces or non-ASCII.** Tested; the config dir, journal,
+  session file and state lease all work under `C:\Users\José Müller\...`.
+
+The launcher's menu covers the whole first-run sequence: `1` web HUD,
+`2` desktop GUI, `3` doctor, **`4` pair the Quotex session**, `5` check or
+warm an existing session, `6` run live. Option `4` is the one a new install
+needs — a first-time operator cannot reach a venue session any other way,
+and `5` and `6` both point back at it when they find nothing paired.
 
 Chrome is found via `CYBERTRADE_CHROME` or the standard
 `%PROGRAMFILES%\Google\Chrome\Application\chrome.exe` locations. If
