@@ -380,6 +380,51 @@ class WebTerminal:
                     self._head_only = False
 
             def do_GET(self) -> None:  # noqa: N802
+                self._route()
+
+            def do_POST(self) -> None:  # noqa: N802
+                self._route()
+
+            def do_PUT(self) -> None:  # noqa: N802
+                self._route()
+
+            def do_DELETE(self) -> None:  # noqa: N802
+                self._route()
+
+            def do_PATCH(self) -> None:  # noqa: N802
+                self._route()
+
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                self._route()
+
+            def _route(self) -> None:
+                """Every method funnels through here.
+
+                An exception escaping a handler does not just lose the
+                request — it kills the keep-alive connection with a truncated
+                response, and the console shows a dead socket instead of the
+                JSON error that would have told the operator what broke.
+                """
+                try:
+                    if self.command in ("GET", "HEAD"):
+                        return self._get()
+                    if self.command == "POST":
+                        return self._post()
+                    if self.command == "OPTIONS":
+                        # CORS preflight: the HUD may be served from another
+                        # origin during development.
+                        return self._json(204, {})
+                    return self._json(405, {"error": f"{self.command} not allowed"})
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the client hung up; nothing to report to
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("%s %s failed", self.command, self.path)
+                    try:
+                        self._json(500, {"error": f"{type(exc).__name__}: {exc}"})
+                    except Exception:  # noqa: BLE001 - already unwritable
+                        pass
+
+            def _get(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 path = parsed.path
                 if path == "/" or path == "/index.html":
@@ -400,18 +445,51 @@ class WebTerminal:
                                                 "error": "pairing is not offered here"})
                     return self._json(200, ctl.status())
                 if path == "/api/strategies":
+                    if terminal.hub.engine is None:
+                        return self._json(200, {"empty": True,
+                                                "strategies": [],
+                                                "verdict": "NO SESSION",
+                                                "summary": "pair a venue session to see the ensemble"})
                     return self._json(200, terminal.hub.engine.ensemble.describe())
                 if path == "/api/montecarlo":
                     from urllib.parse import parse_qs
 
                     q = parse_qs(parsed.query or "")
-                    runs = int((q.get("runs") or ["400"])[0])
-                    horizon = int((q.get("horizon") or ["200"])[0])
+
+                    def _num(key: str, default: int, lo: int, hi: int) -> int:
+                        """A query string is hostile input: never let it raise.
+
+                        `?runs=abc` used to kill the connection with a
+                        ValueError, and the browser showed a dead socket
+                        instead of a chart.
+                        """
+                        try:
+                            val = int(float((q.get(key) or [default])[0]))
+                        except (TypeError, ValueError):
+                            return default
+                        return max(lo, min(hi, val))
+
+                    runs = _num("runs", 400, 1, 20000)
+                    horizon = _num("horizon", 200, 1, 5000)
+                    if terminal.hub.engine is None:
+                        # An unpaired terminal has no ledger to bootstrap.
+                        # The HUD renders this as NO DATA, which is the
+                        # truth; a 500 would read as a broken server.
+                        return self._json(200, {
+                            "empty": True, "verdict": "NO DATA",
+                            "summary": "no settled trades — pair a venue session",
+                            "runs": runs, "horizon": horizon,
+                            "bands": [], "n_trades": 0, "source": "none",
+                        })
                     return self._json(200, terminal.hub.montecarlo(
                         runs=runs, horizon=horizon,
-                        mode=parse_qs(urlparse(self.path).query).get("mode", ["bootstrap"])[0],
+                        mode=(q.get("mode") or ["bootstrap"])[0],
                     ))
                 if path == "/api/calendar":
+                    if terminal.hub.engine is None:
+                        return self._json(200, {"now": timex.now(), "events": [],
+                                                "blackout": False,
+                                                "paired": False})
                     return self._json(
                         200,
                         {
@@ -422,14 +500,22 @@ class WebTerminal:
                     )
                 return self._json(404, {"error": "not found"})
 
-            def do_POST(self) -> None:  # noqa: N802
+            def _post(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
-                length = int(self.headers.get("Content-Length", "0") or 0)
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or 0)
+                except ValueError:
+                    return self._json(400, {"error": "bad Content-Length"})
+                if length < 0:
+                    return self._json(400, {"error": "bad Content-Length"})
                 raw = self.rfile.read(length) if length else b"{}"
                 try:
                     body = json.loads(raw.decode("utf-8") or "{}")
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     return self._json(400, {"error": "bad json"})
+                if not isinstance(body, dict):
+                    # `[]` or `null` is valid JSON and still not a command
+                    return self._json(400, {"error": "expected a json object"})
                 if parsed.path == "/api/command":
                     return self._json(200, terminal.command(body))
                 if parsed.path == "/api/pair/start":
@@ -494,8 +580,15 @@ class WebTerminal:
 
     # -- commands ----------------------------------------------------------
     def command(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        cmd = str(body.get("cmd", ""))
+        if not isinstance(body, dict):
+            return {"ok": False, "error": "expected a json object"}
         engine = self.hub.engine
+        if engine is None:
+            # The terminal is up but unpaired: say so, rather than handing
+            # back "'NoneType' object has no attribute 'arm'".
+            return {"ok": False, "error": "no venue session yet — pair first",
+                    "pairing": True}
+        cmd = str(body.get("cmd", ""))
         try:
             if cmd == "arm":
                 engine.arm()

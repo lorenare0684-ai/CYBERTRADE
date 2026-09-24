@@ -496,5 +496,171 @@ class TestHeadRequests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 404)
 
 
+
+class TestHostileRequests(unittest.TestCase):
+    """A malformed request must never kill the connection.
+
+    An exception escaping a handler does not just lose that request: it tears
+    down the keep-alive connection mid-response, and the console gets a dead
+    socket where a JSON error would have told the operator what broke. These
+    are the payloads a browser, a proxy or a stray script actually send.
+    """
+
+    def setUp(self):
+        from cybertrade.web.pairing import PairingController
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cfg = _cfg(self.tmp.name)
+        hub = EngineHub(None, cfg)          # unpaired: the first-boot state
+        hub.pairing = PairingController(cfg, lambda ssid, purse: None)
+        self.web = WebTerminal(hub, host="127.0.0.1", port=next(_PORT))
+        self.web.start()
+        self.addCleanup(self.web.stop)
+
+    def _post(self, path, body):
+        raw = body.encode() if isinstance(body, str) else body
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.web.port}{path}", data=raw,
+            method="POST", headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read() or b"{}")
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    def _get(self, path):
+        try:
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{self.web.port}{path}", timeout=8) as r:
+                return r.status, self._decode(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, self._decode(e.read())
+
+    @staticmethod
+    def _decode(raw):
+        """Static assets are not JSON; keep whatever came back."""
+        try:
+            return json.loads(raw or b"{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {"_raw_len": len(raw)}
+
+    def _must_not_500(self, method, path, body=None):
+        status, payload = self._post(path, body) if method == "POST" \
+            else self._get(path)
+        self.assertNotEqual(status, 500, f"{method} {path} -> 500: {payload}")
+        return status, payload
+
+    def test_a_non_object_json_body_is_rejected_not_fatal(self):
+        for body in ("[]", "null", "3", '"text"', "{bad json", "", "{"):
+            with self.subTest(body=body):
+                self._must_not_500("POST", "/api/command", body)
+                self._must_not_500("POST", "/api/pair/start", body)
+
+    def test_a_command_with_no_engine_says_pair_first(self):
+        status, payload = self._must_not_500("POST", "/api/command", '{"cmd":"arm"}')
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertIn("no venue session", payload["error"])
+        self.assertTrue(payload["pairing"])
+
+    def test_an_unknown_command_is_answered_not_crashed(self):
+        status, payload = self._must_not_500("POST", "/api/command",
+                                            '{"cmd":"' + "z" * 4000 + '"}')
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["ok"])
+        self.assertIn("error", payload)
+        self.assertNotIn("Traceback", json.dumps(payload))
+
+    def test_a_garbage_query_string_is_clamped_not_fatal(self):
+        for qs in ("runs=abc", "runs=-5", "runs=99999999", "runs=50&horizon=abc",
+                   "runs=1e9", "runs=", "runs=%20%20"):
+            with self.subTest(qs=qs):
+                status, payload = self._must_not_500("GET", f"/api/montecarlo?{qs}")
+                self.assertEqual(status, 200)
+                # unpaired: the HUD renders NO DATA rather than a 500
+                self.assertTrue(payload.get("empty"), payload)
+
+    def test_engine_routes_degrade_when_unpaired(self):
+        for path in ("/api/strategies", "/api/calendar", "/api/montecarlo"):
+            with self.subTest(path=path):
+                status, payload = self._must_not_500("GET", path)
+                self.assertEqual(status, 200)
+                self.assertNotIn("NoneType", json.dumps(payload))
+
+    def test_a_method_we_do_not_serve_is_a_405_not_a_501(self):
+        for method in ("PUT", "DELETE", "PATCH"):
+            with self.subTest(method=method):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{self.web.port}/api/state", method=method)
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(ctx.exception.code, 405, method)
+
+    def test_a_bad_content_length_header_does_not_tear_down_the_server(self):
+        import socket
+
+        s = socket.create_connection(("127.0.0.1", self.web.port), timeout=5)
+        try:
+            s.sendall(b"POST /api/command HTTP/1.1\r\nHost: x\r\n"
+                      b"Content-Length: not-a-number\r\n"
+                      b"Connection: close\r\n\r\n")
+            raw = s.recv(400)
+        finally:
+            s.close()
+        self.assertIn(b"400", raw.split(b"\r\n")[0])
+        # the server is still serving afterwards
+        status, _payload = self._get("/api/state")
+        self.assertEqual(status, 200)
+
+    def test_the_server_survives_a_whole_battery_of_junk(self):
+        """Nothing above may leave the listener wedged."""
+        paths = ["/" + "A" * 4000, "/api/state", "/api/pair/status",
+                 "/static/js/app.js", "/static/../server.py", "/nope",
+                 "/api/montecarlo?runs=abc", "/api/montecarlo?runs=999999"]
+        for path in paths:
+            with self.subTest(path=path[:40]):
+                self._must_not_500("GET", path)
+        status, _payload = self._get("/api/state")
+        self.assertEqual(status, 200)
+
+
+
+class TestUnknownCommandOnALiveTerminal(unittest.TestCase):
+    """A paired terminal must answer an unknown command, not crash."""
+
+    def setUp(self):
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cfg = _cfg(self.tmp.name)
+        hub = EngineHub(_StubEngine(), cfg)
+        self.web = WebTerminal(hub, host="127.0.0.1", port=next(_PORT))
+        self.web.start()
+        self.addCleanup(self.web.stop)
+
+    def test_unknown_cmd_is_reported(self):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self.web.port}/api/command",
+            data=json.dumps({"cmd": "explode"}).encode(), method="POST")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            payload = json.loads(r.read())
+        self.assertFalse(payload["ok"])
+        self.assertIn("unknown cmd", payload["error"])
+
+    def test_a_non_object_body_is_a_400(self):
+        for body in ("[]", "null"):
+            with self.subTest(body=body):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{self.web.port}/api/command",
+                    data=body.encode(), method="POST")
+                with self.assertRaises(urllib.error.HTTPError) as ctx:
+                    urllib.request.urlopen(req, timeout=5)
+                self.assertEqual(ctx.exception.code, 400)
+
+
+
 if __name__ == "__main__":
     unittest.main()
