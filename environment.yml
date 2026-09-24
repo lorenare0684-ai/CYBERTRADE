@@ -3,7 +3,7 @@
 # Python: 3.11 (requires >=3.10, tested on 3.11)
 # 100% standard library runtime — no third-party deps required
 # tk provides tkinter for desktop GUI (python run_gui.py)
-# pytest for the 593-test suite
+# pytest for the 592-test suite
 #
 # === MINICONDA (Windows) QUICK START ===
 #   1. Install Miniconda for Windows: https://docs.anaconda.com/miniconda/install/
@@ -22,7 +22,7 @@
 # Usage after activation (all platforms):
 #   python -m cybertrade web --port 8899 --auto  # browser HUD
 #   python run_gui.py                            # desktop HUD
-#   python -m unittest discover -s tests         # 593 tests
+#   python -m unittest discover -s tests         # 592 tests
 #
 # Update:
 #   conda env update -f environment.yml --prune

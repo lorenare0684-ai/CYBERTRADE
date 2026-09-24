@@ -30,6 +30,11 @@ import time
 from typing import Any, List, Optional
 
 from . import __version__
+from .compat import (
+    IS_WINDOWS,
+    default_chrome_profile,
+    ensure_console_encoding,
+)
 from .config import AppConfig
 from .exceptions import ConfigError
 from .logging_setup import setup_logging
@@ -729,11 +734,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     def _pairing():
         from .brokers.quotex.pairing import chrome_argv
 
-        argv = chrome_argv("https://qxbroker.com", "/tmp/profile", 9333,
-                          "chrome")
+        profile = default_chrome_profile()
+        argv = chrome_argv("https://qxbroker.com", profile, 9333, "chrome")
         if "--remote-debugging-port=9333" not in argv:
             raise RuntimeError("devtools argv drifted")
-        if "--user-data-dir=/tmp/profile" not in argv:
+        if f"--user-data-dir={profile}" not in argv:
             raise RuntimeError("profile argv drifted")
         return "chrome pairing available"
 
@@ -742,7 +747,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     def _gui():
         from .gui import GUI_AVAILABLE
 
-        return "tkinter available" if GUI_AVAILABLE else "missing (apt install python3-tk)"
+        if GUI_AVAILABLE:
+            return "tkinter available"
+        if IS_WINDOWS:
+            # tkinter ships with the Windows installer; a missing one means the
+            # optional "tcl/tk" box was unticked, not that apt is the answer.
+            return ("missing — rerun the Python installer with the "
+                    "'tcl/tk and IDLE' option enabled")
+        return "missing (apt install python3-tk)"
 
     check("desktop gui", _gui)
 
@@ -897,6 +909,10 @@ def cmd_edge(args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    # Before anything prints: the banner is box-drawing art, and a redirected
+    # Windows console encodes with the locale codepage, which has no code
+    # points for it. Degrade the glyph, never the process.
+    ensure_console_encoding()
     parser = build_parser()
     args = parser.parse_args(argv)
     return int(args.func(args) or 0)

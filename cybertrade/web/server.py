@@ -36,6 +36,21 @@ _SUBSCRIBERS: List["queue.Queue"] = []
 _SUBS_LOCK = threading.Lock()
 
 
+def _static_ctype(path: str) -> str:
+    """Content-Type for a static asset, with the charset spelled out.
+
+    The dashboard is UTF-8 (box art, arrows, tick glyphs), and a bare
+    ``text/html`` lets a browser guess the codepage — which on Windows means
+    the locale codepage, and mojibake. Every text type gets an explicit
+    ``charset=utf-8`` so the HUD reads the same everywhere.
+    """
+    ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+    if ctype.startswith("text/") or ctype in (
+            "application/javascript", "application/json"):
+        return f"{ctype}; charset=utf-8"
+    return ctype
+
+
 def broadcast(kind: str, payload: Any) -> None:
     envelope = {"kind": kind, "ts": timex.now(), "data": payload}
     with _SUBS_LOCK:
@@ -428,9 +443,8 @@ class WebTerminal:
                 full = os.path.join(STATIC_DIR, safe)
                 if not os.path.isfile(full):
                     return self._json(404, {"error": f"no static {safe}"})
-                ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
                 with open(full, "rb") as fh:
-                    self._send(200, fh.read(), ctype)
+                    self._send(200, fh.read(), _static_ctype(full))
 
             def _sse(self) -> None:
                 q: "queue.Queue" = queue.Queue(maxsize=500)

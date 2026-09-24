@@ -1,0 +1,27 @@
+# CYBERTRADE line-ending policy.
+#
+# The Git for Windows installer turns on core.autocrlf=true by default, which
+# checks text files out with CRLF. Python tolerates that, but it makes every
+# diff on Windows noisy and breaks anything that reads a file byte-for-byte.
+# Pin the repo to LF and let the working tree decide.
+
+* text=auto eol=lf
+
+# Explicit text: normalise regardless of what the OS guesses.
+*.py       text eol=lf
+*.md       text eol=lf
+*.txt      text eol=lf
+*.yml      text eol=lf
+*.yaml     text eol=lf
+*.json     text eol=lf
+*.toml     text eol=lf
+*.html     text eol=lf
+*.css      text eol=lf
+*.js       text eol=lf
+*.bat      text eol=crlf
+
+# Binary: never touch.
+*.db       binary
+*.png      binary
+*.jpg      binary
+*.ico      binary

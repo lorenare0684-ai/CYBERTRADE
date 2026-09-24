@@ -68,6 +68,42 @@ python -m cybertrade doctor
 python -m unittest tests.test_bot tests.test_phase32
 ```
 
+### Windows
+
+Nothing here is POSIX-only, but three things behave differently and the
+terminal handles them for you:
+
+```bat
+REM one-click: finds Miniconda, builds the env, asks what to run
+CYBERTRADE.bat
+
+REM or by hand, in an Anaconda Prompt
+conda env create -f environment.yml
+conda activate cybertrade
+python -m cybertrade doctor
+```
+
+- **Console encoding.** The banner and the check marks are box-drawing
+  characters, and a *redirected* Windows console encodes with the locale
+  codepage, which has no code points for them. `cli.main` calls
+  `compat.ensure_console_encoding()` before anything prints, so a glyph that
+  cannot be carried degrades to `?` instead of killing the process. On a real
+  console CPython writes UTF-8 through `WriteConsoleW` and the art renders as
+  drawn; in a pipe or a log file you get the degraded form. Either way the
+  command completes.
+- **File locking.** The state lease uses `fcntl.flock` on POSIX and
+  `msvcrt.locking` on Windows — one writer per state file, both ways.
+- **`0600` session files.** POSIX enforces it; Windows does not. `os.chmod`
+  there honours only the read-only flag, so `compat.harden_path` does what it
+  can and logs a warning telling you the session file is not private. Keep
+  `data/` out of shared folders.
+
+Chrome is found via `CYBERTRADE_CHROME` or the standard
+`%PROGRAMFILES%\Google\Chrome\Application\chrome.exe` locations. If
+`python run_gui.py` reports tkinter missing, re-run the Python installer with
+the *tcl/tk and IDLE* option ticked — it ships with the Windows installer, it
+is not an `apt` package.
+
 ## The stack
 
 | Layer | What it is |
@@ -149,10 +185,10 @@ or a substitute for the broker's records. Existing corrupt/in-flight files are
 preserved, not silently overwritten by a fresh bankroll.
 
 Full operating guide: **[`docs/RECOVERY.md`](docs/RECOVERY.md)**.
-Suite: **593 green in 39 test modules**, including **73 new Phase-32 tests**
-and real-process crash/pipe/cleanup probes. The actual supervisor CLI also
-passed a SIGTERM shutdown + committed-checkpoint smoke check. Desktop Tk wiring
-was checked headlessly; Tkinter is not installed in this sandbox.
+Suite: **592 green in 36 test modules**, including **73 new Phase-32 tests**
+and real-process crash/pipe/cleanup probes. Desktop Tk wiring is checked
+headlessly through a fake-tkinter shim (`tests/tk_shim.py`), so the GUI runs
+its real widget logic in CI with no display.
 
 ## Phase 31 — the adaptive HUD (resolution-aware placement)
 

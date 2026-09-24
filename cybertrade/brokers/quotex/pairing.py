@@ -26,6 +26,8 @@ import subprocess
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
+from ...compat import harden_path
+
 log = logging.getLogger("cybertrade.pairing")
 
 TRADE_URL = "https://qxbroker.com/en/trade"
@@ -221,10 +223,9 @@ def save_session(path: str, data: Dict[str, str]) -> bool:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=1, sort_keys=True)
         os.replace(tmp, path)
-        try:
-            os.chmod(path, 0o600)
-        except OSError:  # pragma: no cover — exotic filesystems
-            pass
+        # 0600 on POSIX; on Windows this is best-effort and says so, because
+        # a silent no-op would read as "private" when it is not.
+        harden_path(path, 0o600)
         return True
     except OSError:
         log.exception("session save failed: %s", path)
