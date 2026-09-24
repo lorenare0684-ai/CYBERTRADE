@@ -10,6 +10,7 @@ import threading
 from typing import Any, Dict, List, Optional, Sequence
 
 from ..data.models import TradeRecord
+from ..compat import windows_long_path
 from ..exceptions import JournalError
 from ..utils import timex
 
@@ -65,7 +66,11 @@ class TradeJournal:
             os.makedirs(parent, exist_ok=True)
         self._lock = threading.RLock()
         try:
-            self._conn = sqlite3.connect(path, check_same_thread=False)
+            # A user may point the journal anywhere; on Windows a deep
+            # absolute path needs the \\?\ prefix or open() fails past 260
+            # characters with an error that names nothing useful.
+            self._conn = sqlite3.connect(
+                windows_long_path(path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             with self._lock:
                 self._conn.executescript(_SCHEMA)

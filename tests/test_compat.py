@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os
+import sqlite3
 import re
 import sys
 import tempfile
@@ -621,6 +622,107 @@ class TestWindowsLauncher(unittest.TestCase):
         ga = io.open(os.path.join(self.repo, ".gitattributes"),
                      encoding="utf-8").read()
         self.assertRegex(ga, r"\*\.bat\s+text\s+eol=crlf")
+
+
+
+class TestLongPathsArePrefixedAtTheOpenCall(unittest.TestCase):
+    """``windows_long_path`` existed, was exported, and nothing called it.
+
+    A deep absolute path on Windows fails past 260 characters with an error
+    that names no useful cause. The helper is the fix; these tests make sure
+    it is actually wired into the three places a user can configure a path:
+    the journal, the state lease, and the session file.
+
+    On Linux the helper is an identity, so the tests assert the *call* rather
+    than the prefix -- that is the part that can rot.
+    """
+
+    def test_the_journal_prefixes_before_connecting(self):
+        import sqlite3
+
+        import cybertrade.journal.store as store
+
+        with tempfile.TemporaryDirectory() as tmp:
+            seen = {}
+
+            def fake_connect(path, **kw):
+                seen["path"] = path
+                raise sqlite3.Error("stop here")
+
+            with mock.patch.object(store.sqlite3, "connect",
+                                   side_effect=fake_connect):
+                with self.assertRaises(Exception):
+                    store.TradeJournal(os.path.join(tmp, "j.db"))
+            self.assertIn("path", seen)
+            self.assertTrue(seen["path"].endswith("j.db"))
+
+    def test_the_state_lease_prefixes_before_opening(self):
+        import cybertrade.statestore as ss
+
+        prefix = "\\\\?\\"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "state.lock")
+            lease = ss.StateLease(target)
+            devnull = os.open(os.devnull, os.O_RDONLY)
+            try:
+                with mock.patch.object(ss, "windows_long_path",
+                                       side_effect=lambda p: prefix + p) as wl, \
+                        mock.patch("os.open",
+                                       side_effect=lambda *a, **k: os.dup(devnull)) as op:
+                    try:
+                        lease.acquire()
+                    except Exception:
+                        pass
+                    finally:
+                        lease.release()
+                # StateLease appends .lock and realpaths the target
+                wl.assert_called_once_with(lease.path)
+                self.assertEqual(op.call_args[0][0], prefix + lease.path)
+            finally:
+                os.close(devnull)
+
+    def test_the_session_saver_prefixes_both_sides_of_the_replace(self):
+        from cybertrade.brokers.quotex import pairing as pr
+
+        prefix = "\\\\?\\"
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "s.json")
+            opened, replaced = [], []
+            devnull = os.open(os.devnull, os.O_WRONLY)
+
+            def fake_open(path, *a, **kw):
+                opened.append(path)
+                return os.fdopen(os.dup(devnull), "w")
+
+            def fake_replace(a, b):
+                replaced.append((a, b))
+
+            with mock.patch("builtins.open", side_effect=fake_open), \
+                    mock.patch.object(pr.os, "replace",
+                                      side_effect=fake_replace), \
+                    mock.patch.object(pr, "windows_long_path",
+                                      side_effect=lambda p: prefix + p) as wl:
+                pr.save_session(target, {"ssid": "x" * 32, "cookies": "c=1"})
+            self.assertTrue(opened and opened[0].startswith(prefix), opened)
+            self.assertEqual(replaced[0][0], prefix + target + ".tmp")
+            self.assertEqual(replaced[0][1], prefix + target)
+            # prefixing must happen for every path, not just the first
+            self.assertGreaterEqual(wl.call_count, 3)
+
+    def test_a_relative_path_is_never_prefixed(self):
+        """``data/...`` never hits MAX_PATH; prefixing it would break it."""
+        from cybertrade.compat import windows_long_path
+
+        self.assertEqual(windows_long_path("data/journal.db"), "data/journal.db")
+        self.assertEqual(windows_long_path(os.path.join("data", "x.db")),
+                         os.path.join("data", "x.db"))
+        self.assertEqual(windows_long_path(""), "")
+
+    def test_an_already_prefixed_path_is_not_doubled(self):
+        from cybertrade.compat import windows_long_path
+
+        already = "\\\\?\\C:\\deep\\path.db"
+        self.assertEqual(windows_long_path(already), already)
 
 
 if __name__ == "__main__":

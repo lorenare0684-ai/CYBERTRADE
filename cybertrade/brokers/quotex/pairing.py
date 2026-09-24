@@ -26,7 +26,7 @@ import subprocess
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional
 
-from ...compat import harden_path
+from ...compat import harden_path, windows_long_path
 
 log = logging.getLogger("cybertrade.pairing")
 
@@ -226,9 +226,9 @@ def save_session(path: str, data: Dict[str, str]) -> bool:
         if parent:
             os.makedirs(parent, exist_ok=True)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
+        with open(windows_long_path(tmp), "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=1, sort_keys=True)
-        os.replace(tmp, path)
+        os.replace(windows_long_path(tmp), windows_long_path(path))
         # 0600 on POSIX; on Windows this is best-effort and says so, because
         # a silent no-op would read as "private" when it is not.
         harden_path(path, 0o600)

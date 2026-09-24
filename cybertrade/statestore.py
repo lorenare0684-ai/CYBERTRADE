@@ -16,6 +16,8 @@ import time
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
+from .compat import windows_long_path
+
 log = logging.getLogger("cybertrade.statestore")
 VERSION = 1
 CONTINUITY_VERSION = 1
@@ -170,7 +172,8 @@ class StateLease:
         if self._fh is not None:
             return
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+        fd = os.open(windows_long_path(self.path),
+                     os.O_RDWR | os.O_CREAT, 0o600)
         fh = os.fdopen(fd, "r+b")
         try:
             if os.name == "nt":
