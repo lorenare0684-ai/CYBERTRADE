@@ -9,6 +9,7 @@ from .theme import (
     BIG_NUM,
     DISPLAY_SM,
     MONO,
+    MONO_BOLD,
     MONO_SMALL,
     Theme,
     dim,
