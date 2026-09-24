@@ -202,6 +202,19 @@ def _missing_session(exc: Exception) -> bool:
     return "no quotex session" in str(exc).lower()
 
 
+def _has_live_session(hub) -> bool:
+    """True when the running engine holds a venue session right now.
+
+    ``--ssid`` and ``QX_SSID`` never touch the disk, so the saved-file status
+    alone would tell an operator staring at a live terminal that they have no
+    session at all.
+    """
+    engine = getattr(hub, "engine", None)
+    if engine is None:
+        return False
+    return bool(getattr(getattr(engine.feed, "api", None), "ssid", ""))
+
+
 def _reseat_session(engine, ssid: str) -> None:
     """Re-seat a live engine on a fresh session, with no restart.
 
@@ -245,7 +258,9 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace) -> int:
         pending.append(ssid)
 
     hub = EngineHub(None, cfg)
-    hub.pairing = PairingController(cfg, _on_ready)
+    hub.pairing = PairingController(
+        cfg, _on_ready,
+        probe=lambda: _has_live_session(hub))
     web = WebTerminal(hub, host=host, port=port)
     web.start()
     print(f"  ▸ web terminal : http://{host}:{port}")

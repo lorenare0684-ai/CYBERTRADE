@@ -56,9 +56,14 @@ class PairingController:
     """
 
     def __init__(self, config: AppConfig,
-                 on_ready: Callable[[str, bool], None]) -> None:
+                 on_ready: Callable[[str, bool], None],
+                 probe: Optional[Callable[[], bool]] = None) -> None:
         self.config = config
         self.on_ready = on_ready
+        # "is a working session in hand right now?" -- the saved file is only
+        # half the story: --ssid and QX_SSID never touch the disk, and a
+        # running engine may hold a cookie no file describes.
+        self.probe = probe
         self._lock = threading.RLock()
         self._state = IDLE
         self._message = session_status(getattr(config, "qx_session_path", ""))
@@ -79,8 +84,21 @@ class PairingController:
         with self._lock:
             return self._state in (LAUNCHING, WAITING)
 
+    def _idle_message(self) -> str:
+        """What "nothing is happening" looks like, honestly.
+
+        A terminal that already holds a session must not claim it has none --
+        that is the message an operator reads when they open RE-PAIR VENUE on
+        a running engine.
+        """
+        if self._state == IDLE and self._active():
+            return ("a venue session is live — re-pair only if it dies")
+        return session_status(getattr(self.config, "qx_session_path", ""))
+
     def status(self) -> Dict[str, Any]:
         with self._lock:
+            if self._state == IDLE and not self._message.startswith("pairing"):
+                self._message = self._idle_message()
             out = {
                 "state": self._state,
                 "busy": self._state in (LAUNCHING, WAITING),
@@ -95,7 +113,16 @@ class PairingController:
                     getattr(self.config, "qx_session_path", "")),
                 "session_path": getattr(self.config, "qx_session_path", ""),
             }
+        out["active"] = self._active()
         return out
+
+    def _active(self) -> bool:
+        if self.probe is not None:
+            try:
+                return bool(self.probe())
+            except Exception:  # noqa: BLE001 - a probe must never break status
+                return False
+        return False
 
     # -- actions ------------------------------------------------------------
     def start(self, profile: str, port: Any, timeout: Any,

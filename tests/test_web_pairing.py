@@ -236,6 +236,25 @@ class TestPairingController(unittest.TestCase):
         hold["on_done"]({"ssid": "QX.stale"})
         self.assertEqual(self.ready, [("QX.new", True)])
 
+    def test_a_live_terminal_does_not_claim_to_have_no_session(self):
+        """The message an operator reads when opening RE-PAIR on a live engine."""
+        from cybertrade.web.pairing import PairingController
+
+        live = PairingController(self.cfg, lambda s, p: None, probe=lambda: True)
+        st = live.status()
+        self.assertTrue(st["active"])
+        self.assertIn("live", st["message"])
+        self.assertNotIn("no session yet", st["message"])
+
+    def test_a_broken_probe_never_breaks_status(self):
+        from cybertrade.web.pairing import PairingController
+
+        def boom():
+            raise RuntimeError("probe exploded")
+
+        ctl = PairingController(self.cfg, lambda s, p: None, probe=boom)
+        self.assertFalse(ctl.status()["active"])
+
     def test_status_describes_the_disk_session(self):
         st = self.ctl.status()
         self.assertIn("session", st)
