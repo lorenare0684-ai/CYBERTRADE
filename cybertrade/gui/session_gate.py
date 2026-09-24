@@ -61,6 +61,11 @@ class SessionGate(tk.Tk):
 
         self._build()
         self.protocol("WM_DELETE_WINDOW", self._cancel)
+        # a purse already resolved from --demo/--real or the config is not a
+        # guess, so carry it into the window instead of asking again
+        chosen = getattr(config.broker, "demo_account", None)
+        if chosen is not None:
+            self.purse.set("practice" if chosen else "real")
         self._refresh_status()
 
     # -- layout ------------------------------------------------------------

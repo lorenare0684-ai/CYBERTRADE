@@ -539,6 +539,14 @@ class TestSessionGate(unittest.TestCase):
         self.assertIn("CHROME LOGIN", self.gate.login_btn.label)
         self.assertEqual(self.gate.purse.get(), "")
 
+    def test_a_cli_purse_carries_into_the_window(self):
+        """--demo/--real is an explicit choice, so the gate must not re-ask."""
+        for flag, expected in ((True, "practice"), (False, "real")):
+            self.cfg.broker.demo_account = flag
+            gate = self.gate_mod.SessionGate(self.cfg)
+            self.addCleanup(gate.destroy)
+            self.assertEqual(gate.purse.get(), expected)
+
     def test_defaults_match_the_cli(self):
         self.assertEqual(self.gate.profile_var.get(), pairing.DEFAULT_PROFILE)
         self.assertEqual(self.gate.port_var.get(),
