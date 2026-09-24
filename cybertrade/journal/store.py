@@ -61,11 +61,11 @@ class TradeJournal:
 
     def __init__(self, path: str = "data/journal.db") -> None:
         self.path = path
-        parent = os.path.dirname(os.path.abspath(path))
-        if parent:
-            os.makedirs(parent, exist_ok=True)
         self._lock = threading.RLock()
         try:
+            parent = os.path.dirname(os.path.abspath(path))
+            if parent:
+                os.makedirs(parent, exist_ok=True)
             # A user may point the journal anywhere; on Windows a deep
             # absolute path needs the \\?\ prefix or open() fails past 260
             # characters with an error that names nothing useful.
@@ -75,7 +75,10 @@ class TradeJournal:
             with self._lock:
                 self._conn.executescript(_SCHEMA)
                 self._conn.commit()
-        except sqlite3.Error as exc:
+        except (sqlite3.Error, OSError) as exc:
+            # makedirs sits inside the guard on purpose: an unwritable
+            # journal directory is a JournalError with a path in it, not a
+            # bare PermissionError the operator has to interpret.
             raise JournalError(f"cannot open journal at {path}: {exc}") from exc
 
     # -- writes ------------------------------------------------------------

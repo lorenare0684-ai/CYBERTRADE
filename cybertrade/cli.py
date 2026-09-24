@@ -65,7 +65,8 @@ def _require_writable_data_dir(cfg: AppConfig) -> None:
     """
     paths = [cfg.log_path, cfg.journal_path, cfg.qx_session_path,
              cfg.calibration_path, cfg.operator_path,
-             cfg.continuity_path, cfg.heartbeat_path]
+             cfg.continuity_path, cfg.heartbeat_path,
+             getattr(cfg, "config_path", "")]
     checked = set()
     for path in paths:
         parent = os.path.dirname(os.path.abspath(path))
