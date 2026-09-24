@@ -662,5 +662,88 @@ class TestUnknownCommandOnALiveTerminal(unittest.TestCase):
 
 
 
+class TestALiveTerminalDoesNotLieAboutItsSession(unittest.TestCase):
+    """``--ssid``/``QX_SSID`` never touch disk.
+
+    A running engine holding an in-memory session used to report
+    ``session: "no session yet"`` out of the same payload whose ``message``
+    and ``active`` keys said the session was live. An operator reading the
+    status label would re-pair a terminal that is already paired.
+    """
+
+    def setUp(self):
+        from cybertrade.web.pairing import PairingController
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = _cfg(self.tmp.name)
+        self.hub = EngineHub(None, self.cfg)
+        self.live = False
+        self.hub.pairing = PairingController(
+            self.cfg, lambda ssid, purse: None,
+            probe=lambda: self.live)
+
+    def test_the_status_key_agrees_with_the_probe(self):
+        self.assertIn("no session yet", self.hub.pairing.status()["session"])
+        self.live = True
+        st = self.hub.pairing.status()
+        self.assertTrue(st["active"])
+        self.assertIn("live", st["session"])
+        self.assertNotIn("no session yet", st["session"])
+
+    def test_the_raw_file_status_is_still_available(self):
+        self.live = True
+        st = self.hub.pairing.status()
+        self.assertIn("no session yet", st["saved"])
+        self.assertNotEqual(st["session"], st["saved"])
+
+    def test_the_message_already_said_it_and_now_so_does_session(self):
+        self.live = True
+        st = self.hub.pairing.status()
+        self.assertIn("re-pair only if it dies", st["message"])
+        self.assertNotIn("no session yet", st["session"])
+
+    def test_a_saved_session_still_reports_the_domain(self):
+        from cybertrade.brokers.quotex.pairing import save_session
+
+        save_session(self.cfg.qx_session_path,
+                     {"ssid": "S." + "x" * 32, "cookies": "c=1"})
+        st = self.hub.pairing.status()
+        self.assertIn("session saved for", st["session"])
+
+
+class TestPairedPayloadKeepsItsShape(unittest.TestCase):
+    """The unpaired payload reports ``engine_state``; so must the paired one.
+
+    A client reading the top-level key must not see it vanish the instant a
+    session arrives, or "pairing" is the last state it ever reports.
+    """
+
+    def setUp(self):
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        cfg = _cfg(self.tmp.name)
+        self.hub = EngineHub(_StubEngine(), cfg)
+        self._cfg = cfg
+
+    def test_engine_state_is_present_and_matches_the_snapshot(self):
+        st = self.hub.state()
+        self.assertIn("engine_state", st)
+        self.assertEqual(st["engine_state"],
+                         st["snapshot"]["health"]["engine_state"])
+        self.assertNotEqual(st["engine_state"], "pairing")
+
+    def test_the_unpaired_payload_still_says_pairing(self):
+        from cybertrade.web.server import EngineHub
+
+        hub = EngineHub(None, self._cfg)
+        st = hub.state()
+        self.assertEqual(st["engine_state"], "pairing")
+        self.assertFalse(st["paired"])
+
+
 if __name__ == "__main__":
     unittest.main()

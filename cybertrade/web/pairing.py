@@ -99,6 +99,13 @@ class PairingController:
         with self._lock:
             if self._state == IDLE and not self._message.startswith("pairing"):
                 self._message = self._idle_message()
+            live = self._active()
+            # The saved-file status is not the whole truth: --ssid and
+            # QX_SSID never touch disk, so a running engine would report
+            # "no session yet" out of the same payload that says the
+            # session is live. Both keys must agree.
+            saved = session_status(
+                getattr(self.config, "qx_session_path", ""))
             out = {
                 "state": self._state,
                 "busy": self._state in (LAUNCHING, WAITING),
@@ -109,11 +116,12 @@ class PairingController:
                 "profile": self._profile,
                 "elapsed": round(time.time() - self._started, 1)
                 if self._started else 0.0,
-                "session": session_status(
-                    getattr(self.config, "qx_session_path", "")),
+                "session": ("venue session live (held in memory)"
+                            if live else saved),
+                "saved": saved,
                 "session_path": getattr(self.config, "qx_session_path", ""),
             }
-        out["active"] = self._active()
+        out["active"] = live
         return out
 
     def _active(self) -> bool:

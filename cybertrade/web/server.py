@@ -161,6 +161,10 @@ class EngineHub:
             "ts": timex.now(),
             "uptime": timex.now() - self.started,
             "snapshot": snap,
+            # The unpaired payload sets this too; a client that reads the
+            # top-level key must not see it vanish the moment a session
+            # arrives, or "pairing" is the last state it ever reports.
+            "engine_state": (snap.get("health") or {}).get("engine_state", "disarmed"),
             "assets": self.engine.feed.assets,
             "trades": [t.to_dict() for t in self.engine.oms.recent_trades(30)],
             "positions": self._positions_block(),
