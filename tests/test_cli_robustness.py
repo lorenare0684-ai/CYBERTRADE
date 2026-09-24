@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 from cybertrade.cli import _bounded_int, main
@@ -123,6 +124,92 @@ class TestMontecarloAcceptsARealSample(unittest.TestCase):
         proc = _run_cli(["montecarlo", "--pnl", "8.5,-10", "--runs", "100000",
                          "--horizon", "10"])
         self.assertEqual(proc.returncode, 0, proc.stderr.decode()[:300])
+
+
+class TestThePortIsCheckedBeforeItIsBound(unittest.TestCase):
+    """``web --port 99999`` used to reach bind() and raise OverflowError.
+
+    On Windows that is a traceback flash behind a console that closes before
+    it can be read. A typo is a usage error: exit 2 and a plain message.
+    """
+
+    def test_out_of_range_ports_are_a_clean_usage_error(self):
+        for port in (99999, -1, 70000, 65536, 100000):
+            with self.subTest(port=port):
+                proc = _run_cli(["web", "--demo", "--yes", "--port", str(port)],
+                                timeout=40)
+                out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+                self.assertNotIn("Traceback", out)
+                self.assertNotIn("OverflowError", out)
+                self.assertEqual(proc.returncode, 2, out[-200:])
+                self.assertIn("--port must be 0-65535", out)
+
+    def test_a_non_numeric_port_is_rejected_by_argparse(self):
+        proc = _run_cli(["web", "--demo", "--yes", "--port", "abc"], timeout=40)
+        self.assertEqual(proc.returncode, 2)
+        self.assertNotIn("Traceback", (proc.stdout + proc.stderr).decode())
+
+    def test_a_busy_port_is_explained_not_thrown(self):
+        """A second terminal on the same port is the common case."""
+        import socket
+
+        s = socket.socket()
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("0.0.0.0", 0))
+        s.listen(1)
+        busy = s.getsockname()[1]
+        try:
+            proc = _run_cli(["web", "--demo", "--yes", "--port", str(busy)],
+                            timeout=60)
+        finally:
+            s.close()
+        out = (proc.stdout + proc.stderr).decode("utf-8", "replace")
+        self.assertNotIn("Traceback", out)
+        self.assertIn("cannot listen", out)
+        self.assertIn("--port", out)          # tells the operator what to do
+        self.assertEqual(proc.returncode, 1)
+
+    def test_port_zero_reports_the_port_the_os_picked(self):
+        """:0 is not an address; the bound one is.
+
+        The terminal serves forever, so this has to start it, let it bind,
+        kill it, and read what it printed. ``-u`` matters: block-buffered
+        stdout is lost when the process is terminated.
+        """
+        import signal
+
+        env = dict(os.environ, PYTHONPATH=os.getcwd(),
+                   PYTHONIOENCODING="utf-8")
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-m", "cybertrade",
+             "web", "--demo", "--yes", "--port", "0"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, env=env, cwd=os.getcwd())
+        try:
+            chunks = []
+            deadline = time.time() + 25
+            while time.time() < deadline:
+                line = proc.stdout.readline()
+                if not line:
+                    break
+                chunks.append(line)
+                if b"web terminal : http://" in line:
+                    break
+            proc.send_signal(signal.SIGINT)
+            try:
+                rest, _ = proc.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                rest, _ = proc.communicate(timeout=10)
+            out = (b"".join(chunks) + (rest or b"")).decode("utf-8", "replace")
+            self.assertNotIn("Traceback", out)
+            self.assertIn("web terminal", out)
+            self.assertNotIn(":0\n", out)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
 
 
 if __name__ == "__main__":

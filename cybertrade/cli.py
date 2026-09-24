@@ -258,7 +258,8 @@ def _reseat_session(engine, ssid: str) -> None:
     engine.health.note_message("venue session re-paired in place")
 
 
-def _run_web(cfg: AppConfig, args: argparse.Namespace) -> int:
+def _run_web(cfg: AppConfig, args: argparse.Namespace,
+             port: Optional[int] = None) -> int:
     """Serve the browser terminal, pairing a session first if none exists.
 
     Same dead end as the GUI: no session means no venue candles, which means
@@ -270,7 +271,8 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .web.server import EngineHub, WebTerminal
 
     host = args.host or cfg.display.web_host
-    port = args.port or cfg.display.web_port
+    if port is None:
+        port = _checked_port(args.port, cfg.display.web_port)
     pending: List[Any] = []
 
     def _on_ready(ssid: str, purse: bool) -> None:
@@ -284,8 +286,22 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace) -> int:
         cfg, _on_ready,
         probe=lambda: _has_live_session(hub))
     web = WebTerminal(hub, host=host, port=port)
-    web.start()
-    print(f"  ▸ web terminal : http://{host}:{port}")
+    try:
+        web.start()
+    except OSError as exc:
+        # A second terminal on the same port is the common case, and it is
+        # an answerable question -- not a traceback.
+        web.stop()
+        print(f"  ✗ cannot listen on {host}:{port} — {exc}", file=sys.stderr)
+        print("  another CYBERTRADE terminal is probably already using it;",
+              file=sys.stderr)
+        print("  pick another with --port N, or stop the other one first.",
+              file=sys.stderr)
+        return 1
+    # --port 0 asks the OS for a free port; the one it picked is the only
+    # useful thing to print, and ":0" is not an address anyone can visit.
+    bound = getattr(getattr(web, "_httpd", None), "server_address", ("", port))[1]
+    print(f"  ▸ web terminal : http://{host}:{bound}")
 
     engine = None
     try:
@@ -380,11 +396,17 @@ def cmd_gui(args: argparse.Namespace) -> int:
 
 def cmd_web(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
+    try:
+        port = _checked_port(args.port, cfg.display.web_port)
+    except ConfigError as exc:
+        # A typo is a usage error, not a safety hold: exit 2 and say so.
+        print(f"  ✗ {exc}", file=sys.stderr)
+        return 2
     _resolve_purse(cfg, args)
     print(BANNER)
     if not _confirm_live(args, cfg):
         return 1
-    return _run_web(cfg, args)
+    return _run_web(cfg, args, port=port)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -562,6 +584,24 @@ def _bounded_int(raw: Any, lo: int, hi: int, what: str) -> int:
     if val > hi:
         raise ConfigError(f"{what} must be at most {hi} (got {val})")
     return val
+
+
+def _checked_port(raw: Any, fallback: int) -> int:
+    """A TCP port, or a clean ConfigError — never a bind() traceback.
+
+    ``web --port 99999`` used to reach ``ThreadingHTTPServer`` and raise
+    ``OverflowError: bind(): port must be 0-65535``, which on Windows is a
+    traceback flash behind a console that closes before it can be read.
+    """
+    if raw is None or raw == "":
+        return int(fallback)
+    try:
+        port = int(raw)
+    except (TypeError, ValueError):
+        raise ConfigError(f"--port must be a whole number, not {raw!r}")
+    if not 0 <= port <= 65535:
+        raise ConfigError(f"--port must be 0-65535 (got {port})")
+    return port
 
 
 def cmd_montecarlo(args: argparse.Namespace) -> int:

@@ -684,7 +684,10 @@ class WebTerminal:
             target=self._httpd.serve_forever, daemon=True, name="web-terminal"
         )
         self._thread.start()
-        log.info("web terminal live at http://%s:%d", self.host, self.port)
+        # port 0 asks the OS for a free one; the port it picked is the only
+        # address that actually works, and ":0" is not an address.
+        bound = self._httpd.server_address[1] or self.port
+        log.info("web terminal live at http://%s:%d", self.host, bound)
 
     def stop(self) -> None:
         if self._httpd:
