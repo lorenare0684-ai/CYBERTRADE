@@ -1,6 +1,6 @@
 @echo off
-REM CYBERTRADE ONE-CLICK - Miniconda - No Anaconda Prompt - FIXED v2
-REM Just double-click
+REM CYBERTRADE ONE-CLICK - Miniconda - Asks Web or GUI
+REM Just double-click - finds Miniconda, creates env, asks what to run
 
 setlocal
 
@@ -8,8 +8,8 @@ set ENV_NAME=cybertrade
 set ENV_FILE=environment.yml
 
 echo ========================================================
-echo  CYBERTRADE ONE-CLICK START - Miniconda fixed v2
-echo  Just double-click - auto-finds Miniconda, creates env, runs
+echo  CYBERTRADE ONE-CLICK - Miniconda
+echo  Just double-click - auto-finds Miniconda, creates env
 echo ========================================================
 echo.
 
@@ -103,13 +103,65 @@ python -m cybertrade doctor
 
 echo.
 echo ========================================================
-echo  OK Starting CYBERTRADE web terminal
-echo  Browser will open at http://localhost:8899
-echo  Press Ctrl+C to stop
+echo  CYBERTRADE READY - Choose what to run:
 echo ========================================================
+echo  1 - Web HUD - browser at http://localhost:8899 - recommended
+echo  2 - Desktop GUI - tkinter window
+echo  3 - Doctor only - 10 checks
+echo  4 - Backtest - 200 bars quick test
+echo  5 - Run paper trading - headless
 echo.
+set /p CHOICE=Enter choice 1-5 [1]: 
+if "%CHOICE%"=="" set CHOICE=1
 
+if "%CHOICE%"=="1" goto :run_web
+if "%CHOICE%"=="2" goto :run_gui
+if "%CHOICE%"=="3" goto :run_doctor
+if "%CHOICE%"=="4" goto :run_backtest
+if "%CHOICE%"=="5" goto :run_paper
+if /I "%CHOICE%"=="W" goto :run_web
+if /I "%CHOICE%"=="WEB" goto :run_web
+if /I "%CHOICE%"=="G" goto :run_gui
+if /I "%CHOICE%"=="GUI" goto :run_gui
+
+echo Invalid choice, running Web HUD...
+goto :run_web
+
+:run_web
+echo.
+echo Starting Web HUD at http://localhost:8899
+echo Browser will open automatically, Ctrl+C to stop
+echo.
 python -m cybertrade web --port 8899 --auto
+goto :end
 
+:run_gui
+echo.
+echo Starting Desktop GUI...
+echo.
+python run_gui.py
+goto :end
+
+:run_doctor
+echo.
+echo Running Doctor...
+python -m cybertrade doctor
+pause
+goto :end
+
+:run_backtest
+echo.
+echo Running Backtest 200 bars...
+python -m cybertrade backtest --bars 200
+pause
+goto :end
+
+:run_paper
+echo.
+echo Running Paper Trading - headless - Ctrl+C to stop
+python -m cybertrade run
+goto :end
+
+:end
 pause
 endlocal
