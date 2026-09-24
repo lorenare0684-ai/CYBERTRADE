@@ -108,21 +108,25 @@ echo ========================================================
 echo  1 - Web HUD - browser at http://localhost:8899 - recommended
 echo  2 - Desktop GUI - tkinter window
 echo  3 - Doctor only - environment self-test
-echo  4 - Run LIVE trading - headless - REAL ORDERS
-echo  5 - Quotex session - login / status / warm
+echo  4 - Pair the Quotex session (FIRST RUN - opens Chrome, you solve the CAPTCHA)
+echo  5 - Check / warm an existing session
+echo  6 - Run LIVE trading - headless - REAL ORDERS
 echo.
-set /p CHOICE=Enter choice 1-5 [1]: 
+set /p CHOICE=Enter choice 1-6 [1]: 
 if "%CHOICE%"=="" set CHOICE=1
 
 if "%CHOICE%"=="1" goto :run_web
 if "%CHOICE%"=="2" goto :run_gui
 if "%CHOICE%"=="3" goto :run_doctor
-if "%CHOICE%"=="4" goto :run_live
+if "%CHOICE%"=="4" goto :run_login
 if "%CHOICE%"=="5" goto :run_session
+if "%CHOICE%"=="6" goto :run_live
 if /I "%CHOICE%"=="W" goto :run_web
 if /I "%CHOICE%"=="WEB" goto :run_web
 if /I "%CHOICE%"=="G" goto :run_gui
 if /I "%CHOICE%"=="GUI" goto :run_gui
+if /I "%CHOICE%"=="L" goto :run_login
+if /I "%CHOICE%"=="LOGIN" goto :run_login
 
 echo Invalid choice, running Web HUD...
 goto :run_web
@@ -152,13 +156,56 @@ goto :end
 :run_live
 echo.
 echo LIVE TRADING - real orders at Quotex - Ctrl+C to stop
+echo You will be asked which purse, then to type I UNDERSTAND.
+echo.
 python -m cybertrade run
+if errorlevel 1 (
+    echo.
+    echo Did not start. If it mentioned a venue session, run option 4 first.
+    pause
+)
+goto :end
+
+:run_login
+echo.
+echo ========================================================
+echo  PAIR THE VENUE SESSION
+echo  Chrome will open on qxbroker.com. Log in and solve the
+echo  CAPTCHA yourself - this only reads the sessionid cookie
+echo  Chrome hands back over localhost DevTools. Nothing is
+echo  bypassed and nothing is automated past the CAPTCHA.
+echo ========================================================
+echo.
+python -m cybertrade quotex login
+if errorlevel 1 goto :login_failed
+echo.
+echo Session paired. Checking it...
+python -m cybertrade quotex status
+echo.
+echo Warming the venue books...
+python -m cybertrade quotex warm --bars 250
+goto :end
+
+:login_failed
+echo.
+echo Pairing did not complete. Common causes:
+echo   - Chrome not found - set CYBERTRADE_CHROME=C:\path\to\chrome.exe
+echo   - the window was closed before the login finished
+echo   - no sessionid cookie appeared within the wait budget
+echo Re-run option 4 to try again.
+pause
 goto :end
 
 :run_session
 echo.
 echo Checking the Quotex session...
 python -m cybertrade quotex status
+if errorlevel 1 (
+    echo.
+    echo No session yet - run option 4 to pair one with Chrome.
+    pause
+    goto :end
+)
 echo.
 echo Warming the venue books...
 python -m cybertrade quotex warm --bars 250

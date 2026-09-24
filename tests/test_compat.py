@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -547,6 +548,79 @@ class TestClosedStdinHoldsRatherThanCrashes(unittest.TestCase):
                     timeout=180)
                 self.assertNotIn(b"Traceback", r.stdout + r.stderr, cmd)
                 self.assertEqual(r.returncode, SAFETY_HOLD_EXIT, cmd)
+
+
+class TestWindowsLauncher(unittest.TestCase):
+    """CYBERTRADE.bat is the primary Windows entry point.
+
+    It cannot be executed here (no cmd.exe), so it is checked structurally
+    instead: every goto must land on a label, every command it invokes must
+    exist, and every file it names must be present. A launcher that rots is
+    worse than no launcher -- it is the first thing a new operator runs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        cls.path = os.path.join(repo, "CYBERTRADE.bat")
+        cls.repo = repo
+        cls.text = io.open(cls.path, encoding="utf-8", newline="").read()
+
+    def test_every_goto_lands_on_a_label(self):
+        labels = set(re.findall(r"^:(\w+)", self.text, re.M))
+        gotos = set(re.findall(r"goto\s+:(\w+)", self.text))
+        self.assertTrue(gotos, "no gotos found -- the menu would do nothing")
+        self.assertEqual(gotos - labels, set(),
+                         f"dangling goto(s): {sorted(gotos - labels)}")
+
+    def test_every_label_is_reachable(self):
+        """A label nothing jumps to is dead weight, and a sign of drift."""
+        labels = set(re.findall(r"^:(\w+)", self.text, re.M))
+        gotos = set(re.findall(r"goto\s+:(\w+)", self.text))
+        self.assertEqual(labels - gotos, set(),
+                         f"unreachable label(s): {sorted(labels - gotos)}")
+
+    def test_every_invoked_subcommand_exists(self):
+        import cybertrade.cli as cli
+
+        parser = cli.build_parser()
+        # subparsers live under the "command" choices
+        known = set()
+        for action in parser._actions:
+            known.update(getattr(action, "choices", {}) or {})
+        self.assertTrue(known, "no subcommands found on the parser")
+        used = set(re.findall(r"python\s+-m\s+cybertrade\s+(\w+)", self.text))
+        self.assertTrue(used, "the launcher runs no cybertrade command")
+        self.assertEqual(used - known, set(),
+                         f"unknown subcommand(s): {sorted(used - known)}")
+
+    def test_every_named_file_exists(self):
+        for name in ("environment.yml", "run_gui.py"):
+            with self.subTest(name=name):
+                self.assertTrue(os.path.isfile(os.path.join(self.repo, name)))
+
+    def test_the_login_option_actually_logs_in(self):
+        """The menu once offered login but only ran status and warm."""
+        self.assertIn(":run_login", self.text)
+        self.assertRegex(self.text, r":run_login[\s\S]*?quotex\s+login")
+
+    def test_a_failed_pairing_is_explained_not_silent(self):
+        self.assertIn(":login_failed", self.text)
+        self.assertIn("CYBERTRADE_CHROME", self.text)
+
+    def test_line_endings_are_consistent(self):
+        """A mixed-ending .bat executes garbage on Windows."""
+        crlf = self.text.count("\r\n")
+        lf = self.text.count("\n")
+        self.assertTrue(crlf == lf or crlf == 0,
+                        f"mixed line endings: {crlf} CRLF vs {lf} LF")
+
+    def test_the_launcher_is_declared_crlf_in_gitattributes(self):
+        """.gitattributes must ask for CRLF, or Git checks out LF and cmd
+        mis-parses labels."""
+        ga = io.open(os.path.join(self.repo, ".gitattributes"),
+                     encoding="utf-8").read()
+        self.assertRegex(ga, r"\*\.bat\s+text\s+eol=crlf")
 
 
 if __name__ == "__main__":
