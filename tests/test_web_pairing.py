@@ -1,0 +1,437 @@
+"""Browser-terminal pairing: the same Chrome flow, driven over HTTP.
+
+The desktop GUI pairs from a Tk window; the browser terminal pairs from
+``/api/pair/*``. The hard part — a human logging in and solving a CAPTCHA
+across several requests — is identical, so these tests care about the things
+HTTP makes different:
+
+- the terminal must boot with **no engine** when no session exists, and must
+  not report a balance, a candle or an open order it does not have;
+- a cookie landing on a worker thread must be adopted serially, exactly once;
+- re-pairing a live engine must re-seat the api, never rebuild the engine;
+- a cancelled or superseded attempt must not attach anything.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import tempfile
+import time
+import unittest
+import unittest.mock as mock
+import itertools
+import urllib.error
+import urllib.request
+
+from cybertrade.config import AppConfig
+from cybertrade.exceptions import ConfigError
+
+from tests.venue_stubs import VenueFeed, VenueStub
+
+PAIR = "cybertrade.web.pairing"
+
+# each test boots its own terminal and never stops it (the thread is a
+# daemon), so ports must never be reused or a stale server answers.
+_PORT = itertools.count(18731)
+
+
+def _cfg(tmp, name="qx.json"):
+    cfg = AppConfig()
+    cfg.qx_session_path = os.path.join(tmp, name)
+    cfg.journal_path = os.path.join(tmp, "journal.db")
+    cfg.calibration_path = os.path.join(tmp, "cal.json")
+    cfg.operator_path = os.path.join(tmp, "operator.json")
+    cfg.continuity_path = os.path.join(tmp, "continuity.json")
+    cfg.heartbeat_path = os.path.join(tmp, "heartbeat.json")
+    return cfg
+
+
+class _StubApi:
+    """The seam ``_reseat_session`` touches; no venue protocol, no network."""
+
+    def __init__(self, ssid="", connected=True):
+        self.ssid = ssid
+        self.connected = connected
+
+    def set_ssid(self, ssid, cookies=""):
+        self.ssid = ssid
+        return ssid
+
+    def connect(self, authorize=True):
+        return self.connected
+
+
+class _StubEngine:
+    """A real engine on the stub venue, with a stubbed api for re-seating.
+
+    It has to be the genuine :class:`TradingEngine` because ``hub.state()``
+    walks the whole machine — snapshot, oms, survivor, corr, ensemble — and a
+    hand-rolled double would be testing the hub against a fiction. Only the
+    venue api is faked, so ``_reseat_session`` exercises the real seam with no
+    network.
+    """
+
+    def __init__(self, connected=True):
+        from cybertrade.bot.engine import TradingEngine
+
+        cfg = AppConfig()
+        tmp = tempfile.mkdtemp(prefix="stub-eng-")
+        cfg.journal_path = os.path.join(tmp, "j.db")
+        cfg.calibration_path = os.path.join(tmp, "c.json")
+        cfg.operator_path = os.path.join(tmp, "o.json")
+        cfg.continuity_path = os.path.join(tmp, "k.json")
+        cfg.heartbeat_path = os.path.join(tmp, "h.json")
+        feed = VenueFeed(assets=["EURUSD_otc"])
+        feed.api = _StubApi(connected=connected)
+        self._eng = TradingEngine(cfg, feed=feed, broker=VenueStub())
+        self._eng.config = cfg
+
+    def __getattr__(self, name):
+        return getattr(self._eng, name)
+
+    def shutdown(self):
+        self._eng.shutdown()
+        self.closed = True
+
+
+class TestPairingController(unittest.TestCase):
+    """The state machine behind ``/api/pair/*``."""
+
+    def setUp(self):
+        from cybertrade.web.pairing import PairingController
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = _cfg(self.tmp.name)
+        self.ready = []
+        self.ctl = PairingController(self.cfg,
+                                    lambda ssid, purse: self.ready.append(
+                                        (ssid, purse)))
+        self._real = PairingController.start.__globals__["run_pairing"]
+
+    def tearDown(self):
+        import cybertrade.web.pairing as wp
+
+        wp.run_pairing = self._real
+
+    def _ok(self, sess=None):
+        import cybertrade.web.pairing as wp
+
+        # `sess or {...}` would turn an empty dict into the happy path
+        payload = {"ssid": "QX.x"} if sess is None else sess
+        wp.run_pairing = lambda **kw: kw["on_done"](payload)
+
+    def _boom(self, exc):
+        import cybertrade.web.pairing as wp
+
+        wp.run_pairing = lambda **kw: kw["on_error"](exc)
+
+    # -- gating ------------------------------------------------------------
+    def test_no_purse_never_pairs(self):
+        r = self.ctl.start("data/chrome-profile", 9333, 240, None)
+        self.assertFalse(r["ok"])
+        self.assertIn("purse", r["error"])
+        self.assertEqual(self.ctl.state(), "idle")
+        self.assertEqual(self.ready, [])
+
+    def test_a_numeric_purse_string_is_refused(self):
+        r = self.ctl.start("p", 9333, 240, "practice")
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.ready, [])
+
+    def test_bad_form_never_launches_chrome(self):
+        r = self.ctl.start("p", "not-a-port", 240, True)
+        self.assertFalse(r["ok"])
+        self.assertIn("port", r["error"])
+        self.assertEqual(self.ctl.state(), "idle")
+
+    def test_a_blank_profile_falls_back_to_the_default(self):
+        seen = {}
+        import cybertrade.web.pairing as wp
+
+        def spy(**kw):
+            seen.update(kw)
+            return kw["on_done"]({"ssid": "QX.x"})
+
+        wp.run_pairing = spy
+        self.ctl.start("", 9333, 240, True)
+        self.assertEqual(seen["profile"], "data/chrome-profile")
+
+    # -- the state machine -------------------------------------------------
+    def test_success_reports_ready_and_the_purse(self):
+        self._ok()
+        r = self.ctl.start("data/chrome-profile", 9333, 240, False)
+        self.assertTrue(r["ok"])
+        # WAITING is set *before* the launch, so a worker that finishes first
+        # is never clobbered by start()'s own bookkeeping
+        self.assertEqual(self.ctl.state(), "ready")
+        self.assertEqual(self.ready, [("QX.x", False)])
+
+    def test_a_synchronous_launcher_is_not_clobbered(self):
+        """The bug this guards: start() used to overwrite the worker's READY."""
+        self._ok()
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        st = self.ctl.status()
+        self.assertEqual(st["state"], "ready")
+        self.assertTrue(st["ssid_present"])
+
+    def test_failure_is_reported_and_recovers(self):
+        self._boom(TimeoutError("no session after 240s"))
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        st = self.ctl.status()
+        self.assertEqual(st["state"], "failed")
+        self.assertIn("no session after 240s", st["message"])
+        self.assertEqual(self.ready, [])
+        # the operator can simply try again
+        self._ok()
+        r = self.ctl.start("data/chrome-profile", 9333, 240, True)
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.ctl.state(), "ready")
+
+    def test_an_empty_cookie_is_a_failure_not_a_ready(self):
+        self._ok({})
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        self.assertEqual(self.ctl.state(), "failed")
+        self.assertEqual(self.ready, [])
+
+    def test_a_second_start_is_refused_while_busy(self):
+        import cybertrade.web.pairing as wp
+
+        started = []
+        wp.run_pairing = lambda **kw: started.append(1)
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        r = self.ctl.start("data/chrome-profile", 9333, 240, True)
+        self.assertFalse(r["ok"])
+        self.assertIn("already running", r["error"])
+        self.assertEqual(len(started), 1)
+
+    def test_cancel_ignores_a_late_cookie(self):
+        """A cookie arriving after cancel must not attach anything."""
+        import cybertrade.web.pairing as wp
+
+        hold = {}
+        wp.run_pairing = lambda **kw: hold.update(kw)
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        r = self.ctl.cancel()
+        self.assertTrue(r["ok"])
+        self.assertEqual(self.ctl.state(), "idle")
+        # the worker finally reports in — too late
+        hold["on_done"]({"ssid": "QX.late"})
+        self.assertEqual(self.ctl.state(), "idle")
+        self.assertEqual(self.ready, [])
+
+    def test_a_superseded_attempt_cannot_report(self):
+        import cybertrade.web.pairing as wp
+
+        hold = {}
+        wp.run_pairing = lambda **kw: hold.update(kw)
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        self.ctl.cancel()
+        self._ok({"ssid": "QX.new"})
+        self.ctl.start("data/chrome-profile", 9333, 240, True)
+        self.assertEqual(self.ctl.state(), "ready")
+        # the stale worker's result is dropped, the fresh one wins
+        hold["on_done"]({"ssid": "QX.stale"})
+        self.assertEqual(self.ready, [("QX.new", True)])
+
+    def test_status_describes_the_disk_session(self):
+        st = self.ctl.status()
+        self.assertIn("session", st)
+        self.assertEqual(st["session_path"], self.cfg.qx_session_path)
+        self.assertFalse(st["busy"])
+
+
+class TestHubWithoutAnEngine(unittest.TestCase):
+    """The payload the browser gets before any session exists."""
+
+    def setUp(self):
+        from cybertrade.web.server import EngineHub
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = _cfg(self.tmp.name)
+        self.hub = EngineHub(None, self.cfg)
+
+    def test_state_reports_no_engine_and_no_balances(self):
+        st = self.hub.state()
+        self.assertFalse(st["paired"])
+        self.assertEqual(st["engine_state"], "pairing")
+        self.assertEqual(st["assets"], [])
+        self.assertEqual(st["trades"], [])
+        self.assertEqual(st["candles"], {})
+        # a balance, a position or a candle it does not have must not appear
+        self.assertEqual(st["snapshot"]["health"]["balance"], 0.0)
+        self.assertEqual(st["snapshot"]["health"]["open_positions"], 0)
+
+    def test_logs_still_flow_without_an_engine(self):
+        self.hub._on_log(type("E", (), {"payload": {
+            "ts": 1.0, "level": "INFO", "name": "x", "msg": "boot"}})())
+        self.assertEqual(len(self.hub.state()["logs"]), 1)
+
+    def test_a_real_engine_reports_paired(self):
+        from cybertrade.web.server import EngineHub
+
+        eng = _StubEngine()
+        hub = EngineHub(eng, self.cfg)
+        st = hub.state()
+        self.assertTrue(st["paired"])
+        self.assertIn("pairing", st)
+
+
+class TestWebBootsWithoutASession(unittest.TestCase):
+    """``cmd_web`` must serve a pairing screen, not refuse to start."""
+
+    def setUp(self):
+        import cybertrade.cli as cli
+        import cybertrade.web.pairing as wp
+
+        self.cli = cli
+        self.wp = wp
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cfg = _cfg(self.tmp.name)
+        self.built = []
+        self.reseats = []
+        self._real_build = cli._build_engine
+        self._real_reseat = cli._reseat_session
+
+        def fake_build(cfg, durable=False):
+            if not cfg.broker.ssid:
+                raise ConfigError(
+                    "no Quotex session — run `cybertrade quotex login`")
+            self.built.append(cfg.broker.ssid)
+            return _StubEngine()
+
+        def fake_reseat(engine, ssid):
+            self.reseats.append(ssid)
+            return self._real_reseat(engine, ssid)
+
+        cli._build_engine = fake_build
+        cli._reseat_session = fake_reseat
+
+    def tearDown(self):
+        self.cli._build_engine = self._real_build
+        self.cli._reseat_session = self._real_reseat
+
+    def _boot(self, auto=True):
+        """Start the terminal with no session and wait for it to listen."""
+        import threading
+
+        port = next(_PORT)
+        args = argparse.Namespace(host="127.0.0.1", port=port, auto=auto)
+        errs = []
+
+        def work():
+            try:
+                self.cli._run_web(self.cfg, args)
+            except Exception as exc:  # noqa: BLE001
+                errs.append(exc)
+
+        threading.Thread(target=work, daemon=True).start()
+        for _ in range(80):
+            try:
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/api/state", timeout=2) as r:
+                    st = json.loads(r.read())
+                return port, st, errs
+            except Exception:  # noqa: BLE001
+                time.sleep(0.1)
+        self.fail(f"terminal never came up: {errs}")
+
+    def _pair(self, port, ssid, purse=True):
+        """POST a pairing whose cookie lands immediately."""
+        self.wp.run_pairing = lambda **kw: kw["on_done"]({"ssid": ssid})
+        body = json.dumps({"profile": "data/chrome-profile", "port": 9333,
+                           "timeout": 30, "purse": purse}).encode()
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/pair/start", data=body,
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            started = json.loads(r.read())
+        self.assertTrue(started["ok"], started)
+        return started
+
+    def _wait_paired(self, port):
+        for _ in range(80):
+            time.sleep(0.1)
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/state", timeout=2) as r:
+                st = json.loads(r.read())
+            if st["paired"]:
+                return st
+        self.fail("engine never attached after pairing")
+
+    def test_boots_unpaired_and_pairs_from_http(self):
+        port, st, errs = self._boot()
+        self.assertFalse(st["paired"])
+        self.assertEqual(st["engine_state"], "pairing")
+        self.assertEqual(self.built, [])            # no engine before a cookie
+        self._pair(port, "QX.first")
+        st = self._wait_paired(port)
+        self.assertEqual(self.built, ["QX.first"])   # built exactly once
+        self.assertTrue(st["paired"])
+
+    def test_the_ssid_is_never_sent_to_the_browser(self):
+        port, _st, _errs = self._boot()
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/pair/status", timeout=5) as r:
+            raw = r.read().decode("utf-8")
+        self.assertNotIn("QX.first", raw)
+        self.assertIn("ssid_present", raw)
+
+    def test_a_rebuild_never_happens_for_a_live_engine(self):
+        port, _st, _errs = self._boot()
+        self._pair(port, "QX.first")
+        self._wait_paired(port)
+        # a re-pair's status stays "ready" from the first success, so wait on
+        # the observable effect rather than the state word
+        self._pair(port, "QX.second", purse=False)
+        for _ in range(100):
+            time.sleep(0.1)
+            if self.reseats:
+                break
+        else:
+            self.fail("the second cookie never reached the running engine")
+        self.assertEqual(self.built, ["QX.first"])    # only the first boot
+        self.assertEqual(self.reseats, ["QX.second"],
+                         "the second cookie must re-seat, not rebuild")
+
+    def test_other_config_errors_still_fail_loudly(self):
+        def boom(cfg, durable=False):
+            raise ConfigError("broker.mode='paper' is not supported")
+
+        self.cli._build_engine = boom
+        args = argparse.Namespace(host="127.0.0.1", port=8901, auto=True)
+        with self.assertRaises(ConfigError):
+            self.cli._run_web(self.cfg, args)
+
+
+class TestReseatSession(unittest.TestCase):
+    """Re-pairing a live engine must not restart it."""
+
+    def setUp(self):
+        import cybertrade.cli as cli
+
+        self.cli = cli
+        self.eng = _StubEngine()
+
+    def test_the_api_is_reseeded_in_place(self):
+        self.cli._reseat_session(self.eng, "QX.new")
+        self.assertEqual(self.eng.feed.api.ssid, "QX.new")
+
+    def test_a_rejected_session_raises(self):
+        eng = _StubEngine(connected=False)
+        with self.assertRaises(ConfigError):
+            self.cli._reseat_session(eng, "QX.new")
+
+    def test_an_engine_without_an_api_is_reported(self):
+        eng = _StubEngine()
+        del eng.feed.api
+        with self.assertRaises(ConfigError):
+            self.cli._reseat_session(eng, "QX.new")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -171,6 +171,27 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
 
 ## 9. Browser pairing (CAPTCHA-safe, Phase-29)
 
+Pairing is offered by **both** terminals, because both need a session before
+either can boot. The flow itself is identical and toolkit-free
+(`cybertrade/gui/pairing.py`), so a Tk window and an HTTP handler drive the
+same code:
+
+- **desktop** — `cybertrade/gui/session_gate.py` opens a pre-flight
+  `SessionGate` when `cmd_gui` cannot build an engine for want of a session;
+  the LINK pane's button re-pairs mid-session.
+- **browser** — `cybertrade/web/pairing.py` owns the state machine
+  (`idle → launching → waiting → ready | failed`), exposed over
+  `POST /api/pair/start`, `GET /api/pair/status` and `POST /api/pair/cancel`.
+  `cmd_web` boots with **no engine** and serves a pairing screen; the engine
+  attaches when a cookie lands, and a later re-pair calls
+  `cli._reseat_session()` — `set_ssid` + `connect` on the live api — so
+  nothing restarts and no position is touched.
+
+Two details that only matter over HTTP: the pairing state must be visible
+across requests (a human takes minutes), and a cookie that lands after a
+cancel or a superseded attempt must be discarded — both are handled by an
+epoch counter on the controller, not by the state word.
+
 Cloudflare's challenge defeats programmatic logins. The fix is **not** a
 headless browser or a CAPTCHA bypass — it is a human:
 

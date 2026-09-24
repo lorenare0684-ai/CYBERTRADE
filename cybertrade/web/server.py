@@ -50,10 +50,11 @@ def broadcast(kind: str, payload: Any) -> None:
 class EngineHub:
     """Bridge between a TradingEngine and the web layer."""
 
-    def __init__(self, engine, config=None) -> None:
+    def __init__(self, engine=None, config=None) -> None:
         self.engine = engine
         self.config = config
         self.started = timex.now()
+        self.pairing = None          # set by cmd_web when booting unpaired
         self._log_lines: List[dict] = []
         default_bus.subscribe(Topic.LOG, self._on_log)
         for topic in (Topic.TICK, Topic.SIGNAL, Topic.SETTLE, Topic.REGIME,
@@ -88,6 +89,45 @@ class EngineHub:
 
     # -- API payloads ------------------------------------------------------
     def state(self) -> Dict[str, Any]:
+        if self.engine is None:
+            # no venue session yet: the HUD shows the pairing screen, and
+            # nothing here reports a balance, a candle or an open order —
+            # none of them exist until a real session does.
+            return {
+                "ts": timex.now(),
+                "uptime": timex.now() - self.started,
+                "paired": False,
+                "engine_state": "pairing",
+                "posture": "NORMAL",
+                "assets": [],
+                "trades": [],
+                "positions": [],
+                "signals": [],
+                "candles": {},
+                "logs": self._log_lines[-80:],
+                "alerts": [],
+                "strategies": [],
+                "clusters": [],
+                "correlation": {},
+                "calendar": [],
+                "edge": {},
+                "flow": {},
+                "tape": {},
+                "session": {},
+                "snapshot": {"health": {"engine_state": "pairing",
+                                        "posture": "NORMAL",
+                                        "feed_ok": False,
+                                        "broker_ok": False,
+                                        "balance": 0.0,
+                                        "open_positions": 0,
+                                        "signals_total": 0,
+                                        "wins": 0, "losses": 0,
+                                        "win_rate": 0.0,
+                                        "drawdown": 0.0,
+                                        "tick_rate": 0.0,
+                                        "status": "PAIRING"}},
+                "pairing": self.pairing.status() if self.pairing else {},
+            }
         snap = self.engine.snapshot()
         candles = {}
         for asset in self.engine.feed.assets[:4]:
@@ -137,6 +177,8 @@ class EngineHub:
             "flow": {a: f.snapshot() for a, f in self.engine.flow.items()},
             "tape": self.engine.tape.stats(),
             "session": self.engine.session_report(),
+            "paired": True,
+            "pairing": self.pairing.status() if self.pairing else {},
         }
 
     def worst_payout(self) -> float:
@@ -319,6 +361,13 @@ class WebTerminal:
                     return self._json(200, terminal.hub.logs())
                 if path == "/api/events":
                     return self._sse()
+                if path == "/api/pair/status":
+                    ctl = getattr(terminal.hub, "pairing", None)
+                    if ctl is None:
+                        return self._json(200, {"state": "unavailable",
+                                                "busy": False,
+                                                "error": "pairing is not offered here"})
+                    return self._json(200, ctl.status())
                 if path == "/api/strategies":
                     return self._json(200, terminal.hub.engine.ensemble.describe())
                 if path == "/api/montecarlo":
@@ -352,6 +401,23 @@ class WebTerminal:
                     return self._json(400, {"error": "bad json"})
                 if parsed.path == "/api/command":
                     return self._json(200, terminal.command(body))
+                if parsed.path == "/api/pair/start":
+                    ctl = getattr(terminal.hub, "pairing", None)
+                    if ctl is None:
+                        return self._json(409, {"ok": False,
+                                                "error": "pairing is not offered here"})
+                    return self._json(200, ctl.start(
+                        profile=body.get("profile", ""),
+                        port=body.get("port", 9333),
+                        timeout=body.get("timeout", 240),
+                        purse=body.get("purse"),
+                    ))
+                if parsed.path == "/api/pair/cancel":
+                    ctl = getattr(terminal.hub, "pairing", None)
+                    if ctl is None:
+                        return self._json(409, {"ok": False,
+                                                "error": "pairing is not offered here"})
+                    return self._json(200, ctl.cancel())
                 return self._json(404, {"error": "not found"})
 
             # -- handlers ---------------------------------------------------

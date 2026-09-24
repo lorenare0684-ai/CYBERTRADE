@@ -222,13 +222,22 @@ polls `Storage.getCookies` over a stdlib websocket (with
 (0600) and verifies via `set_ssid + connect + account_snapshot`. No
 Playwright, no headless browser, no CAPTCHA bypass.
 
-**The GUI pairs too.** `cybertrade gui` needs venue candles, which need a
-session — so instead of dead-ending a first-time operator in a shell it
-opens its own pre-flight window: pick a purse (never defaulted), set the
-profile/port/timeout, hit **CHROME LOGIN**, and the terminal boots the
-moment the cookie lands. The LINK pane carries the same button for
-re-pairing mid-session. Nothing trades, and nothing is simulated, until
-a real session exists.
+**Both terminals pair.** The GUI and the web terminal both need venue
+candles, which need a session — so instead of dead-ending a first-time
+operator in a shell, each opens its own pairing screen: pick a purse (never
+defaulted), set the profile/port/timeout, hit **CHROME LOGIN**, and the
+terminal goes live the moment the cookie lands.
+
+| | desktop GUI (`cybertrade gui`) | browser terminal (`cybertrade web`) |
+|---|---|---|
+| first run | pre-flight `SessionGate` window | pairing screen, no engine yet |
+| mid-session | LINK pane's **CHROME LOGIN** | footer's **RE-PAIR VENUE** |
+| re-pair effect | re-arms on the new cookie | re-seats the api in place — no restart, no rebuild |
+
+The SSID is never written to disk by either path and is never sent to the
+browser: `run_pairing` saves it 0600 and hands it to a callback that re-seats
+the live api. Nothing trades, and nothing is simulated, until a real session
+exists.
 
 **Live modes refuse synthetic tape.** `broker.mode = quotex`
 now wire `LiveQuotexFeed` (`is_synthetic=False`) from a strict

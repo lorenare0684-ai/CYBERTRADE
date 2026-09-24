@@ -41,6 +41,17 @@ function pushLog(rec) {
 /* ---------- render state ---------- */
 function render(state) {
   lastState = state;
+
+  // no venue session yet: the pairing screen is the way in, and the deck
+  // behind it must not pretend to have a balance, a candle or an open order.
+  if (state && state.paired === false) {
+    pair.mode = "boot";
+    pairShow(true);
+    if (state.pairing) pairRender(state.pairing);
+    return;
+  }
+  if (pair.mode !== "repair" || $("pair-veil").hidden) pairShow(false);
+
   const snap = state.snapshot || {};
   const health = snap.health || {};
   const acct = snap.account || {};
@@ -383,6 +394,150 @@ function openSSE() {
     $("fps").textContent = "SSE reconnect " + sseTries;
     setTimeout(openSSE, 2000);
   };
+}
+
+/* ---------- venue pairing (Chrome-assisted Quotex login) ---------- */
+const pair = {
+  timer: null,
+  busy: false,
+  mode: "boot",        // "boot" = no session yet, "repair" = re-pairing live
+};
+
+function pairSay(text, cls) {
+  const el = $("pair-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "pair-status" + (cls ? " " + cls : "");
+}
+
+function pairPurse() {
+  const el = document.querySelector('input[name="purse"]:checked');
+  if (!el) return null;
+  return el.value === "practice";
+}
+
+function pairShow(show) {
+  const v = $("pair-veil");
+  if (v) v.hidden = !show;
+  if (!show) pairStopPolling();
+}
+
+/* Open the pairing screen against an already-live terminal, for the case
+   where a session dies mid-run: the engine keeps its state and the cookie is
+   re-seated in place, so nothing restarts and no position is touched. */
+async function pairReveal() {
+  pair.mode = "repair";
+  pairShow(true);
+  $("pair-cancel").disabled = true;
+  pairSay("re-pair the venue session — the running terminal picks up the new cookie in place", "");
+  await pairPoll();
+}
+
+function pairStopPolling() {
+  if (pair.timer) {
+    clearInterval(pair.timer);
+    pair.timer = null;
+  }
+}
+
+async function pairPost(path, body) {
+  try {
+    const r = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    return await r.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
+
+async function pairStart() {
+  if (pair.busy) return;
+  const purse = pairPurse();
+  if (purse === null) {
+    pairSay("pick a purse: PRACTICE or REAL MONEY", "bad");
+    return;
+  }
+  pair.busy = true;
+  $("pair-start").disabled = true;
+  $("pair-cancel").disabled = false;
+  pairSay("launching Chrome — log in and solve the CAPTCHA in the window that opens…", "busy");
+  const r = await pairPost("/api/pair/start", {
+    profile: $("pair-profile").value,
+    port: $("pair-port").value,
+    timeout: $("pair-timeout").value,
+    purse: purse,
+  });
+  if (!r.ok) {
+    pair.busy = false;
+    $("pair-start").disabled = false;
+    $("pair-cancel").disabled = true;
+    pairSay(r.error || "could not start pairing", "bad");
+    return;
+  }
+  pairRender(r);
+  pairStopPolling();
+  pair.timer = setInterval(pairPoll, 1500);
+}
+
+async function pairPoll() {
+  try {
+    const r = await fetch("/api/pair/status");
+    if (!r.ok) return;
+    pairRender(await r.json());
+  } catch (e) { /* keep polling */ }
+}
+
+function pairRender(s) {
+  const st = s.state || "idle";
+  const msg = s.message || "";
+  if (st === "ready") {
+    pairSay(msg || "session captured — the terminal is live", "ok");
+    pairStopPolling();
+    pair.busy = false;
+    pair.mode = "boot";
+    $("pair-cancel").disabled = true;
+    setTimeout(() => { pairShow(false); pollState(); }, 1200);
+    return;
+  }
+  if (st === "failed") {
+    pairSay((s.error ? s.error + " — " : "") + "pairing failed. Fix it and start again.", "bad");
+    pairStopPolling();
+    pair.busy = false;
+    $("pair-start").disabled = false;
+    $("pair-cancel").disabled = true;
+    return;
+  }
+  if (st === "launching" || st === "waiting") {
+    const wait = s.elapsed ? ` (${Math.round(s.elapsed)}s elapsed)` : "";
+    pairSay(msg + wait, "busy");
+    return;
+  }
+  // idle
+  pairSay(msg || "no venue session yet — pair one below", "");
+}
+
+async function pairCancel() {
+  pairStopPolling();
+  pair.busy = false;
+  $("pair-start").disabled = false;
+  $("pair-cancel").disabled = true;
+  if (pair.mode === "repair") {
+    pair.mode = "boot";
+    pairShow(false);            // closing is not an error: the engine lives
+    return;
+  }
+  const r = await pairPost("/api/pair/cancel", {});
+  pairSay(r.error || "pairing cancelled", "");
+}
+
+if ($("pair-start")) $("pair-start").onclick = pairStart;
+if ($("pair-cancel")) $("pair-cancel").onclick = pairCancel;
+if ($("pair-open")) {
+  $("pair-open").onclick = pairReveal;
+  $("pair-open").onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") pairReveal(); };
 }
 
 async function cmd(body) {

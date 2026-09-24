@@ -173,7 +173,51 @@
   <span id="regime-detail">—</span>
   <span class="warn">LIVE ONLY · REAL ORDER FLOW · NO SYSTEM SURVIVES EVERY MARKET · SEE DISCLAIMER</span>
   <span id="fps">SSE: connecting…</span>
+  <span class="repair-link" id="pair-open" role="button" tabindex="0"
+        title="Re-pair the venue session with Chrome">⚑ RE-PAIR VENUE</span>
 </footer>
+
+<!-- ============ VENUE PAIRING: shown until a session exists ============ -->
+<div class="pair-veil" id="pair-veil" hidden>
+  <div class="pair-card">
+    <div class="pair-banner">╔══════════════════════════════════════╗<br>║ VENUE SESSION REQUIRED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;║<br>╚══════════════════════════════════════╝</div>
+    <h2>CYBERTRADE // NEON PROTOCOL — PAIR THE VENUE</h2>
+    <p class="pair-lede">
+      This build trades <b>LIVE</b> at Quotex and needs a venue session before
+      anything can boot. Pair one with Chrome: sign in and solve the CAPTCHA
+      yourself — this terminal only reads the <code>sessionid</code> cookie
+      Chrome hands back over localhost DevTools.
+    </p>
+
+    <div class="pair-status" id="pair-status">checking…</div>
+
+    <div class="pair-form">
+      <fieldset class="pair-purse">
+        <legend>WHICH PURSE?</legend>
+        <label><input type="radio" name="purse" value="practice">
+          PRACTICE BALANCE — real orders, demo money</label>
+        <label><input type="radio" name="purse" value="real">
+          REAL MONEY — real orders, real balance</label>
+      </fieldset>
+
+      <div class="pair-knobs">
+        <label>profile dir <input id="pair-profile" value="data/chrome-profile" spellcheck="false"></label>
+        <label>cdp port <input id="pair-port" value="9333" inputmode="numeric"></label>
+        <label>wait seconds <input id="pair-timeout" value="240" inputmode="numeric"></label>
+      </div>
+    </div>
+
+    <div class="pair-actions">
+      <button class="pair-btn primary" id="pair-start">⚑ CHROME LOGIN</button>
+      <button class="pair-btn" id="pair-cancel" disabled>✕ CANCEL</button>
+    </div>
+
+    <p class="pair-warn">
+      ⚠ Unofficial integration. Automation may violate Quotex's Terms of Service.
+      LIVE ONLY build — every order is real. See DISCLAIMER.md.
+    </p>
+  </div>
+</div>
 
 <script src="/static/js/charts.js"></script>
 <script src="/static/js/app.js"></script>

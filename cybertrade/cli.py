@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from . import __version__
 from .config import AppConfig
@@ -191,13 +192,104 @@ def _build_engine(cfg: AppConfig, api_factory=None, *, durable=False):
     return engine
 
 
-def _gui_missing_session(exc: Exception) -> bool:
+def _missing_session(exc: Exception) -> bool:
     """True when the only thing wrong is that no venue session exists yet.
 
     Anything else (a dead venue, an unchosen purse, a corrupt config) still
-    fails loudly — the gate is for the one recoverable case.
+    fails loudly — both the GUI and the web terminal only offer pairing for
+    this one recoverable case.
     """
     return "no quotex session" in str(exc).lower()
+
+
+def _reseat_session(engine, ssid: str) -> None:
+    """Re-seat a live engine on a fresh session, with no restart.
+
+    The api is the only thing that holds the cookie, so a re-pair mid-run is
+    ``set_ssid`` + ``connect`` — the same verification ``quotex login`` does
+    before it declares success. Nothing is rebuilt and no position is touched.
+    """
+    from .brokers.quotex.api import QuotexAPI
+
+    api = getattr(engine.feed, "api", None)
+    if api is None:
+        raise ConfigError("this engine has no venue api to re-seat")
+    if isinstance(api, QuotexAPI):
+        api.set_ssid(ssid)
+    else:  # a stub in tests: exercise the seam without the venue protocol
+        setattr(api, "ssid", ssid)
+    if not api.connect():
+        raise ConfigError("the paired session was rejected by the venue")
+    engine.health.note_message("venue session re-paired in place")
+
+
+def _run_web(cfg: AppConfig, args: argparse.Namespace) -> int:
+    """Serve the browser terminal, pairing a session first if none exists.
+
+    Same dead end as the GUI: no session means no venue candles, which means
+    no engine. Rather than refusing to start, the terminal comes up with no
+    engine, serves a pairing screen, and attaches one the moment a cookie
+    lands. The operator stays in the browser the whole time.
+    """
+    from .web.pairing import PairingController
+    from .web.server import EngineHub, WebTerminal
+
+    host = args.host or cfg.display.web_host
+    port = args.port or cfg.display.web_port
+    pending: List[Any] = []
+
+    def _on_ready(ssid: str, purse: bool) -> None:
+        """Runs on the pairing worker thread — queue, never touch the hub."""
+        cfg.broker.ssid = ssid          # session-only, never on disk
+        cfg.broker.demo_account = purse
+        pending.append(ssid)
+
+    hub = EngineHub(None, cfg)
+    hub.pairing = PairingController(cfg, _on_ready)
+    web = WebTerminal(hub, host=host, port=port)
+    web.start()
+    print(f"  ▸ web terminal : http://{host}:{port}")
+
+    engine = None
+    try:
+        try:
+            engine = _build_engine(cfg, durable=True)
+        except ConfigError as exc:
+            if not _missing_session(exc):
+                raise
+            print("  ▸ no venue session yet — pair from the web terminal\n")
+        else:
+            hub.engine = engine
+            print(f"  ▸ mode         : LIVE VENUE CANDLES · "
+                  f"purse {cfg.broker.purse_label}")
+            if args.auto:
+                engine.arm()
+                print("  ▸ engine ARMED (LIVE — real order flow)\n")
+
+        while True:
+            time.sleep(1.0)
+            if not pending:
+                continue
+            # a cookie landed on a worker thread: adopt it here, serially
+            ssid = pending.pop(0)
+            if hub.engine is None:
+                engine = _build_engine(cfg, durable=True)
+                hub.engine = engine
+                print(f"  ▸ session paired — purse "
+                      f"{cfg.broker.purse_label}\n")
+                if args.auto:
+                    engine.arm()
+                    print("  ▸ engine ARMED (LIVE — real order flow)\n")
+            else:
+                _reseat_session(engine, ssid)
+                print("  ▸ venue session re-paired in place\n")
+    except KeyboardInterrupt:
+        print("\n  shutting down…")
+    finally:
+        web.stop()
+        if engine is not None:
+            engine.shutdown()
+    return 0
 
 
 def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
@@ -217,7 +309,7 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
     try:
         engine = _build_engine(cfg, durable=True)
     except ConfigError as exc:
-        if not _gui_missing_session(exc):
+        if not _missing_session(exc):
             raise
         print(f"  no venue session yet — opening the pairing window ({exc})")
         from .gui.session_gate import run_gate
@@ -255,29 +347,7 @@ def cmd_web(args: argparse.Namespace) -> int:
     print(BANNER)
     if not _confirm_live(args, cfg):
         return 1
-    host = args.host or cfg.display.web_host
-    port = args.port or cfg.display.web_port
-    engine = _build_engine(cfg, durable=True)
-    from .web.server import EngineHub, WebTerminal
-
-    hub = EngineHub(engine, cfg)
-    web = WebTerminal(hub, host=host, port=port)
-    web.start()
-    print(f"  ▸ web terminal : http://{host}:{port}")
-    print(f"  ▸ mode         : LIVE VENUE CANDLES · purse {cfg.broker.purse_label}")
-    print("  ▸ ctrl+c to stop\n")
-    try:
-        if args.auto:
-            engine.arm()
-            print("  ▸ engine ARMED (LIVE — real order flow)\n")
-        while True:
-            time.sleep(1.0)
-    except KeyboardInterrupt:
-        print("\n  shutting down…")
-    finally:
-        web.stop()
-        engine.shutdown()
-    return 0
+    return _run_web(cfg, args)
 
 
 def cmd_run(args: argparse.Namespace) -> int:
