@@ -1,63 +1,65 @@
-# CYBERTRADE — Conda Env `cybertrade` (Windows Focused)
+# CYBERTRADE — Conda Env `cybertrade` (Normal Miniconda Only)
 
-This project is now conda-ready with environment **`cybertrade`** — optimized for **Windows 10/11**.
+This project uses **normal Miniconda** — no Miniforge, no mamba, no micromamba. Just official Miniconda from Anaconda.
 
-## Windows Quick Start (Recommended)
+## Windows Quick Start (Miniconda Only)
 
-### 1. Install Miniforge (Windows)
+### 1. Install Miniconda (Windows)
 
-Miniforge is the open-source, conda-forge edition (recommended over Anaconda).
+Official docs: **https://docs.anaconda.com/miniconda/install/**
 
-1. Download: **https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe**
-2. Run installer — check **"Add Miniforge3 to PATH environment variable"** (or leave unchecked and use Miniforge Prompt)
-3. After install, open **Miniforge Prompt** from Start Menu (search "Miniforge Prompt")
+1. Download: **https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe**
+2. Run installer:
+   - **Install for Just Me** (goes to `%USERPROFILE%\miniconda3`, no admin needed)
+   - You can leave "Add Miniconda3 to PATH" **unchecked** (recommended) and use **Anaconda Prompt** from Start Menu
+   - Or check it if you want `conda` in normal CMD/PowerShell
+3. After install, open **Anaconda Prompt** from Start Menu (search "Anaconda Prompt")
 
-Verify:
+Verify in Anaconda Prompt:
 ```bat
 conda --version
-conda config --show channels
+REM Should show: conda 23.x.x or 24.x.x
 ```
-
-Alternative: Miniconda https://docs.anaconda.com/miniconda/install/#quick-command-line-install
 
 ### 2. Get CYBERTRADE
 
 ```bat
-REM via git (in Miniforge Prompt)
+REM In Anaconda Prompt
+cd /d C:\Users\YourName\Downloads
 git clone https://github.com/lorenare0684-ai/CYBERTRADE.git
 cd CYBERTRADE
 
-REM or download ZIP from GitHub and extract, then cd into folder
+REM Or download ZIP from GitHub and extract, then cd into folder
 ```
 
-### 3. Create the env
+### 3. Create the env (Miniconda only)
 
-**Option A — Double-click batch file (easiest):**
-- Double-click `setup_conda.bat` in Explorer
-- It will detect conda/mamba/micromamba and create env `cybertrade`
+**Option A — Double-click (easiest, Miniconda only):**
+- In Explorer, double-click `setup_conda.bat`
+- It uses only `conda` (Miniconda), no mamba/micromamba
 
-**Option B — Command Prompt / Miniforge Prompt:**
+**Option B — Anaconda Prompt (CMD):**
 ```bat
 cd /d C:\path\to\CYBERTRADE
 conda env create -f environment.yml
 ```
 
-**Option C — PowerShell:**
+**Option C — PowerShell (Miniconda only):**
 ```powershell
 cd C:\path\to\CYBERTRADE
 .\setup_conda.ps1
-# If execution policy blocks: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+# If blocked: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
 ```
 
-What it does:
+What `environment.yml` does (Miniconda):
 - Creates env `cybertrade` with Python 3.11
-- Installs `tk` (tkinter for desktop GUI `run_gui.py` / `run_gui.bat`)
+- Installs `tk` (tkinter for desktop GUI)
 - Installs `pytest>=7`
 - Installs CYBERTRADE in editable mode (`pip -e .[dev]`) — runtime is 100% stdlib
 
-### 4. Activate & Verify (Windows)
+### 4. Activate & Verify (Windows, Miniconda)
 
-**In Miniforge Prompt / CMD:**
+**In Anaconda Prompt:**
 ```bat
 conda activate cybertrade
 
@@ -68,16 +70,16 @@ python -m cybertrade backtest --bars 200
 python -m unittest discover -s tests
 ```
 
-**Or use helper:**
+**Or use helper (Miniconda only):**
 ```bat
 call activate_cybertrade.bat
 ```
 
-**Browser HUD (recommended on Windows — no tk needed):**
+**Browser HUD (recommended on Windows):**
 ```bat
 run_web.bat
 REM or: python -m cybertrade web --port 8899 --auto
-REM Opens http://localhost:8899 with cyberpunk HUD
+REM Opens http://localhost:8899
 ```
 
 **Desktop HUD:**
@@ -86,9 +88,10 @@ run_gui.bat
 REM or: python run_gui.py
 ```
 
-### 5. Daily Usage (Windows)
+### 5. Daily Usage (Windows, Miniconda)
 
 ```bat
+REM Open Anaconda Prompt
 conda activate cybertrade
 
 REM Paper trading (default, safe)
@@ -106,9 +109,6 @@ python -m cybertrade optimize --scenario regime_whipsaw
 REM Journal analytics
 python -m cybertrade journal
 
-REM Dry-run (live quotes, paper fills, zero venue orders)
-python -m cybertrade run --dry-run --live
-
 REM Deactivate
 conda deactivate
 
@@ -116,36 +116,51 @@ REM Remove env
 conda env remove -n cybertrade
 ```
 
-## Linux / macOS (same environment.yml)
+## Linux / macOS (Miniconda Only)
 
 ```bash
+# Install Miniconda: https://docs.anaconda.com/miniconda/install/
+# Linux x86_64:
+curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o miniconda.sh
+bash miniconda.sh -b -p $HOME/miniconda3
+source $HOME/miniconda3/bin/activate
+
+# Then:
 conda env create -f environment.yml
 conda activate cybertrade
 python -m cybertrade doctor
 python -m cybertrade web --port 8899 --auto
 ```
 
-## Files Added for Windows
+Or use:
+```bash
+chmod +x setup_conda.sh
+./setup_conda.sh
+```
+
+## Files (Miniconda Only)
 
 | File | Purpose |
 |------|---------|
-| `environment.yml` | Cross-platform env, works on Windows/Linux/macOS |
-| `environment-dev.yml` | Dev env with black, ruff, mypy, pytest-cov |
-| `setup_conda.bat` | Windows CMD one-click env creation |
-| `setup_conda.ps1` | PowerShell env creation |
-| `activate_cybertrade.bat` | Windows activation helper (checks common install paths) |
-| `run_gui.bat` | Launch desktop GUI on Windows |
-| `run_web.bat` | Launch browser HUD on Windows |
-| `setup_conda.sh` | Linux/macOS helper (still included) |
-| `activate_cybertrade.sh` | Linux/macOS activation helper |
+| `environment.yml` | Main env — `name: cybertrade`, `python=3.11`, `tk`, `pytest`, `pip -e .[dev]`, channels `defaults` + `conda-forge` (Miniconda) |
+| `environment-dev.yml` | Dev env with `black`, `ruff`, `mypy`, `pytest-cov` |
+| `setup_conda.bat` | Windows CMD — creates env using **only conda (Miniconda)** |
+| `setup_conda.ps1` | PowerShell — Miniconda only |
+| `setup_conda.sh` | Linux/macOS/Git Bash — Miniconda only |
+| `activate_cybertrade.bat` | Windows activation — checks Miniconda paths only |
+| `activate_cybertrade.ps1` | PowerShell activation — Miniconda only |
+| `activate_cybertrade.sh` | Bash activation — Miniconda only |
+| `run_gui.bat` | Launch desktop GUI (Miniconda env) |
+| `run_web.bat` | Launch browser HUD (Miniconda env) |
+| `WINDOWS_SETUP.txt` | Plain-text Windows guide (Miniconda) |
 
-## `environment.yml` (Windows)
+## `environment.yml` (Miniconda)
 
 ```yaml
 name: cybertrade
 channels:
-  - conda-forge
   - defaults
+  - conda-forge
 dependencies:
   - python=3.11
   - pip>=23
@@ -155,36 +170,36 @@ dependencies:
     - -e .[dev]
 ```
 
-No extra Windows packages needed — project is 100% stdlib. `tk` gives you tkinter on Windows (usually already included).
+No Miniforge, no mamba, no micromamba — just normal Miniconda.
 
-## Troubleshooting Windows
+## Troubleshooting (Miniconda on Windows)
 
-| Issue | Fix |
-|-------|-----|
-| `conda` not recognized | Use **Miniforge Prompt** from Start Menu, not normal CMD. Or add Miniforge to PATH during install |
-| `conda env create` fails | `conda clean --all` then retry. Ensure you are in CYBERTRADE folder with `environment.yml` |
-| `tkinter unavailable` in `doctor` | `conda install -n cybertrade tk` or reinstall Miniforge. On Windows Python, tk is usually bundled — try `python -m tkinter` |
-| PowerShell blocks `.ps1` | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` then `.\setup_conda.ps1` |
-| Port 8899 busy | `python -m cybertrade web --port 0 --auto` or close other app using port |
-| `pytest` missing | `conda activate cybertrade` then `conda install pytest` or `pip install pytest` |
-| Antivirus blocks Miniforge installer | Temporarily disable real-time protection or allow installer |
+| Issue | Fix (Miniconda) |
+|-------|-----------------|
+| `conda` not recognized | Use **Anaconda Prompt** from Start Menu, not normal CMD. Anaconda Prompt has conda in PATH automatically |
+| `conda env create` fails | `conda clean --all` then `conda env create -f environment.yml --force` |
+| `tkinter unavailable` | `conda install -n cybertrade tk` then `python -m tkinter` (should open test window) |
+| PowerShell blocks `.ps1` | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` then `.\setup_conda.ps1` |
+| Port 8899 busy | `python -m cybertrade web --port 0 --auto` |
+| Want to update env | `conda env update -f environment.yml --prune` |
+| Need to reinstall Miniconda | Uninstall from Add/Remove Programs, delete `%USERPROFILE%\miniconda3`, reinstall exe |
 
-## Why conda on Windows?
+## Why Miniconda?
 
-- **No admin needed for Python**: Miniforge installs in `%USERPROFILE%\miniforge3`
-- **tkinter**: Windows Python from python.org includes tk, but conda ensures consistent version
+- **Official**: From Anaconda, normal Miniconda (https://docs.anaconda.com/miniconda/)
+- **No admin needed**: Installs to `%USERPROFILE%\miniconda3` for Just Me
 - **Isolation**: Keeps CYBERTRADE separate from system Python
-- **Reproducible**: `python=3.11` locked, same file works on Linux/macOS/Windows
-- **No Visual C++ Build Tools needed**: All deps are pure Python or conda binaries (project has zero compiled runtime deps)
+- **Reproducible**: `python=3.11` locked
+- **Windows friendly**: Anaconda Prompt handles PATH, no need to edit environment variables
+- **Zero compiled runtime deps**: Project is 100% stdlib + `tk` + `pytest` — pure Miniconda
 
-## Alternative: venv on Windows (if you don't want conda)
+## Alternative: venv on Windows (if you don't want conda at all)
 
 ```bat
-REM In CMD
 py -3.11 -m venv .venv
 .venv\Scripts\activate.bat
 pip install -e .[dev]
 python -m cybertrade doctor
 ```
 
-But conda is recommended for Windows because it handles `tk` and long path issues better.
+But Miniconda is recommended for Windows because Anaconda Prompt solves PATH issues.

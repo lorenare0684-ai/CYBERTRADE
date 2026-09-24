@@ -1,5 +1,5 @@
-# CYBERTRADE // NEON PROTOCOL — Windows PowerShell conda setup
-# Creates conda env named cybertrade on Windows
+# CYBERTRADE // NEON PROTOCOL — Miniconda setup (Windows PowerShell)
+# Creates conda env named cybertrade using Miniconda only
 # Usage (PowerShell):
 #   .\setup_conda.ps1
 #   conda activate cybertrade
@@ -8,28 +8,22 @@
 $EnvName = "cybertrade"
 $EnvFile = "environment.yml"
 
-Write-Host "[*] CYBERTRADE conda setup for Windows (PowerShell)" -ForegroundColor Cyan
-Write-Host "[*] Checking for conda..."
+Write-Host "[*] CYBERTRADE Miniconda setup for Windows (PowerShell)" -ForegroundColor Cyan
+Write-Host "[*] Checking for conda (Miniconda)..."
 
-$CondaBin = $null
-if (Get-Command conda -ErrorAction SilentlyContinue) { $CondaBin = "conda" }
-elseif (Get-Command mamba -ErrorAction SilentlyContinue) { $CondaBin = "mamba" }
-elseif (Get-Command micromamba -ErrorAction SilentlyContinue) { $CondaBin = "micromamba" }
-
-if (-not $CondaBin) {
-    Write-Host "[!] conda / mamba / micromamba not found in PATH" -ForegroundColor Red
-    Write-Host "    Install Miniforge for Windows:"
-    Write-Host "    https://github.com/conda-forge/miniforge"
-    Write-Host "    Download Miniforge3-Windows-x86_64.exe and run installer"
-    Write-Host "    Then open 'Miniforge Prompt' or PowerShell and re-run:"
+if (-not (Get-Command conda -ErrorAction SilentlyContinue)) {
+    Write-Host "[!] conda not found in PATH" -ForegroundColor Red
+    Write-Host "    Install Miniconda for Windows:"
+    Write-Host "    https://docs.anaconda.com/miniconda/install/"
+    Write-Host "    Download Miniconda3-latest-Windows-x86_64.exe and run installer"
+    Write-Host "    Then open 'Anaconda Prompt' or PowerShell and re-run:"
     Write-Host "    .\setup_conda.ps1"
     Write-Host ""
-    Write-Host "    Or install Miniconda:"
-    Write-Host "    https://docs.anaconda.com/miniconda/install/"
+    Write-Host "    Tip: Use Anaconda Prompt from Start Menu - conda is already in PATH there"
     exit 1
 }
 
-Write-Host "[*] Using $CondaBin : $(& $CondaBin --version)" -ForegroundColor Green
+Write-Host "[*] Using conda : $(conda --version)" -ForegroundColor Green
 
 if (-not (Test-Path $EnvFile)) {
     Write-Host "[!] $EnvFile not found in $(Get-Location)" -ForegroundColor Red
@@ -37,13 +31,13 @@ if (-not (Test-Path $EnvFile)) {
 }
 
 # Check if env exists
-$envExists = & $CondaBin env list | Select-String -Pattern "^\s*$EnvName\s"
+$envExists = conda env list | Select-String -Pattern "^\s*$EnvName\s"
 if ($envExists) {
     Write-Host "[*] Env '$EnvName' exists — updating from $EnvFile" -ForegroundColor Yellow
-    & $CondaBin env update -n $EnvName -f $EnvFile --prune
+    conda env update -n $EnvName -f $EnvFile --prune
 } else {
     Write-Host "[*] Creating env '$EnvName' from $EnvFile" -ForegroundColor Yellow
-    & $CondaBin env create -f $EnvFile
+    conda env create -f $EnvFile
 }
 
 if ($LASTEXITCODE -ne 0) {
@@ -52,7 +46,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host ""
-Write-Host "[OK] Conda env '$EnvName' ready." -ForegroundColor Green
+Write-Host "[OK] Conda env '$EnvName' ready (Miniconda)." -ForegroundColor Green
 Write-Host ""
 Write-Host "    To activate:"
 Write-Host "      conda activate $EnvName"

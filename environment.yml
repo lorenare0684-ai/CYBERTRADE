@@ -1,20 +1,20 @@
-# CYBERTRADE // NEON PROTOCOL — conda environment (Windows/Linux/macOS)
+# CYBERTRADE // NEON PROTOCOL — conda environment (Miniconda)
 # Name: cybertrade
 # Python: 3.11 (requires >=3.10, tested on 3.11)
 # 100% standard library runtime — no third-party deps required
 # tk provides tkinter for desktop GUI (python run_gui.py)
 # pytest for the 593-test suite
 #
-# === WINDOWS QUICK START ===
-#   1. Install Miniforge for Windows: https://github.com/conda-forge/miniforge
-#      Download Miniforge3-Windows-x86_64.exe and install
-#   2. Open Miniforge Prompt (or Anaconda Prompt) from Start Menu
+# === MINICONDA (Windows) QUICK START ===
+#   1. Install Miniconda for Windows: https://docs.anaconda.com/miniconda/install/
+#      Download Miniconda3-latest-Windows-x86_64.exe and install
+#   2. Open Anaconda Prompt from Start Menu
 #   3. cd /d C:\path\to\CYBERTRADE
 #   4. conda env create -f environment.yml
 #   5. conda activate cybertrade
 #   6. python -m cybertrade doctor
 #
-# === LINUX/macOS QUICK START ===
+# === MINICONDA (Linux/macOS) QUICK START ===
 #   conda env create -f environment.yml
 #   conda activate cybertrade
 #   python -m cybertrade doctor
@@ -32,12 +32,12 @@
 #
 name: cybertrade
 channels:
-  - conda-forge
   - defaults
+  - conda-forge
 dependencies:
   - python=3.11
   - pip>=23
-  - tk=8.6  # tkinter support — Windows: included, Linux: provides tkinter
+  - tk=8.6
   - pytest>=7
   - pip:
     - -e .[dev]

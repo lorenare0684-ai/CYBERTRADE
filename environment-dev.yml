@@ -1,13 +1,13 @@
-# CYBERTRADE // NEON PROTOCOL — full dev conda env (Windows/Linux/macOS)
+# CYBERTRADE // NEON PROTOCOL — dev conda env (Miniconda only)
 # Name: cybertrade
-# Includes additional dev tools for linting and coverage
+# Includes additional dev tools
 #
 # Windows: conda env create -f environment-dev.yml
 # Linux/macOS: conda env create -f environment-dev.yml
 name: cybertrade
 channels:
-  - conda-forge
   - defaults
+  - conda-forge
 dependencies:
   - python=3.11
   - pip>=23

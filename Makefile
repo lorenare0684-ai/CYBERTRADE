@@ -1,10 +1,11 @@
-.PHONY: conda-create conda-update conda-remove conda-activate doctor test web gui
+.PHONY: conda-create conda-update conda-remove doctor test web gui backtest journal
 
+# Miniconda only — normal Miniconda, no Miniforge/mamba/micromamba
 ENV_NAME=cybertrade
 ENV_FILE=environment.yml
 
 conda-create:
-	conda env create -f $(ENV_FILE) || mamba env create -f $(ENV_FILE) || micromamba create -f $(ENV_FILE)
+	conda env create -f $(ENV_FILE)
 
 conda-update:
 	conda env update -n $(ENV_NAME) -f $(ENV_FILE) --prune

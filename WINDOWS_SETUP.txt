@@ -1,19 +1,26 @@
-CYBERTRADE // NEON PROTOCOL — Windows Setup (conda env cybertrade)
-====================================================================
+CYBERTRADE // NEON PROTOCOL — Windows Setup (Miniconda only)
+==============================================================
+Env name: cybertrade (normal Miniconda, no other tools)
 
-QUICK START FOR WINDOWS 10/11
-------------------------------
-1. Install Miniforge (free, open-source conda):
-   Download: https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-Windows-x86_64.exe
-   Run installer, keep defaults, optionally check "Add to PATH"
+QUICK START FOR WINDOWS 10/11 (Miniconda)
+------------------------------------------
+1. Install Miniconda (official, normal):
+   Official docs: https://docs.anaconda.com/miniconda/install/
+   Direct download (Windows 64-bit):
+     https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.exe
+   Run installer:
+     - Install for "Just Me" (recommended, goes to %USERPROFILE%\miniconda3)
+     - Keep defaults. You can check "Add Miniconda3 to PATH" if you want conda in normal CMD,
+       or leave unchecked and use "Anaconda Prompt" from Start Menu (recommended)
 
-2. Open Miniforge Prompt from Start Menu (search "Miniforge Prompt")
+2. Open Anaconda Prompt from Start Menu (search "Anaconda Prompt")
+   You should see (base) in prompt and conda --version works.
 
-3. In Miniforge Prompt:
+3. In Anaconda Prompt:
    cd /d C:\Users\YourName\Downloads\CYBERTRADE
    conda env create -f environment.yml
 
-   OR double-click setup_conda.bat in Explorer
+   OR double-click setup_conda.bat in Explorer (it uses Miniconda only)
 
 4. Activate:
    conda activate cybertrade
@@ -34,10 +41,11 @@ QUICK START FOR WINDOWS 10/11
 
    Tests:
      python -m unittest discover -s tests
+     -> 593 tests
 
-DAILY USE
----------
-Open Miniforge Prompt:
+DAILY USE (Miniconda)
+----------------------
+Open Anaconda Prompt:
   conda activate cybertrade
   python -m cybertrade run              (paper trading, safe default)
   python -m cybertrade backtest --bars 200
@@ -49,32 +57,57 @@ To exit:
 To remove env:
   conda env remove -n cybertrade
 
-FILES
------
-environment.yml          - conda env definition (name: cybertrade, python 3.11)
-setup_conda.bat          - double-click to create env (CMD)
-setup_conda.ps1          - PowerShell version
-activate_cybertrade.bat  - double-click to activate env
-run_gui.bat              - launch desktop GUI
-run_web.bat              - launch browser HUD
-CONDA.md                 - full documentation
+FILES (Miniconda only)
+-----------------------
+environment.yml          - conda env definition (name: cybertrade, python 3.11, uses Miniconda)
+environment-dev.yml      - dev env with black, ruff, mypy
+setup_conda.bat          - double-click to create env (Miniconda only, CMD)
+setup_conda.ps1          - PowerShell version (Miniconda only)
+setup_conda.sh           - Linux/macOS/Git Bash version (Miniconda only)
+activate_cybertrade.bat  - double-click to activate env (Miniconda paths)
+activate_cybertrade.ps1  - PowerShell activation (Miniconda)
+activate_cybertrade.sh   - bash activation (Miniconda)
+run_gui.bat              - launch desktop GUI (Miniconda)
+run_web.bat              - launch browser HUD (Miniconda)
+CONDA.md                 - full documentation (Miniconda only)
 WINDOWS_SETUP.txt        - this file
 
-TROUBLESHOOTING
----------------
-- 'conda' not recognized: Use Miniforge Prompt, not normal CMD
-- PowerShell blocks .ps1: Run Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-- tkinter missing: conda install -n cybertrade tk
-- Port 8899 busy: python -m cybertrade web --port 0 --auto
+TROUBLESHOOTING (Miniconda)
+----------------------------
+- 'conda' not recognized:
+  Use Anaconda Prompt from Start Menu, not normal CMD.
+  In Anaconda Prompt, conda is already in PATH.
+
+- PowerShell blocks .ps1:
+  Run: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+  Then: .\setup_conda.ps1
+
+- tkinter missing in doctor:
+  conda install -n cybertrade tk
+  Then: python -m tkinter  (should open test window)
+
+- Port 8899 busy:
+  python -m cybertrade web --port 0 --auto
+  Or close other app using 8899
+
+- conda env create fails:
+  conda clean --all
+  Then retry: conda env create -f environment.yml --force
 
 REQUIREMENTS
 ------------
 - Windows 10/11 64-bit
-- 500MB free disk for Miniforge + env
-- No admin needed (installs to %USERPROFILE%\miniforge3)
-- Project is 100% Python stdlib + tk + pytest (no compiled deps)
+- ~500MB free disk for Miniconda + env
+- No admin needed if you install for "Just Me" (to %USERPROFILE%\miniconda3)
+- Project is 100% Python stdlib + tk + pytest (no compiled deps, pure Miniconda)
+
+LINKS
+-----
+Miniconda install docs: https://docs.anaconda.com/miniconda/install/
+Miniconda Windows exe: https://repo.anaconda.com/miniconda/Miniconda3-latest-Windows-x86_64.sh
+(Use .exe for Windows, not .sh)
 
 SUPPORT
 -------
-See CONDA.md for detailed guide, Linux/macOS instructions, and troubleshooting.
+See CONDA.md for detailed Miniconda-only guide.
 See README.md for trading system documentation.
