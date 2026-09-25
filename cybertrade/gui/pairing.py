@@ -66,12 +66,15 @@ def run_pairing(
     on_error: Callable[[Exception], None],
     pair: Optional[Callable[..., Dict[str, str]]] = None,
     chrome: str = "",
+    on_poll: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> threading.Thread:
     """Pair on a worker thread; report through ``on_done`` / ``on_error``.
 
     Both callbacks fire **on the worker thread** — a Tk caller must wrap them
     in ``widget.after(0, ...)`` before touching any widget. The thread is a
     daemon so a closed window never waits on a human finishing a CAPTCHA.
+    ``on_poll`` (also worker-thread) fires each DevTools round with
+    ``{waited, cookies, target, token_seen}`` for live progress.
     """
     pair = pair or _pair_session
 
@@ -83,6 +86,7 @@ def run_pairing(
                 port=port,
                 timeout=timeout,
                 chrome=chrome,
+                on_poll=on_poll,
             )
         except Exception as exc:  # noqa: BLE001 — every failure is reportable
             log.warning("chrome pairing failed: %s", exc)

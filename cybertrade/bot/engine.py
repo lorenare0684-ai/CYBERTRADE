@@ -25,7 +25,7 @@ from ..constants import EngineState, Side, Timeframe
 from ..data.feed import Feed, QuoteBook
 from ..data.models import Signal, TradeRecord
 from ..events import Topic, default_bus
-from ..exceptions import ConfigError, KillSwitchEngaged, RiskRejection
+from ..exceptions import ConfigError, FeedError, KillSwitchEngaged, RiskRejection
 from ..execution.oms import OrderManager
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
@@ -165,6 +165,12 @@ class TradingEngine:
             log.exception("journal open failed — trade history will be in-memory only")
             self.journal = None
         self._journal_session = 0
+        # Degraded boot: the venue yielded zero candles (dead/slow session).
+        # The terminal stays alive and keeps retrying; trading is impossible
+        # anyway (no candles → no signals) and the engine stays DISARMED.
+        self.degraded = ""
+        self._rewarm_started = False
+        self._rewarm_busy = False
         self.supervisor: Optional[ReconnectSupervisor] = None
         self._decay_alerted: set = set()
         self.edge_rejects = 0
@@ -194,6 +200,127 @@ class TradingEngine:
         self.health.note_message(f"venue {kind}: {payload}")
         default_bus.publish(Topic.CONNECTION, {"event": kind, **payload},
                             source="network")
+
+    def _enter_degraded(self, reason: str) -> None:
+        """Boot without venue data — alive, DISARMED, retrying warmup."""
+        self.degraded = reason or "no venue data"
+        log.critical("degraded boot: %s — terminal stays up, retrying warmup",
+                     self.degraded)
+        self.health.note_message(f"NO VENUE DATA — {self.degraded} (retrying)")
+        if not self._rewarm_started:
+            self._rewarm_started = True
+            thread = threading.Thread(target=self._rewarm_loop, daemon=True,
+                                      name="engine-rewarm")
+            thread.start()
+
+    def _try_rewarm(self) -> bool:
+        """One synchronous warmup retry; True when data is flowing."""
+        warmer = getattr(self.feed, "warmup", None)
+        if not callable(warmer):
+            return False
+        try:
+            warmer()
+        except FeedError as exc:
+            log.debug("rewarm still dry: %s", exc)
+            return False
+        except Exception:  # noqa: BLE001 — a retry must never kill the loop
+            log.exception("rewarm attempt failed")
+            return False
+        self.degraded = ""
+        log.info("venue data flowing — terminal fully live")
+        self.health.note_message("venue data flowing — terminal fully live")
+        return True
+
+    def _rewarm_once(self) -> None:
+        """One guarded background retry (reconnect-triggered)."""
+        try:
+            self._try_rewarm()
+        finally:
+            with self._lock:
+                self._rewarm_busy = False
+
+    def _rewarm_loop(self) -> None:
+        """Background warmup until the first candles land (or shutdown)."""
+        # The first retry waits a full tick: warmup *just* failed, so an
+        # immediate second attempt would only hammer a struggling venue.
+        while not self._stop_event.wait(60.0):
+            if self._try_rewarm():
+                return
+
+    def _on_venue_event(self, kind: str, payload: object) -> None:
+        """Adopt newly detected venue assets into the running universe."""
+        if kind == "instruments" and isinstance(payload, list):
+            try:
+                self._adopt_assets(payload)
+            except Exception:  # noqa: BLE001 — discovery never breaks trading
+                log.exception("venue asset adoption failed")
+        elif kind == "reconnected" and self.degraded:
+            # A restored wire may carry the history warmup missed — retry
+            # now instead of waiting for the next 60s tick.
+            with self._lock:
+                if self._rewarm_busy:
+                    return
+                self._rewarm_busy = True
+            thread = threading.Thread(target=self._rewarm_once, daemon=True,
+                                      name="engine-rewarm-now")
+            thread.start()
+
+    def _adopt_assets(self, listing: Sequence[Any]) -> int:
+        adopted = 0
+        for meta in listing or []:
+            if isinstance(meta, dict):
+                name = meta.get("name")
+            else:
+                name = getattr(meta, "name", None)
+            if not name or name in self.feed.assets:
+                continue
+            try:
+                if self.adopt_asset(str(name)):
+                    adopted += 1
+            except Exception:  # noqa: BLE001 — per-asset tolerance
+                log.exception("adopt failed for %s", name)
+        if adopted:
+            log.info("adopted %d venue assets (universe=%d)",
+                     adopted, len(self.feed.assets))
+            self.health.note_message(f"venue assets detected: +{adopted}")
+        return adopted
+
+    def adopt_asset(self, asset: str, warm: bool = False) -> bool:
+        """Track a venue asset the config universe never named.
+
+        Creates the feed book, regime detector, flow tracker, and stream
+        subscription; optionally warms recent history first (manual chart
+        switches and one-click fires).  Returns True when newly adopted.
+        """
+        if not asset or asset in self.feed.assets:
+            return False
+        adder = getattr(self.feed, "add_asset", None)
+        if not callable(adder):
+            return False
+        try:
+            added = adder(asset)
+        except Exception:  # noqa: BLE001
+            log.exception("feed refused asset %s", asset)
+            return False
+        if not added:
+            return False
+        self.detectors.setdefault(asset, RegimeDetector())
+        self.flow.setdefault(asset, TickFlow())
+        self._ticks_this_cycle.setdefault(asset, 0)
+        if warm:
+            api = getattr(self.broker, "api", None)
+            book_factory = getattr(self.feed, "book", None)
+            if api is not None and callable(book_factory):
+                try:
+                    from ..brokers.quotex.sync import warm_book
+
+                    book = book_factory(asset)
+                    if book is not None:
+                        warmed = warm_book(api, book, bars=120, wait=2.0)
+                        log.info("adopt %s warmed +%d candles", asset, warmed)
+                except Exception:  # noqa: BLE001 — live ticks still fill it
+                    log.exception("adopt warm failed for %s", asset)
+        return True
 
     def _check_decay(self) -> None:
         """Stale-edge detector — fire once per strategy per decay spell."""
@@ -350,7 +477,13 @@ class TradingEngine:
         self._restore_calibration()
         self._restore_operator_state()
         if hasattr(self.feed, "warmup"):
-            self.feed.warmup()
+            try:
+                self.feed.warmup()
+            except FeedError as exc:
+                # A blind terminal must not die: killing the process here
+                # takes the web server and the pairing screen with it, so a
+                # dead session becomes unrecoverable without a restart.
+                self._enter_degraded(str(exc))
         self.broker.connect()
         # live venue wiring: stream quotes into the same pipeline as the feed
         # and pull the instrument catalog (no-ops for a broker with no api).
@@ -393,6 +526,8 @@ class TradingEngine:
                 resubscribe=_resubscribe,
                 on_event=self._on_connection_event,
             )
+            if hasattr(api, "add_listener"):
+                api.add_listener(self._on_venue_event)
         balance = self.config.risk.starting_balance
         if self.continuity is not None:
             balance = self.broker.account().balance
@@ -972,10 +1107,67 @@ class TradingEngine:
                            else {"enabled": False, "blocked": False}),
             "survivor": self.survivor.describe(),
             "strategies": self.ensemble.describe(),
+            "assets": list(self.feed.assets),
+            "candles": self._snapshot_candles(limit=120),
+            "catalog": self.catalog_block(),
+            "degraded": self.degraded,
+        }
+
+    def _snapshot_candles(self, limit: int = 120) -> Dict[str, List[Dict[str, Any]]]:
+        """Chart payload for the tracked universe (bounded — boards page it)."""
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for asset in self.feed.assets[:12]:
+            try:
+                out[asset] = [c.to_dict() for c in self._candles_for(asset, limit)]
+            except Exception:  # noqa: BLE001
+                out[asset] = []
+        return out
+
+    def candles_for(self, asset: str, limit: int = 180) -> List[Dict[str, Any]]:
+        """On-demand chart payload for any asset (adopts it first)."""
+        if asset not in self.feed.assets:
+            self.adopt_asset(asset, warm=True)
+        try:
+            return [c.to_dict() for c in self._candles_for(asset, limit)]
+        except Exception:  # noqa: BLE001
+            return []
+
+    def catalog_block(self) -> Dict[str, Any]:
+        """Full asset board: static floor + live payouts/open flags + quotes."""
+        from ..brokers.quotex.catalog import AssetCatalog
+
+        api = getattr(self.broker, "api", None)
+        cat = getattr(api, "catalog", None)
+        if cat is None:
+            cat = AssetCatalog.from_static()
+        try:
+            rows = cat.to_list()
+        except Exception:  # noqa: BLE001
+            rows = []
+        synced_at = float(getattr(cat, "synced_at", 0.0) or 0.0)
+        prices: Dict[str, float] = {}
+        last_price = getattr(self.broker, "last_price", None)
+        if callable(last_price):
+            for row in rows:
+                try:
+                    px = last_price(row["name"])
+                except Exception:  # noqa: BLE001
+                    px = None
+                if px:
+                    prices[row["name"]] = float(px)
+        return {
+            "rows": rows,
+            "live": synced_at > 0,
+            "synced_at": synced_at,
+            "prices": prices,
         }
 
     def inject_signal(self, signal: Signal) -> bool:
         """Manually push a signal through the full defense stack (GUI button)."""
+        if signal.asset not in self.feed.assets:
+            # One-click fire on any catalog asset: adopt + warm first so the
+            # order rides real context instead of an empty book.
+            self.adopt_asset(signal.asset, warm=True)
         reading = self.regime_of.get(signal.asset, RegimeReading())
         return self._try_execute(signal, reading)
 

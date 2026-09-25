@@ -74,6 +74,24 @@ class LiveQuotexFeed(Feed):
         return out
 
     # -- feed api ----------------------------------------------------------
+    def add_asset(self, asset: str) -> bool:
+        """Track a newly discovered venue asset (book + quote slot + stream)."""
+        if not super().add_asset(asset):
+            return False
+        self._books[asset] = MultiTimeframeBook(
+            asset, timeframes=self._default_timeframes(),
+            maxlen=max(500, self.warm_bars + 100),
+        )
+        self._last.setdefault(asset, 0.0)
+        sub = getattr(self.api, "subscribe", None)
+        if sub is not None and self._running:
+            try:
+                sub(asset, self.timeframe_seconds)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("subscribe failed %s: %s", asset, exc)
+        log.info("live feed adopted %s (universe=%d)", asset, len(self.assets))
+        return True
+
     def book(self, asset: str) -> MultiTimeframeBook:
         if asset not in self._books:
             raise FeedError(f"unknown asset {asset}")
@@ -164,6 +182,14 @@ class LiveQuotexFeed(Feed):
                     sub(asset, self.timeframe_seconds)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("subscribe failed %s: %s", asset, exc)
+        # Asset detection: pull the venue instrument listing so everything
+        # tradable joins the catalog (the engine adopts newcomers below).
+        req = getattr(self.api, "request_instruments", None)
+        if callable(req):
+            try:
+                req()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("instrument catalog request failed: %s", exc)
         if self.refresh_seconds > 0:
             self._refresher = threading.Thread(
                 target=self._refresh_loop, daemon=True, name="livefeed-refresh"
@@ -192,6 +218,13 @@ class LiveQuotexFeed(Feed):
         if kind == "reconnected" and self._running:
             log.info("venue reconnect noticed — sweeping candle gaps")
             self._backfill_all()
+            # A restored wire may list different assets — re-detect.
+            req = getattr(self.api, "request_instruments", None)
+            if callable(req):
+                try:
+                    req()
+                except Exception:  # noqa: BLE001
+                    log.debug("post-reconnect instrument request failed")
 
     def _backfill_all(self) -> int:
         """Fetch only missing bars across every asset (Phase-30)."""

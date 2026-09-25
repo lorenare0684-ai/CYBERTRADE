@@ -1,6 +1,6 @@
 """Live asset catalog: server-synced payouts, tradability, and asset kinds.
 
-The venue publishes its instrument list over the ``instrument`` socket event;
+The venue publishes its instrument list over the ``instruments/list`` event;
 between syncs the static :data:`cybertrade.constants.ASSET_CATALOG` keeps
 payouts honest while a session is still connecting.
 """
@@ -14,6 +14,24 @@ from typing import Any, Dict, List, Optional
 
 from ...constants import ASSET_CATALOG
 from .models import QXAsset
+
+
+def infer_kind(name: str) -> str:
+    """Best-effort asset class for a venue symbol with no descriptor.
+
+    Quote-discovered symbols arrive bare (no kind/payout row); the static
+    table still knows their family — directly, or via the non-OTC twin
+    (``GBPNZD_otc`` → ``GBPNZD`` → ``forex`` → ``forex_otc``).
+    """
+    meta = ASSET_CATALOG.get(name)
+    if meta and meta.get("kind"):
+        return str(meta["kind"])
+    if name.endswith("_otc"):
+        base = ASSET_CATALOG.get(name[:-4], {})
+        if base.get("kind"):
+            kind = str(base["kind"])
+            return kind if kind.endswith("_otc") else kind + "_otc"
+    return ""
 
 
 @dataclass
@@ -33,6 +51,14 @@ class AssetCatalog:
 
     def upsert(self, asset: QXAsset) -> None:
         with self._lock:
+            prev = self._assets.get(asset.name)
+            if prev is not None:
+                # Partial sightings (a bare quote, a nameless row) must not
+                # clobber what a fuller listing already taught us.
+                if not asset.kind:
+                    asset.kind = prev.kind
+                if not asset.asset_id or asset.asset_id == asset.name:
+                    asset.asset_id = prev.asset_id
             self._assets[asset.name] = asset
 
     @classmethod
@@ -88,6 +114,7 @@ class AssetCatalog:
             return [
                 {
                     "name": a.name,
+                    "id": a.asset_id,
                     "payout": a.payout,
                     "open": a.open,
                     "is_otc": a.is_otc,
@@ -97,4 +124,4 @@ class AssetCatalog:
             ]
 
 
-__all__ = ["AssetCatalog"]
+__all__ = ["AssetCatalog", "infer_kind"]

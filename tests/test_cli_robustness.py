@@ -363,3 +363,338 @@ class TestDoctorReadsTheRealConfig(unittest.TestCase):
     def test_the_check_count_is_reported(self):
         rc, out = self._doctor()
         self.assertIn("14/14 checks passed", out)
+
+
+class TestSessionVerify(unittest.TestCase):
+    """_verify_session_data: auth alone is not a live session."""
+
+    def _api(self, data: bool):
+        from types import SimpleNamespace
+
+        pokes = []
+
+        def wait_for_data(timeout=0):
+            return data
+
+        return SimpleNamespace(
+            subscribe=lambda a, tf: pokes.append(("sub", a, tf)),
+            request_instruments=lambda: pokes.append(("inst",)),
+            wait_for_data=wait_for_data,
+            pokes=pokes,
+        )
+
+    def test_flowing_data_passes(self):
+        from cybertrade.cli import _verify_session_data
+
+        api = self._api(True)
+        self.assertIsNone(_verify_session_data(api, timeout=0.01))
+        self.assertTrue(api.pokes)  # the wire was poked first
+
+    def test_silence_raises_pairing_screen_case(self):
+        from cybertrade.cli import _verify_session_data
+        from cybertrade.exceptions import BrokerConnectionError
+
+        with self.assertRaises(BrokerConnectionError) as ctx:
+            _verify_session_data(self._api(False), timeout=0.01)
+        self.assertIn("no market data", str(ctx.exception))
+
+    def test_stub_apis_without_wait_are_skipped(self):
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _verify_session_data
+
+        stub = SimpleNamespace(subscribe=lambda a, t: None,
+                               request_instruments=lambda: None)
+        self.assertIsNone(_verify_session_data(stub, timeout=0.01))
+
+
+class TestArmOrHold(unittest.TestCase):
+    """_arm_or_hold: a latched kill holds, never kills the terminal."""
+
+    def test_success_arms(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _arm_or_hold
+
+        engine = SimpleNamespace(armed=[], arm=lambda: engine.armed.append(1))
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(_arm_or_hold(engine))
+        self.assertEqual(engine.armed, [1])
+
+    def test_kill_switch_holds_with_a_message(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _arm_or_hold
+        from cybertrade.exceptions import KillSwitchEngaged
+
+        def arm():
+            raise KillSwitchEngaged("recovery hold: nope")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertFalse(_arm_or_hold(SimpleNamespace(arm=arm)))
+        self.assertIn("DISARMED", buf.getvalue())
+
+
+class TestNeedsRebuild(unittest.TestCase):
+    """_needs_rebuild: dead-on-arrival rebuilds, live books re-seat."""
+
+    def _engine(self, **kw):
+        from types import SimpleNamespace
+
+        from cybertrade.constants import EngineState
+
+        base = dict(state=EngineState.DISARMED, degraded="",
+                    broker=SimpleNamespace(open_positions=lambda: []),
+                    continuity=SimpleNamespace(fault=""))
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_degraded_disarmed_rebuilds(self):
+        from cybertrade.cli import _needs_rebuild
+
+        self.assertTrue(_needs_rebuild(self._engine(degraded="0 candles")))
+
+    def test_degraded_live_stays_in_place(self):
+        from cybertrade.cli import _needs_rebuild
+        from cybertrade.constants import EngineState
+
+        engine = self._engine(degraded="0 candles", state=EngineState.LIVE)
+        self.assertFalse(_needs_rebuild(engine))
+
+    def test_bootstrap_hold_rebuilds(self):
+        from cybertrade.cli import BOOTSTRAP_HOLD, _needs_rebuild
+        from types import SimpleNamespace
+
+        engine = self._engine(continuity=SimpleNamespace(fault=BOOTSTRAP_HOLD))
+        self.assertTrue(_needs_rebuild(engine))
+
+    def test_healthy_engine_reseats(self):
+        from cybertrade.cli import _needs_rebuild
+
+        self.assertFalse(_needs_rebuild(self._engine()))
+
+    def test_open_positions_never_rebuild(self):
+        from cybertrade.cli import _needs_rebuild
+        from types import SimpleNamespace
+
+        broker = SimpleNamespace(open_positions=lambda: ["x1"])
+        engine = self._engine(degraded="0 candles", broker=broker)
+        self.assertFalse(_needs_rebuild(engine))
+
+    def test_unreadable_book_never_rebuilds(self):
+        from cybertrade.cli import _needs_rebuild
+        from types import SimpleNamespace
+
+        def boom():
+            raise RuntimeError("book locked")
+
+        broker = SimpleNamespace(open_positions=boom)
+        engine = self._engine(degraded="0 candles", broker=broker)
+        self.assertFalse(_needs_rebuild(engine))
+
+
+class TestLiveApiBoot(unittest.TestCase):
+    """_live_api: ensure the purse, and never strand a socket."""
+
+    def _cfg(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(broker=SimpleNamespace(ssid="S"),
+                               qx_session_path="")
+
+    def _stub(self, data=True):
+        from types import SimpleNamespace
+
+        calls = []
+        return SimpleNamespace(
+            set_ssid=lambda s, c="": calls.append("ssid"),
+            connect=lambda: calls.append("connect") or True,
+            subscribe=lambda a, t: None,
+            request_instruments=lambda: None,
+            wait_for_data=lambda timeout=0: data,
+            ensure_purse=lambda: calls.append("ensure") or True,
+            close=lambda: calls.append("close"),
+            calls=calls,
+        )
+
+    def test_boot_verifies_then_ensures(self):
+        from cybertrade.cli import _live_api
+
+        stub = self._stub(data=True)
+        self.assertIs(_live_api(self._cfg(), api_factory=lambda: stub), stub)
+        self.assertEqual(stub.calls, ["ssid", "connect", "ensure"])
+
+    def test_failed_boot_closes_the_api(self):
+        from cybertrade.cli import _live_api
+        from cybertrade.exceptions import BrokerConnectionError
+
+        stub = self._stub(data=False)
+        with self.assertRaises(BrokerConnectionError):
+            _live_api(self._cfg(), api_factory=lambda: stub)
+        self.assertIn("close", stub.calls)
+        self.assertNotIn("ensure", stub.calls)
+
+
+class TestResolveSession(unittest.TestCase):
+    """_resolve_session: cfg → env → paired file, cookies paired correctly."""
+
+    def _cfg(self, ssid="", cookies="", path=""):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            broker=SimpleNamespace(ssid=ssid, cookies=cookies),
+            qx_session_path=path)
+
+    def test_cfg_wins_with_its_cookies(self):
+        from cybertrade.cli import _resolve_session
+
+        ssid, cookies = _resolve_session(self._cfg("S", "a=b"))
+        self.assertEqual((ssid, cookies), ("S", "a=b"))
+
+    def test_env_fallback_is_cookieless(self):
+        import os
+        from unittest import mock
+
+        from cybertrade.cli import _resolve_session
+
+        with mock.patch.dict(os.environ, {"QX_SSID": "E"}):
+            ssid, cookies = _resolve_session(self._cfg())
+        self.assertEqual((ssid, cookies), ("E", ""))
+
+    def test_file_fallback(self):
+        import json
+        import tempfile
+
+        from cybertrade.cli import _resolve_session
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as fh:
+            json.dump({"ssid": "F", "cookies": "x=y"}, fh)
+            path = fh.name
+        try:
+            ssid, cookies = _resolve_session(self._cfg(path=path))
+        finally:
+            import os
+
+            os.unlink(path)
+        self.assertEqual((ssid, cookies), ("F", "x=y"))
+
+    def test_nothing_resolves_empty(self):
+        import os
+        from unittest import mock
+
+        from cybertrade.cli import _resolve_session
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QX_SSID", None)
+            self.assertEqual(_resolve_session(self._cfg()), ("", ""))
+
+
+class TestCookieHandoff(unittest.TestCase):
+    """Paired cookies must reach the handshake, never the disk."""
+
+    def test_config_blanks_cookies(self):
+        from cybertrade.config import AppConfig
+
+        cfg = AppConfig()
+        cfg.broker.cookies = "a=b"
+        self.assertEqual(cfg.to_dict()["broker"]["cookies"], "")
+
+    def test_controller_passes_cookies(self):
+        from types import SimpleNamespace
+
+        from cybertrade.web.pairing import PairingController
+
+        got = []
+        ctl = PairingController(
+            SimpleNamespace(qx_session_path=""),
+            on_ready=lambda s, p, c: got.append((s, p, c)))
+        ctl._done({"ssid": "S", "cookies": "a=b"}, ctl._epoch)
+        self.assertEqual(got, [("S", ctl._purse, "a=b")])
+
+    def test_reseat_carries_cookies(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.brokers.quotex.ghost import Pacekeeper
+        from cybertrade.cli import _reseat_session
+
+        api = QuotexAPI(pace=Pacekeeper(enabled=False))
+        engine = SimpleNamespace(
+            feed=SimpleNamespace(api=api),
+            health=SimpleNamespace(note_message=lambda m: None))
+        with mock.patch.object(QuotexAPI, "connect", return_value=True), \
+                mock.patch("cybertrade.cli._verify_session_data",
+                           return_value=None):
+            _reseat_session(engine, "SID", "a=b")
+        self.assertEqual(api.session.ssid, "SID")
+        self.assertEqual(api.session.cookies, "a=b")
+
+    def test_live_api_forwards_cfg_cookies(self):
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _live_api
+
+        seen = {}
+
+        def factory():
+            return SimpleNamespace(
+                set_ssid=lambda s, c="": seen.update(ssid=s, cookies=c),
+                connect=lambda: True,
+                subscribe=lambda a, t: None,
+                request_instruments=lambda: None,
+                wait_for_data=lambda timeout=0: True,
+                ensure_purse=lambda: True,
+                close=lambda: None)
+
+        cfg = SimpleNamespace(
+            broker=SimpleNamespace(ssid="S", cookies="a=b"),
+            qx_session_path="")
+        _live_api(cfg, api_factory=factory)
+        self.assertEqual(seen, {"ssid": "S", "cookies": "a=b"})
+
+
+class TestAutoSniff(unittest.TestCase):
+    """Adoption starves → the tab wire is captured automatically."""
+
+    def test_report_wraps_runner_output(self):
+        from cybertrade.cli import _auto_sniff_report
+
+        out = _auto_sniff_report(9333, 1.0,
+                                 runner=lambda p, s: "S2C quote batch")
+        self.assertIn("AUTO-DIAGNOSIS", out)
+        self.assertIn("S2C quote batch", out)
+
+    def test_report_never_raises(self):
+        from cybertrade.cli import _auto_sniff_report
+
+        def boom(port, seconds):
+            raise RuntimeError("no trade tab")
+
+        out = _auto_sniff_report(9333, 1.0, runner=boom)
+        self.assertIn("AUTO-DIAGNOSIS", out)
+        self.assertIn("tab wire unavailable (no trade tab)", out)
+
+    def test_controller_retains_port(self):
+        from types import SimpleNamespace
+
+        import cybertrade.web.pairing as wp
+
+        real = wp.run_pairing
+        wp.run_pairing = lambda **kw: None
+        try:
+            ctl = wp.PairingController(
+                SimpleNamespace(qx_session_path=""),
+                on_ready=lambda s, p, c="": None)
+            self.assertEqual(ctl._port, 9333)
+            started = ctl.start("data/chrome-profile", 9444, 240, True)
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(ctl._port, 9444)
+        finally:
+            wp.run_pairing = real

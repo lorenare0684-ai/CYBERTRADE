@@ -46,6 +46,7 @@ class SocketPacket:
     namespace: str = "/"
     id: Optional[int] = None
     data: Any = None
+    attachments: Optional[int] = None  # binary frames that follow (type "5"/"6")
 
 
 @dataclass
@@ -135,6 +136,15 @@ def decode_socket(payload: str) -> SocketPacket:
     rest = payload[1:]
     namespace = "/"
     ack_id: Optional[int] = None
+    attachments: Optional[int] = None
+
+    if ptype in (SIO_BINARY_EVENT, SIO_BINARY_ACK):
+        # binary packets prefix the attachment count: `51-[...]` means one
+        # binary frame follows the JSON envelope.
+        dash = rest.find("-")
+        if dash != -1 and rest[:dash].isdigit():
+            attachments = int(rest[:dash])
+            rest = rest[dash + 1 :]
 
     if rest.startswith("/"):
         idx = rest.find(",")
@@ -160,7 +170,8 @@ def decode_socket(payload: str) -> SocketPacket:
         data = loads(rest, default=None)
         if data is None and rest.strip() not in ("", "null"):
             raise ProtocolError(f"bad socket.io json: {rest[:40]!r}")
-    return SocketPacket(type=ptype, namespace=namespace, id=ack_id, data=data)
+    return SocketPacket(type=ptype, namespace=namespace, id=ack_id,
+                            data=data, attachments=attachments)
 
 
 def encode_event(name: str, *args: Any, ack_id: Optional[int] = None,

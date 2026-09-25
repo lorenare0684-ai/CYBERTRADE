@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
@@ -28,7 +29,9 @@ def make_request_id() -> str:
 def build_authorization(ssid: str, is_demo: bool = True, tournament_id: int = 0) -> str:
     """Authenticate the socket with the website session id.
 
-    Confirmed shape (community docs / stable_api):
+    Byte-identical to pyquotex master (some community forks add an
+    ``isFastHistory`` field; the reference client does not send it, and
+    the venue never asks for it):
         42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0}]
     """
     return encode_event(
@@ -63,13 +66,64 @@ def build_orders_close(order_id: str) -> str:
     return encode_event(C.EV_ORDERS_CANCEL, {"id": order_id})
 
 
-def build_balance() -> str:
-    return encode_event(C.EV_BALANCE, {})
+def build_tick() -> str:
+    """Application heartbeat — the venue expects ``42["tick"]`` ~every 5s."""
+    return encode_event(C.EV_TICK)
 
 
-def build_change_balance(account_type: str = C.ACCOUNT_DEMO) -> str:
-    """Switch the active purse: PRACTICE or REAL."""
-    return encode_event(C.EV_CHANGE_BALANCE, {"accountType": account_type})
+def build_indicator_list() -> str:
+    """Post-auth bootstrap (what the trade tab sends on every open)."""
+    return encode_event(C.EV_INDICATOR_LIST)
+
+
+def build_drawing_load() -> str:
+    return encode_event(C.EV_DRAWING_LOAD)
+
+
+def build_pending_list() -> str:
+    return encode_event(C.EV_PENDING_LIST)
+
+
+def build_chart_notification(asset: Optional[str] = None) -> str:
+    """Bare on bootstrap; per-asset (with version) as part of a subscribe."""
+    if asset is None:
+        return encode_event(C.EV_CHART_NOTIFICATION_GET)
+    return encode_event(
+        C.EV_CHART_NOTIFICATION_GET, {"asset": asset, "version": "1.0.0"}
+    )
+
+
+def build_instruments() -> str:
+    """Ask the venue to push its instrument listing (``instruments/list``)."""
+    return encode_event(C.EV_INSTRUMENTS_GET)
+
+
+def build_subscribe_candles(asset: str, timeframe_seconds: int = 60) -> str:
+    """Realtime subscribe, part 1 of 3.
+
+    The venue only streams an asset after ``instruments/update`` *plus*
+    ``chart_notification/get`` *plus* ``depth/follow`` (see
+    :meth:`QuotexAPI.subscribe`) — any one alone leaves the wire silent.
+    """
+    return encode_event(
+        C.EV_INSTRUMENTS_UPDATE,
+        {"asset": asset, "period": int(timeframe_seconds)},
+    )
+
+
+def build_depth_follow(asset: str) -> str:
+    return encode_event(C.EV_DEPTH_FOLLOW, asset)
+
+
+def build_depth_unfollow(asset: str) -> str:
+    return encode_event(C.EV_DEPTH_UNFOLLOW, asset)
+
+
+def build_unsubscribe_candles(asset: str, timeframe_seconds: int = 60) -> str:
+    return encode_event(C.EV_INSTRUMENTS_UNSUBSCRIBE, {"asset": asset})
+
+
+_history_index = itertools.count(1)
 
 
 def build_candle_history(
@@ -77,42 +131,44 @@ def build_candle_history(
     timeframe_seconds: int = 60,
     count: int = 200,
     request_id: Optional[str] = None,
+    now: Optional[float] = None,
 ) -> str:
-    """Request historical candles.  Community shape (tolerant server variants):
-        42["candleHistory",{"asset":..., "timeframe":..., "count":..., "requestId":...}]
+    """Request historical ticks (the venue aggregates nothing for you).
+
+    Wire shape (pyquotex ``history/load``):
+        42["history/load",{"asset":...,"index":...,"time":...,
+                           "offset":...,"period":...}]
+    ``time`` = window end (epoch seconds), ``offset`` = lookback in
+    *seconds* (``count * period``), ``index`` echoes back in the reply for
+    correlation.  The reply is a binary attachment: ``{asset, candles:
+    [[ts, price, direction], …]}`` — see :func:`parse_candles`.
     """
+    tf = max(1, int(timeframe_seconds))
+    try:
+        index = int(request_id) if request_id is not None else next(_history_index)
+    except (TypeError, ValueError):
+        index = next(_history_index)
+    end = int(now if now is not None else time.time())
     return encode_event(
-        C.EV_CANDLE_HISTORY,
+        C.EV_HISTORY_LOAD,
         {
             "asset": asset,
-            "timeframe": timeframe_seconds,
-            "time": timeframe_seconds,
-            "count": count,
-            "requestId": request_id or make_request_id(),
+            "index": index,
+            "time": end,
+            "offset": max(tf, int(count) * tf),
+            "period": tf,
         },
     )
 
 
-def build_subscribe_candles(asset: str, timeframe_seconds: int = 60) -> str:
-    return encode_event(
-        C.EV_SUBSCRIBE_CANDLE,
-        {"asset": asset, "timeframe": timeframe_seconds},
-    )
-
-
-def build_unsubscribe_candles(asset: str, timeframe_seconds: int = 60) -> str:
-    return encode_event(
-        C.EV_UNSUBSCRIBE_CANDLE,
-        {"asset": asset, "timeframe": timeframe_seconds},
-    )
+def build_change_balance(account_type: str = C.ACCOUNT_DEMO) -> str:
+    """Switch the active purse: PRACTICE (demo=1) or REAL (demo=0)."""
+    demo = 0 if str(account_type).upper() == C.ACCOUNT_REAL else 1
+    return encode_event(C.EV_ACCOUNT_CHANGE, {"demo": demo, "tournamentId": 0})
 
 
 def build_portfolio() -> str:
     return encode_event(C.EV_PORTFOLIO, {})
-
-
-def build_instruments() -> str:
-    return encode_event(C.EV_INSTRUMENT, {})
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +192,9 @@ def parse_instruments(args: List[Any]) -> List[QXAsset]:
 
     def _row(item: Any) -> None:
         if isinstance(item, (list, tuple)):
-            if len(item) >= 2 and isinstance(item[1], dict):
+            if _is_positional_row(item):
+                out.append(_positional_asset(item))
+            elif len(item) >= 2 and isinstance(item[1], dict):
                 out.append(QXAsset.from_payload(str(item[0]), item[1]))
             else:
                 for sub in item:
@@ -162,9 +220,115 @@ def parse_instruments(args: List[Any]) -> List[QXAsset]:
     return out
 
 
+def _is_positional_row(item: Any) -> bool:
+    """True for a venue instrument row (``item[1]`` is the symbol string).
+
+    Quote rows (``[asset, ts, price, …]``) also start with a string, but
+    their second element is numeric — that is the discriminator.
+    """
+    return (
+        isinstance(item, (list, tuple))
+        and len(item) >= 6
+        and isinstance(item[1], str)
+    )
+
+
+def _positional_asset(item: Any) -> QXAsset:
+    name = str(item[1])
+    pay_raw = item[5] if len(item) > 5 and isinstance(item[5], (int, float)) else 85
+    payout = float(pay_raw)
+    if payout > 1:
+        payout = payout / 100.0
+    kind = str(item[3]) if len(item) > 3 and isinstance(item[3], str) else ""
+    if name.endswith("_otc") and kind and not kind.endswith("_otc"):
+        kind += "_otc"
+    return QXAsset(
+        name=name,
+        asset_id=str(item[0]),
+        payout=payout,
+        open=bool(item[14]) if len(item) > 14 else True,
+        is_otc=name.endswith("_otc"),
+        kind=kind,
+    )
+
+
+def parse_quotes(data: Any) -> List[Tuple[str, float, int]]:
+    """``(asset, price, ts)`` rows from a bare quote batch.
+
+    Quotes arrive outside any Socket.IO event — a bare
+    ``[[asset, ts, price, direction], …]`` frame.  Timestamps pass
+    through raw (the dispatcher normalizes ms → s).
+    """
+    rows = data if isinstance(data, list) else [data]
+    out: List[Tuple[str, float, int]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 3:
+            continue
+        asset, ts_raw, px_raw = row[0], row[1], row[2]
+        if not isinstance(asset, str) or not asset:
+            continue
+        try:
+            price = float(px_raw)
+            ts = int(ts_raw)
+        except (TypeError, ValueError):
+            continue
+        if price <= 0:
+            continue
+        out.append((asset, price, ts))
+    return out
+
+
+def is_placeholder(args: List[Any]) -> Optional[int]:
+    """Binary attachments announced by a ``451-[event, {"_placeholder"…}]``.
+
+    Returns how many binary frames to expect (``num + 1``), or None when
+    ``args`` is not a placeholder at all.
+    """
+    if args and isinstance(args[0], dict) and args[0].get("_placeholder"):
+        try:
+            num = int(args[0].get("num", 0))
+        except (TypeError, ValueError):
+            num = 0
+        return max(1, num + 1)
+    return None
+
+
+def _norm_ts(raw: Any) -> int:
+    ts = int(raw)
+    return ts // 1000 if ts > 1e11 else ts
+
+
+def _aggregate_ticks(asset: str, ticks: List[Tuple[int, float]],
+                     tf: int) -> List[QXCandle]:
+    """Bucket ``history/load`` tick rows into OHLC bars (upstream parity).
+
+    Buckets align to ``(ts // tf) * tf``; the last (still-forming) bucket
+    is dropped, exactly like the reference client's ``calculate_candles``.
+    """
+    buckets: Dict[int, List[Tuple[int, float]]] = {}
+    for ts, px in ticks:
+        buckets.setdefault((ts // tf) * tf, []).append((ts, px))
+    if not buckets:
+        return []
+    forming = max(buckets)
+    out: List[QXCandle] = []
+    for start in sorted(buckets):
+        if start == forming:
+            continue
+        rows = buckets[start]
+        pxs = [px for _, px in rows]
+        out.append(QXCandle(
+            asset=asset, open_ts=start, open=pxs[0], high=max(pxs),
+            low=min(pxs), close=pxs[-1], timeframe_seconds=tf,
+            volume=float(len(rows)),
+        ))
+    return out
+
+
 def parse_candles(asset: str, args: List[Any], tf: int = 60) -> List[QXCandle]:
     """Extract candles from any known payload envelope."""
     out: List[QXCandle] = []
+    ticks: List[Tuple[int, float]] = []
     if not args:
         return out
     payload = args[0]
@@ -179,7 +343,13 @@ def parse_candles(asset: str, args: List[Any], tf: int = 60) -> List[QXCandle]:
             )
             if isinstance(maybe_list, list):
                 for item in maybe_list:
-                    out.append(QXCandle.from_payload(asset, item, tf))
+                    if (isinstance(item, (list, tuple)) and len(item) >= 3
+                            and len(item) < 5
+                            and all(isinstance(x, (int, float)) for x in item[:3])):
+                        # history/load tick row [ts, price, direction]
+                        ticks.append((_norm_ts(item[0]), float(item[1])))
+                    else:
+                        out.append(QXCandle.from_payload(asset, item, tf))
             elif "open" in obj or "o" in obj:
                 out.append(QXCandle.from_payload(asset, obj, tf))
         elif isinstance(obj, (list, tuple)):
@@ -191,6 +361,8 @@ def parse_candles(asset: str, args: List[Any], tf: int = 60) -> List[QXCandle]:
                 _absorb(item)
 
     _absorb(payload)
+    out.extend(_aggregate_ticks(asset, ticks, tf))
+    out.sort(key=lambda c: c.open_ts)
     return out
 
 
@@ -219,8 +391,8 @@ def parse_tick(args: List[Any], default_asset: str = "") -> Tuple[str, float, in
     return asset, price, ts
 
 
-def parse_balance(args: List[Any]) -> QXBalance:
-    return QXBalance.from_payload(args[0] if args else {})
+def parse_balance(args: List[Any], demo: bool = True) -> QXBalance:
+    return QXBalance.from_payload(args[0] if args else {}, demo=demo)
 
 
 def parse_portfolio(args: List[Any]) -> List[QXOrderResult]:
@@ -277,16 +449,24 @@ __all__ = [
     "build_order",
     "build_sell_option",
     "build_orders_close",
-    "build_balance",
+    "build_tick",
+    "build_indicator_list",
+    "build_drawing_load",
+    "build_pending_list",
+    "build_chart_notification",
     "build_change_balance",
     "build_candle_history",
     "build_subscribe_candles",
     "build_unsubscribe_candles",
+    "build_depth_follow",
+    "build_depth_unfollow",
     "build_portfolio",
     "build_instruments",
     "parse_event",
     "parse_candles",
     "parse_tick",
+    "parse_quotes",
+    "is_placeholder",
     "parse_balance",
     "parse_portfolio",
     "parse_order_result",

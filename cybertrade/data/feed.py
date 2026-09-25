@@ -40,6 +40,18 @@ class Feed:
         self._running = False
         self._lock = threading.RLock()
 
+    def add_asset(self, asset: str) -> bool:
+        """Grow the universe at runtime (venue discovery / operator pick).
+
+        Returns False when the asset was already tracked.  Subclasses with
+        per-asset state override this and call up first.
+        """
+        with self._lock:
+            if asset in self.assets:
+                return False
+            self.assets.append(asset)
+            return True
+
     # -- wiring ------------------------------------------------------------
     def add_listener(self, callback: Callable[[Tick], None]) -> None:
         with self._lock:

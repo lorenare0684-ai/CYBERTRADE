@@ -14,13 +14,19 @@ loudly (re-pair via ``cybertrade quotex login``) instead of retried blindly.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...data.models import AccountSnapshot, Candle, Tick
-from ...exceptions import BrokerAuthError, BrokerConnectionError, OrderRejected
+from ...exceptions import (
+    BrokerAuthError,
+    BrokerConnectionError,
+    NetworkError,
+    OrderRejected,
+)
 from ...network.http_client import HttpClient
 from ...utils import timex
 from ...utils.jsonx import dig
@@ -29,23 +35,105 @@ from .client import QuotexSocket
 from .ghost import Pacekeeper, is_session_fault, parity_headers
 from .models import QXAsset, QXBalance, QXCandle, QXOrderRequest, QXOrderResult, QXSession
 from .protocol import (
-    build_balance,
     build_candle_history,
     build_change_balance,
+    build_chart_notification,
+    build_depth_follow,
+    build_depth_unfollow,
+    build_drawing_load,
+    build_indicator_list,
     build_instruments,
     build_order,
+    build_pending_list,
     build_portfolio,
     build_sell_option,
     build_subscribe_candles,
+    build_unsubscribe_candles,
     make_request_id,
     parse_balance,
     parse_candles,
     parse_order_result,
     parse_portfolio,
+    parse_quotes,
     parse_tick,
 )
 
 log = logging.getLogger("cybertrade.qx.api")
+
+# Sign-in responses drift between site deployments: the session token has
+# been seen under all of these keys (and sometimes as a bare JSON string).
+_SSID_PATHS = (
+    "session", "ssid", "token", "access_token", "id",
+    "data.session", "data.ssid", "data.token", "data.access_token", "data.id",
+    "result.session", "result.ssid", "payload.session", "payload.ssid",
+)
+
+# Session cookie names worth trying when the JSON body carries no token
+# (same priority as pairing: the live site's names first, legacy last).
+_SSID_COOKIES = ("session", "ssid", "qx_session", "sessionid", "PHPSESSID")
+
+# Markers that say "a browser challenge ate your login", not "bad password".
+_CHALLENGE_MARKERS = (
+    "cf-challenge", "just a moment", "cloudflare", "captcha",
+    "__cf_bm", "attention required", "verify you are human",
+)
+
+
+def _extract_ssid(data: Any) -> str:
+    """Harvest the websocket session token from a signin response body."""
+    if isinstance(data, str):
+        candidate = data.strip().strip('"')
+        return candidate if len(candidate) >= 8 else ""
+    if not isinstance(data, dict):
+        return ""
+    for path in _SSID_PATHS:
+        raw = dig(data, path, "")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        if type(raw) is int and raw:
+            return str(raw)
+    return ""
+
+
+def _coerce_ssid(raw: str) -> str:
+    """Unwrap a pasted authorization frame down to the session token.
+
+    Community guides tell operators to copy the ``42["authorization",…]``
+    frame from DevTools; feeding that whole frame in as the session used to
+    fail auth opaquely. Bare tokens pass through untouched.
+    """
+    text = (raw or "").strip()
+    if not text or ("authorization" not in text and not text.startswith("42[")):
+        return text
+    start = text.find("[")
+    try:
+        data = json.loads(text[start:] if start != -1 else text)
+    except ValueError:
+        return text
+    rows = [data[1]] if isinstance(data, list) and len(data) >= 2 else []
+    if isinstance(data, dict):
+        rows.append(data)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("session", "ssid", "token"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if type(val) is int and val:
+                return str(val)
+    return text
+
+
+def _looks_like_challenge(status: int, text: str) -> bool:
+    """True when the signin reply is a challenge page, not a session."""
+    lowered = (text or "").lower()
+    if any(marker in lowered for marker in _CHALLENGE_MARKERS):
+        return True
+    # A 200 that is HTML rather than JSON is a challenge/error page.
+    if status == 200 and "<html" in lowered:
+        return True
+    return False
 
 
 class QuotexAPI:
@@ -64,6 +152,7 @@ class QuotexAPI:
         order_think_ms: int = 140,
         order_min_gap_ms: int = 350,
         max_orders_per_min: int = 10,
+        reconnect_max: int = 12,
         pace: Optional[Pacekeeper] = None,
     ) -> None:
         self.http_base = http_base
@@ -72,6 +161,7 @@ class QuotexAPI:
         self.demo = demo
         self.timeout = timeout
         self.legacy_orders = legacy_orders
+        self.reconnect_max = max(1, int(reconnect_max))
 
         self.pace = pace or Pacekeeper(
             enabled=ghost,
@@ -101,7 +191,19 @@ class QuotexAPI:
         self._tick_handlers: List[Callable[[Tick], None]] = []
         # Phase-30: replayable candle subscriptions + session health.
         self._subs: Dict[Tuple[str, int], None] = {}
+        self._hist_tf: Dict[str, int] = {}
         self._session_stale = False
+        # Set by the dispatcher on the first balance push — the cheapest
+        # proof that the venue accepted the session (login verification
+        # waits on this instead of reading a balance that is still 0.0).
+        self._balance_seen = threading.Event()
+        # Set on the first *data* event (quotes / candles / instruments /
+        # balance).  An authorized wire that never sets this is a
+        # data-starved session — boot fails fast to the pairing screen
+        # instead of warming up on 90 seconds of silence.
+        self._data_seen = threading.Event()
+        # Set by the dispatcher on the venue's ``s_account/change`` ack.
+        self._purse_confirmed = threading.Event()
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -114,32 +216,72 @@ class QuotexAPI:
         if is_demo is not None:
             self.demo = is_demo
         payload = {"email": email, "password": password, "remember": 1}
-        try:
-            resp = self.http.post(
-                C.SIGNIN_PATH,
-                json_body=payload,
-                headers={"Origin": self.http_base, "Referer": f"{self.http_base}/en/login"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise BrokerAuthError(f"signin request failed: {exc}") from exc
+        # qxbroker.com and quotex.com are the same venue behind different
+        # front doors; a dead route must not read as a dead account.
+        bases = list(dict.fromkeys([self.http_base, C.HTTP_BASE, C.HTTP_BASE_ALT]))
+        resp = None
+        last_net_error: Optional[Exception] = None
+        for base in bases:
+            try:
+                self.http.base_url = base.rstrip("/")
+                resp = self.http.post(
+                    C.SIGNIN_PATH,
+                    json_body=payload,
+                    headers={"Origin": base, "Referer": f"{base}/en/login"},
+                )
+                last_net_error = None
+                break
+            except NetworkError as exc:
+                last_net_error = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                raise BrokerAuthError(f"signin request failed: {exc}") from exc
+        if resp is None:
+            tried = ", ".join(bases)
+            raise BrokerAuthError(
+                f"signin request failed ({last_net_error}); tried {tried}"
+            ) from last_net_error
+        self.http_base = self.http.base_url
 
-        if resp.status == 401 or resp.status == 403:
-            raise BrokerAuthError("login rejected: bad credentials or CF challenge")
         data = resp.json(default={}) or {}
-        ssid = str(dig(data, "session", dig(data, "ssid", dig(data, "data.session", ""))))
+        ssid = _extract_ssid(data)
         if not ssid and resp.ok:
-            # cookie-only flows: fall back to sessionid cookie value
-            ssid = self.http.jar.cookies.get("sessionid", "")
+            # cookie-only flows: fall back to the session cookie value
+            for name in _SSID_COOKIES:
+                ssid = self.http.jar.cookies.get(name, "") or ""
+                if ssid:
+                    break
         if not ssid:
+            if resp.status == 401:
+                raise BrokerAuthError("login rejected: bad email/password (HTTP 401)")
+            if _looks_like_challenge(resp.status, resp.text()):
+                raise BrokerAuthError(
+                    "login blocked by a Cloudflare/CAPTCHA browser challenge "
+                    f"(HTTP {resp.status}) — headless sign-in cannot solve it; "
+                    "pair instead: `cybertrade quotex login` (Chrome opens; "
+                    "you sign in and solve the CAPTCHA once)"
+                )
+            if resp.status in (403, 429):
+                raise BrokerAuthError(
+                    f"login rejected (HTTP {resp.status}): bad credentials, "
+                    "rate limit, or CF challenge"
+                )
+            detail = str(dig(data, "message", dig(data, "error", "")) or "").strip()
+            if detail and len(detail) < 200:
+                raise BrokerAuthError(f"login failed (HTTP {resp.status}): {detail}")
             raise BrokerAuthError(
                 f"login failed (HTTP {resp.status}): no session in response — "
                 "site may require browser CF challenge; use --ssid instead"
             )
+        user_id = str(
+            dig(data, "user_id", dig(data, "userId", dig(data, "data.user_id", ""))) or ""
+        )
         self.session = QXSession(
             ssid=ssid,
             cookies=self.http.jar.header(),
             user_agent=self.user_agent,
             demo=self.demo,
+            user_id=user_id,
             host=self.http_base.split("//")[-1],
         )
         self._session_stale = False
@@ -148,9 +290,14 @@ class QuotexAPI:
         return self.session
 
     def set_ssid(self, ssid: str, cookies: str = "") -> QXSession:
-        """Bypass credentials: inject a session id obtained from a browser."""
+        """Bypass credentials: inject a session id obtained from a browser.
+
+        Accepts a bare session token *or* a pasted Socket.IO authorization
+        frame (``42["authorization",{"session":"…",…}]``) — the format
+        community guides tell operators to copy from DevTools.
+        """
         self.session = QXSession(
-            ssid=ssid,
+            ssid=_coerce_ssid(ssid),
             cookies=cookies,
             user_agent=self.user_agent,
             demo=self.demo,
@@ -170,23 +317,74 @@ class QuotexAPI:
                 self.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.socket = QuotexSocket(
-            self.session.ssid,
-            ws_url=self.ws_url,
-            cookies=self.session.cookies,
-            user_agent=self.user_agent,
-            is_demo=self.demo,
-            on_event=self._on_socket_event,
-            on_reconnected=self._on_reconnected,
-            timeout=self.timeout,
-        )
-        self.socket.connect(authorize=authorize)
+        self._balance_seen.clear()
+        self._data_seen.clear()
+        errors: List[str] = []
+        for url in dict.fromkeys([self.ws_url, C.WS_URL, C.WS_URL_ALT]):
+            sock = QuotexSocket(
+                self.session.ssid,
+                ws_url=url,
+                cookies=self.session.cookies,
+                user_agent=self.user_agent,
+                origin=self.http_base,
+                is_demo=self.demo,
+                on_event=self._on_socket_event,
+                on_reconnected=self._on_reconnected,
+                reconnect_max=self.reconnect_max,
+                timeout=self.timeout,
+            )
+            try:
+                sock.connect(authorize=authorize)
+            except BrokerAuthError:
+                try:
+                    sock.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise  # a rejected session is final — no host will accept it
+            except (BrokerConnectionError, NetworkError, OSError) as exc:
+                errors.append(f"{url}: {exc}")
+                try:
+                    sock.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            self.socket = sock
+            self.ws_url = url
+            break
+        else:
+            raise BrokerConnectionError(
+                "quotex websocket unreachable (" + "; ".join(errors) + ")"
+            )
         # Supervisor heals call api.connect() directly — replay here too so
         # either reconnect path restores the chart stream.
+        # NOTE: no account/change here.  The auth frame's isDemo already
+        # selects the purse (all pyquotex ever sends on connect); a switch
+        # inside the connect burst is the one structural difference behind
+        # starving wires.  Boot calls ensure_purse() after data is proven.
+        self._bootstrap_session()
+        log.info("session bootstrap sent "
+                 "(indicator/drawing/pending/chart/instruments)")
         self._replay_subscriptions()
-        self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
-        self.request_balance()
         return True
+
+    def wait_for_balance(self, timeout: float = 6.0) -> bool:
+        """Block until the venue confirms the session with a balance push."""
+        return self._balance_seen.wait(timeout)
+
+    def wait_for_data(self, timeout: float = 10.0) -> bool:
+        """Block until the first market-data event lands (any kind)."""
+        return self._data_seen.wait(timeout)
+
+    def _note_data(self, name: str) -> None:
+        """Latch the data-seen flag; announce the first arrival loudly.
+
+        The single most informative line in a starving-wire log: present
+        means the venue streams to us, absent (with only ``venue
+        stream:`` acks around) means it hears us and answers nothing.
+        """
+        if not self._data_seen.is_set():
+            self._data_seen.set()
+            log.info("venue data flowing: %s", name)
 
     def close(self) -> None:
         if self.socket is not None:
@@ -201,15 +399,46 @@ class QuotexAPI:
 
     # -- market data -------------------------------------------------------
     def subscribe(self, asset: str, timeframe_seconds: int = 60) -> None:
+        """Stream an asset: the venue needs the full subscribe trio.
+
+        ``instruments/update`` alone leaves the wire silent — the trade
+        tab always follows it with ``chart_notification/get`` and
+        ``depth/follow``, so we send all three, every time.
+        """
         self._subs[(asset, int(timeframe_seconds))] = None
+        log.debug("subscribe trio -> %s@%ss", asset, timeframe_seconds)
         self._send(build_subscribe_candles(asset, timeframe_seconds), kind="frame")
+        self._send(build_chart_notification(asset), kind="frame")
+        self._send(build_depth_follow(asset), kind="frame")
+
+    def unsubscribe(self, asset: str, timeframe_seconds: int = 60) -> None:
+        self._subs.pop((asset, int(timeframe_seconds)), None)
+        try:
+            self._send(build_unsubscribe_candles(asset, timeframe_seconds), kind="frame")
+            self._send(build_depth_unfollow(asset), kind="frame")
+        except Exception as exc:  # noqa: BLE001 — unsubscribe is courtesy
+            log.debug("unsubscribe failed %s: %s", asset, exc)
+
+    def _bootstrap_session(self) -> None:
+        """Post-auth bootstrap: what the trade tab sends on every open."""
+        for label, wire in (
+            ("indicator/list", build_indicator_list()),
+            ("drawing/load", build_drawing_load()),
+            ("pending/list", build_pending_list()),
+            ("chart_notification/get", build_chart_notification()),
+            ("instruments/get", build_instruments()),
+        ):
+            try:
+                self._send(wire, kind="frame")
+            except Exception as exc:  # noqa: BLE001 — bootstrap is best-effort
+                log.debug("bootstrap %s failed: %s", label, exc)
 
     def _replay_subscriptions(self) -> int:
         """Re-send every candle subscription after a reconnect (Phase-30)."""
         sent = 0
         for asset, tf in list(self._subs.keys()):
             try:
-                self._send(build_subscribe_candles(asset, tf), kind="frame")
+                self.subscribe(asset, tf)
                 sent += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("resubscribe failed %s@%ss: %s", asset, tf, exc)
@@ -218,12 +447,12 @@ class QuotexAPI:
         return sent
 
     def _on_reconnected(self) -> None:
-        """Client-level reconnect hook: restore stream + session heartbeat."""
+        """Client-level reconnect hook: restore stream + session bootstrap."""
         try:
-            self._replay_subscriptions()
-            self.request_balance()
+            sent = self._replay_subscriptions()
+            self._bootstrap_session()
             self._emit("reconnected", self.stats())
-            log.info("venue wire restored — subscriptions replayed")
+            log.info("venue wire restored — replayed %d subscriptions", sent)
         except Exception as exc:  # noqa: BLE001
             log.warning("post-reconnect restore failed: %s", exc)
 
@@ -233,6 +462,12 @@ class QuotexAPI:
         key = (asset, timeframe_seconds)
         with self._lock:
             self._candles.setdefault(key, [])
+        # History only flows for subscribed assets (the chart subscribes
+        # before it ever asks), so make sure the trio went out first. The
+        # reply carries no timeframe, so remember what we asked for.
+        if key not in self._subs:
+            self.subscribe(asset, timeframe_seconds)
+        self._hist_tf[asset] = int(timeframe_seconds)
         self._send(build_candle_history(asset, timeframe_seconds, count), kind="history")
         deadline = time.time() + wait
         while time.time() < deadline:
@@ -241,7 +476,16 @@ class QuotexAPI:
                     break
             time.sleep(0.05)
         with self._lock:
-            return list(self._candles.get(key, []))
+            out = list(self._candles.get(key, []))
+        if not out:
+            # The venue heard the trio + history request (the socket would
+            # have raised otherwise) and answered nothing.  Say so per
+            # asset — a wall of these plus zero "venue stream:" lines is a
+            # data-starved session, not a slow one.
+            log.warning("history %s@%ss — venue silent after %.1fs "
+                        "(no reply to subscribe trio + history request)",
+                        asset, timeframe_seconds, wait)
+        return out
 
     def last_price(self, asset: str) -> Optional[float]:
         tick = self._last_tick.get(asset)
@@ -266,12 +510,53 @@ class QuotexAPI:
 
     # -- account -----------------------------------------------------------
     def request_balance(self) -> QXBalance:
-        self._send(build_balance(), kind="poll")
+        """Freshest known balance — the venue pushes it, there is no query.
+
+        (Older community docs named a ``balance`` request frame; the live
+        venue never answered it. Balance pushes arrive after auth and
+        after every ``account/change``.)
+        """
         return self.balance
 
     def change_balance(self, account_type: str = C.ACCOUNT_DEMO) -> None:
         self.demo = account_type.upper() != C.ACCOUNT_REAL
         self._send(build_change_balance(account_type), kind="frame")
+
+    def ensure_purse(self, timeout: float = 5.0, reverify: float = 8.0) -> bool:
+        """Select the configured purse — deferred past data verification.
+
+        Runs at boot after the wire has proven it carries data: sends the
+        ``account/change`` the connect burst skips, waits for the venue's
+        ``s_account/change`` ack, then proves data STILL flows.  A switch
+        that starves the wire raises here — loudly, before any order can
+        touch the wrong money (or nothing at all).  Mid-run re-seats do
+        NOT call this: the fresh wire re-auths with the same isDemo, and
+        a no-op switch on a live book adds risk without safety.
+        """
+        want = C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL
+        self._purse_confirmed.clear()
+        self.change_balance(want)
+        if self.socket is not None and not self._purse_confirmed.wait(timeout):
+            log.warning("purse switch unconfirmed after %.0fs — proceeding",
+                        timeout)
+        else:
+            log.info("purse confirmed: %s", want)
+        # The switch must not cost the stream: re-poke, require fresh data.
+        self._data_seen.clear()
+        try:
+            self.subscribe("EURUSD_otc", 60)
+        except Exception:  # noqa: BLE001 — the wait below is the verdict
+            pass
+        try:
+            self.request_instruments()
+        except Exception:  # noqa: BLE001
+            pass
+        if self.wait_for_data(timeout=reverify):
+            return True
+        raise BrokerConnectionError(
+            "venue stopped sending data after the purse switch — "
+            "reconnect and retry; if it persists the wire needs attention"
+        )
 
     def account_snapshot(self) -> AccountSnapshot:
         return AccountSnapshot(
@@ -346,36 +631,108 @@ class QuotexAPI:
             raise BrokerConnectionError("socket not connected")
         self.socket.send(wire)
 
+    def _handle_tick(self, asset: str, price: float, ts: int) -> None:
+        """One quote into the tick pipeline (books, discovery, handlers)."""
+        tick = Tick(asset=asset, price=price,
+                    ts=ts / 1000.0 if ts > 1e11 else float(ts))
+        discovered = None
+        with self._lock:
+            self._last_tick[asset] = tick
+            if asset not in self.assets and self.catalog.get(asset) is None:
+                # Quote-driven discovery: the venue sometimes streams
+                # quotes for assets its listing never named.  A bare
+                # sighting still joins the catalog (kind inferred,
+                # payout static) so the boards show everything alive.
+                from .catalog import infer_kind
+                from .models import QXAsset
+
+                discovered = QXAsset(
+                    name=asset, asset_id=asset,
+                    payout=self.catalog.payout_for(asset),
+                    open=True,
+                    is_otc=asset.endswith("_otc"),
+                    kind=infer_kind(asset))
+                self.assets[asset] = discovered
+                self.catalog.upsert(discovered)
+        if discovered is not None:
+            self._emit("instruments", [discovered])
+        for fn in list(self._tick_handlers):
+            try:
+                fn(tick)
+            except Exception:  # noqa: BLE001
+                pass
+        self._emit("tick", tick)
+
+    def _handle_live_candle(self, payload: Any) -> None:
+        """A ``candle-generated`` push: a closed bar, plus its closing tick."""
+        if not isinstance(payload, dict):
+            return
+        asset = str(payload.get("asset") or "")
+        if not asset:
+            return
+        tf = int(payload.get("period") or self._hist_tf.get(asset, 0) or 60)
+        qc = QXCandle.from_payload(asset, payload, tf)
+        if qc.open > 0 and qc.close > 0:
+            self._ingest_candle(qc)
+        if qc.close > 0:
+            try:
+                ts = int(qc.open_ts)
+            except (TypeError, ValueError):
+                ts = 0
+            self._handle_tick(asset, qc.close, ts)
+
     def _on_socket_event(self, name: str, args: List[Any]) -> None:
         """Central dispatcher — tolerant of unknown/renamed venue events."""
-        if name in (C.SV_TICK, "quotes", "quote", C.SV_CANDLE):
+        if name == C.SV_QUOTES:
+            rows = list(parse_quotes(args[0] if args else []))
+            if rows:
+                self._note_data(name)
+            for asset, price, ts in rows:
+                self._handle_tick(asset, price, ts)
+        elif name == C.SV_CANDLE_GENERATED:
+            self._note_data(name)
+            self._handle_live_candle(args[0] if args else {})
+        elif name == C.SV_S_AUTHORIZATION:
+            log.info("venue authorized the session")
+            self._emit("authorized", {})
+        elif name == C.SV_S_ACCOUNT_CHANGE or (
+                isinstance(name, str) and name.startswith("s_")):
+            log.info("venue confirm: %s", name)
+            if name == C.SV_S_ACCOUNT_CHANGE:
+                self._purse_confirmed.set()
+        elif name in (C.SV_TICK, "quote", C.SV_CANDLE):
             asset, price, ts = parse_tick(args)
             if asset and price > 0:
-                tick = Tick(asset=asset, price=price, ts=ts / 1000.0 if ts > 1e11 else float(ts))
-                with self._lock:
-                    self._last_tick[asset] = tick
-                for fn in list(self._tick_handlers):
-                    try:
-                        fn(tick)
-                    except Exception:  # noqa: BLE001
-                        pass
-                self._emit("tick", tick)
+                self._note_data(name)
+                self._handle_tick(asset, price, ts)
 
-        elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES):
+        elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES, C.SV_HISTORY_LOAD,
+                      C.SV_HISTORY_LIST_V2):
             asset = str(dig(args[0] if args else {}, "asset", "")) if args else ""
-            qlist = parse_candles(asset, args)
+            tf = self._hist_tf.get(asset, 60) if asset else 60
+            qlist = parse_candles(asset, args, tf)
+            if qlist:
+                self._note_data(name)
             for qc in qlist:
                 self._ingest_candle(qc)
 
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
-            self.balance = parse_balance(args)
+            self.balance = parse_balance(args, demo=self.demo)
+            self._balance_seen.set()
+            self._note_data(name)
+            if self.balance.user_id and not self.session.user_id:
+                # A paired session carries no identity of its own — adopt
+                # the venue-confirmed account id for continuity scoping.
+                self.session.user_id = self.balance.user_id
+                log.info("venue confirmed account %s", self.balance.user_id)
             self._emit("balance", self.balance)
 
-        elif name in (C.EV_INSTRUMENT, "instruments", "assets", "asset_list"):
+        elif name in C.INSTRUMENT_EVENTS:
             from .protocol import parse_instruments
 
             listing = parse_instruments(args)
             if listing:
+                self._note_data(name)
                 with self._lock:
                     for meta in listing:
                         self.assets[meta.name] = meta
@@ -400,7 +757,7 @@ class QuotexAPI:
                             self._orders[key] = row
                 self._emit("portfolio", rows)
 
-        elif name in (C.SV_ERROR, "error"):
+        elif name in (C.SV_ERROR, "error", C.SV_AUTH_REJECT):
             from .protocol import parse_error
 
             msg = parse_error(args)

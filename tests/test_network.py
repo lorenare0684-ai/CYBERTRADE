@@ -50,6 +50,28 @@ class TestWebSocketFrames(unittest.TestCase):
         payload = b"hello world"
         self.assertEqual(_mask_payload(_mask_payload(payload, key), key), payload)
 
+    def test_handshake_stashes_coalesced_frame(self):
+        from cybertrade.network.websocket import WebSocketConnection
+
+        conn = WebSocketConnection("ws://127.0.0.1:9/x")
+        frame = b"\x81\x02hi"  # unmasked text frame riding the same segment
+        blob = (b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+                b"Connection: Upgrade\r\nSec-WebSocket-Accept: x\r\n\r\n" + frame)
+
+        class FakeSock:
+            def __init__(self, data):
+                self.data = data
+
+            def recv(self, n):
+                out, self.data = self.data[:n], self.data[n:]
+                return out
+
+        conn.sock = FakeSock(blob)
+        head = conn._read_http_response()
+        self.assertTrue(head.endswith(b"\r\n\r\n"))
+        # The frame bytes belong to the frame reader, not the floor.
+        self.assertEqual(bytes(conn._buf), frame)
+
 
 class TestSocketIO(unittest.TestCase):
     def test_handshake(self):
@@ -101,6 +123,44 @@ class TestHttpClientParts(unittest.TestCase):
     def test_dechunk(self):
         data = b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"
         self.assertEqual(_dechunk(data), b"hello world")
+
+    def test_parse_chunked_gzip(self):
+        import gzip
+
+        payload = gzip.compress(b'{"session":"abc123"}')
+        chunked = ("%X\r\n" % len(payload)).encode() + payload + b"\r\n0\r\n\r\n"
+        raw = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+               b"Content-Encoding: gzip\r\n\r\n" + chunked)
+        resp = _parse_response(raw, "https://qxbroker.com/api/signin")
+        self.assertEqual(resp.json(), {"session": "abc123"})
+
+    def test_cookie_jar_expires_comma(self):
+        jar = CookieJar()
+        jar.set_from_header(
+            "sessionid=abc123; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Path=/, "
+            "__cf_bm=xyz; Path=/"
+        )
+        self.assertEqual(
+            jar.cookies, {"sessionid": "abc123", "__cf_bm": "xyz"})
+
+    def test_multi_set_cookie_folding(self):
+        from cybertrade.network.http_client import _headers_from
+
+        head = (b"HTTP/1.1 200 OK\r\nSet-Cookie: a=1; Path=/\r\n"
+                b"Set-Cookie: b=2; Expires=Wed, 21 Oct 2015 07:28:00 GMT\r\n")
+        jar = CookieJar()
+        jar.update_from_response(_headers_from(head))
+        self.assertEqual(jar.cookies, {"a": "1", "b": "2"})
+
+    def test_host_header_omits_default_port(self):
+        from cybertrade.network.websocket import host_header_value
+
+        self.assertEqual(
+            host_header_value("wss", "ws2.qxbroker.com", 443),
+            "ws2.qxbroker.com")
+        self.assertEqual(host_header_value("ws", "h", 80), "h")
+        self.assertEqual(
+            host_header_value("wss", "h", 8443), "h:8443")
 
 
 class TestQuotexProtocol(unittest.TestCase):

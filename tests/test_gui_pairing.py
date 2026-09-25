@@ -441,7 +441,7 @@ class TestAppLoginFlow(unittest.TestCase):
         self.app._login({"demo": True, "profile": "p", "port": 9333,
                          "timeout": 5})
         self.assertFalse(self.panel._pairing)
-        self.assertIn("without a sessionid cookie", self.panel.status._label)
+        self.assertIn("without a session cookie", self.panel.status._label)
         self.assertEqual(self.wired, [])      # never wire an empty session
 
     def test_missing_chrome_is_reported(self):
@@ -539,6 +539,13 @@ class TestSessionGate(unittest.TestCase):
         self.assertIn("CHROME LOGIN", self.gate.login_btn.label)
         self.assertEqual(self.gate.purse.get(), "")
 
+    def test_a_failed_boot_lands_back_here_with_the_reason(self):
+        """The desktop retry loop re-opens the gate showing why it failed."""
+        gate = self.gate_mod.SessionGate(self.cfg, notice="venue unreachable")
+        self.addCleanup(gate.destroy)
+        self.assertIn("last attempt failed", gate.status._label)
+        self.assertIn("venue unreachable", gate.status._label)
+
     def test_a_cli_purse_carries_into_the_window(self):
         """--demo/--real is an explicit choice, so the gate must not re-ask."""
         for flag, expected in ((True, "practice"), (False, "real")):
@@ -574,6 +581,14 @@ class TestSessionGate(unittest.TestCase):
         self.assertIn("session captured", self.gate.status._label)
         self.assertFalse(self.gate._pairing)
 
+    def test_success_closes_the_gate(self):
+        """run_gate() blocks in mainloop(): the window must close itself or
+        the terminal never boots — a login the app never detects."""
+        self._pair_ok({"ssid": "QX.gate"})
+        self.gate.purse.set("practice")
+        self.gate._login()
+        self.assertIn(("destroy",), self.gate.calls)
+
     def test_practice_purse_is_reported_as_true(self):
         self._pair_ok({"ssid": "QX.gate"})
         self.gate.purse.set("practice")
@@ -592,7 +607,7 @@ class TestSessionGate(unittest.TestCase):
         self._pair_ok({})
         self.gate.purse.set("practice")
         self.gate._login()
-        self.assertIn("without a sessionid cookie", self.gate.status._label)
+        self.assertIn("without a session cookie", self.gate.status._label)
         self.assertEqual(self.ready, [])
 
     def test_quit_reports_cancellation(self):
@@ -635,7 +650,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
 
         calls = {}
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             calls["gate"] = True
             on_ready("QX.paired", True)          # operator pairs successfully
 
@@ -680,7 +695,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
         import cybertrade.cli as cli
         gate_mod, gui_pkg = self.gate_mod, self.gui_pkg
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             pass                                     # operator closes the window
 
         with mock.patch.object(cli, "_build_engine",
@@ -700,7 +715,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
 
         captured = {}
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             captured["before"] = cfg.broker.ssid
             on_ready("QX.secret", True)
             captured["after"] = cfg.broker.ssid
@@ -879,7 +894,11 @@ class TestTheDisplayTogglesActuallyToggle(unittest.TestCase):
         """CybertradeApp is the one place that knows the config; it must push
         display.glow/scanlines/show_grid into the renderer."""
         import inspect
-        from cybertrade.gui.app import CybertradeApp
+        # Import under the shim like every other GUI test: reaching for a
+        # cybertrade.gui.app leaked by earlier tests made this pass or fail
+        # with the suite's test count — order-dependent by accident.
+        with fake_tk():
+            from cybertrade.gui.app import CybertradeApp
         src = inspect.getsource(CybertradeApp.__init__)
         self.assertIn("set_display_options(", src)
         self.assertIn("self.config.display.glow", src)

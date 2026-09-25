@@ -10,11 +10,12 @@ from __future__ import annotations
 import gzip
 import json
 import logging
+import re
 import socket
 import ssl
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlencode, urlparse
 
 from ..exceptions import NetworkError
@@ -45,16 +46,38 @@ class HttpResponse:
         return self.body.decode("utf-8", errors="replace")
 
 
+# A comma starts a new cookie only when what follows (up to the next ';'
+# or ',') looks like name=value. A bare split on "," mangles
+# `Expires=Wed, 21 Oct ...` dates and any quoted value holding a comma.
+_COOKIE_BOUNDARY = re.compile(r",\s*(?=[^=;,]+=[^;,]*)")
+
+
+def _split_set_cookie(value: str) -> List[str]:
+    """Split a (possibly folded) Set-Cookie header into single cookies."""
+    out: List[str] = []
+    for line in str(value or "").split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        out.extend(part.strip() for part in _COOKIE_BOUNDARY.split(line) if part.strip())
+    return out
+
+
 @dataclass
 class CookieJar:
     cookies: Dict[str, str] = field(default_factory=dict)
 
     def set_from_header(self, value: str) -> None:
-        for chunk in value.split(","):
+        for chunk in _split_set_cookie(value):
             pair = chunk.split(";")[0].strip()
             if "=" in pair:
                 name, val = pair.split("=", 1)
-                self.cookies[name.strip()] = val.strip()
+                name = name.strip()
+                val = val.strip()
+                if len(val) >= 2 and val.startswith('"') and val.endswith('"'):
+                    val = val[1:-1]
+                if name:
+                    self.cookies[name] = val
 
     def header(self) -> str:
         return "; ".join(f"{k}={v}" for k, v in self.cookies.items())
@@ -154,10 +177,6 @@ class HttpClient:
         response = _parse_response(response_bytes, url)
         with self._lock:
             self.jar.update_from_response(response.headers)
-            # tolerate comma-folded multi-cookie headers
-            for key, value in response.headers.items():
-                if key == "set-cookie" and "," in value and "=" in value.split(",")[0]:
-                    self.jar.set_from_header(value)
         return response
 
     def _open_socket(self, scheme: str, host: str, port: int):
@@ -217,7 +236,10 @@ def _headers_from(head: bytes) -> Dict[str, str]:
             key = k.strip().lower()
             value = v.strip()
             if key in headers:
-                headers[key] += ", " + value
+                # Set-Cookie must never be comma-folded: its Expires dates
+                # contain commas, which then read as cookie boundaries.
+                sep = "\n" if key == "set-cookie" else ", "
+                headers[key] += sep + value
             else:
                 headers[key] = value
     return headers
@@ -236,9 +258,12 @@ def _parse_response(raw: bytes, url: str) -> HttpResponse:
     headers = _headers_from(head)
 
     body = rest
-    if headers.get("transfer-encoding", "").lower() == "chunked":
-        body = _dechunk(rest)
-    elif headers.get("content-encoding", "").lower() == "gzip":
+    # Framing first, then content coding: live JSON endpoints commonly send
+    # chunked+gzip together, and the old elif swallowed the gzip layer,
+    # returning compressed bytes that no json() call could ever parse.
+    if "chunked" in headers.get("transfer-encoding", "").lower():
+        body = _dechunk(body)
+    if "gzip" in headers.get("content-encoding", "").lower():
         try:
             body = gzip.decompress(body)
         except OSError:

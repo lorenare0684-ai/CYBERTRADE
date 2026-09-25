@@ -16,6 +16,7 @@ import logging
 import mimetypes
 import os
 import queue
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -111,10 +112,12 @@ class EngineHub:
             return {
                 "ts": timex.now(),
                 "uptime": timex.now() - self.started,
-                "paired": False,
-                "engine_state": "pairing",
-                "posture": "NORMAL",
-                "assets": [],
+            "paired": False,
+            "engine_state": "pairing",
+            "posture": "NORMAL",
+            "assets": [],
+            "catalog": {"rows": [], "live": False, "synced_at": 0.0,
+                        "prices": {}},
                 "trades": [],
                 "positions": [],
                 "signals": [],
@@ -166,6 +169,7 @@ class EngineHub:
             # arrives, or "pairing" is the last state it ever reports.
             "engine_state": (snap.get("health") or {}).get("engine_state", "disarmed"),
             "assets": self.engine.feed.assets,
+            "catalog": self.engine.catalog_block(),
             "trades": [t.to_dict() for t in self.engine.oms.recent_trades(30)],
             "positions": self._positions_block(),
             "signals": [s.to_dict() for s in self.engine.signals[-20:]],
@@ -326,6 +330,24 @@ class EngineHub:
         return self._log_lines[-limit:]
 
 
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """Browsers abort idle keep-alive connections all the time.
+
+    Stock ``socketserver`` prints a full traceback for every one (Windows
+    reports it as ``ConnectionAbortedError`` 10053), which buries real
+    errors.  Dropped client connections are not errors — swallow exactly
+    those, and let everything else shout as before.
+    """
+
+    _QUIET = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+    def handle_error(self, request, client_address) -> None:  # noqa: N802
+        _exc, value, _tb = sys.exc_info()
+        if isinstance(value, self._QUIET):
+            return
+        super().handle_error(request, client_address)
+
+
 class WebTerminal:
     """HTTP + SSE server for the dashboard."""
 
@@ -439,6 +461,23 @@ class WebTerminal:
                     return self._json(200, terminal.hub.state())
                 if path == "/api/logs":
                     return self._json(200, terminal.hub.logs())
+                if path == "/api/candles":
+                    from urllib.parse import parse_qs
+
+                    q = parse_qs(parsed.query or "")
+                    asset = str((q.get("asset") or [""])[0])
+                    try:
+                        limit = max(1, min(500, int(float(
+                            (q.get("limit") or [180])[0]))))
+                    except (TypeError, ValueError):
+                        limit = 180
+                    if terminal.hub.engine is None or not asset:
+                        return self._json(200, {"asset": asset, "candles": [],
+                                                "empty": True})
+                    return self._json(200, {
+                        "asset": asset,
+                        "candles": terminal.hub.engine.candles_for(asset, limit),
+                    })
                 if path == "/api/events":
                     return self._sse()
                 if path == "/api/pair/status":
@@ -626,6 +665,14 @@ class WebTerminal:
                 )
                 placed = engine.inject_signal(sig)
                 return {"ok": placed, "placed": placed}
+            if cmd == "watch":
+                # Chart any catalog asset: adopt + warm it, then serve bars.
+                asset = str(body.get("asset") or "")
+                if not asset:
+                    return {"ok": False, "error": "asset required"}
+                adopted = engine.adopt_asset(asset, warm=True)
+                return {"ok": True, "adopted": adopted, "asset": asset,
+                        "candles": engine.candles_for(asset)}
             if cmd == "close":
                 pos_id = str(body.get("position") or "")
                 if not pos_id:
@@ -678,7 +725,7 @@ class WebTerminal:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
-        self._httpd = ThreadingHTTPServer((self.host, self.port), self._handler_cls)
+        self._httpd = _QuietHTTPServer((self.host, self.port), self._handler_cls)
         self._httpd.daemon_threads = True
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, daemon=True, name="web-terminal"

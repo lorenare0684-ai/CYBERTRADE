@@ -21,8 +21,8 @@ Two entry points matter:
   in place: ``set_ssid`` + ``connect`` on the live api, no restart.
 
 Nothing here bypasses the CAPTCHA: a human solves it in a real Chrome
-profile, and this only reads the ``sessionid`` cookie over localhost
-DevTools afterwards.
+profile, and this only reads the session (cookie or page token) over
+localhost DevTools afterwards.
 """
 
 from __future__ import annotations
@@ -41,22 +41,23 @@ log = logging.getLogger("cybertrade.web.pairing")
 IDLE = "idle"
 LAUNCHING = "launching"
 WAITING = "waiting"
+ADOPTING = "adopting"
 READY = "ready"
 FAILED = "failed"
 
-STATES = (IDLE, LAUNCHING, WAITING, READY, FAILED)
+STATES = (IDLE, LAUNCHING, WAITING, ADOPTING, READY, FAILED)
 
 
 class PairingController:
     """Drives one pairing attempt at a time for the browser terminal.
 
-    ``on_ready(ssid, purse)`` is called exactly once per successful pairing,
-    on the worker thread. The caller decides what "ready" means — build an
-    engine, or re-seat an existing one.
+    ``on_ready(ssid, purse, cookies)`` is called exactly once per
+    successful pairing, on the worker thread. The caller decides what
+    "ready" means — build an engine, or re-seat an existing one.
     """
 
     def __init__(self, config: AppConfig,
-                 on_ready: Callable[[str, bool], None],
+                 on_ready: Callable[[str, bool, str], None],
                  probe: Optional[Callable[[], bool]] = None) -> None:
         self.config = config
         self.on_ready = on_ready
@@ -73,6 +74,7 @@ class PairingController:
         self._thread: Optional[threading.Thread] = None
         self._started = 0.0
         self._profile = ""
+        self._port = 9333        # DevTools port of the current/past attempt
         self._epoch = 0          # bumped on start/cancel: stale results die
 
     # -- queries ------------------------------------------------------------
@@ -106,10 +108,21 @@ class PairingController:
             # session is live. Both keys must agree.
             saved = session_status(
                 getattr(self.config, "qx_session_path", ""))
+            # READY means the cookie landed — but the terminal is only live
+            # once the engine holds it.  Reporting "ready" during the
+            # minute-long engine boot makes the veil flap open/closed, so a
+            # captured-but-unadopted session reports "adopting" instead.
+            # (Without a probe there is no engine to wait for: ready as ever.)
+            reported = self._state
+            message = self._message
+            if self._state == READY and self.probe is not None and not live:
+                reported = ADOPTING
+                message = ("session captured — starting the terminal "
+                           "(first boot pulls history, up to a minute)…")
             out = {
-                "state": self._state,
-                "busy": self._state in (LAUNCHING, WAITING),
-                "message": self._message,
+                "state": reported,
+                "busy": (self._state in (LAUNCHING, WAITING) or reported == ADOPTING),
+                "message": message,
                 "error": self._error,
                 "ssid_present": bool(self._ssid),
                 "purse": self._purse,
@@ -153,6 +166,7 @@ class PairingController:
             self._ssid = ""
             self._purse = purse
             self._profile = values["profile"]
+            self._port = values["port"]
             self._started = time.time()
             self._epoch += 1
             epoch = self._epoch
@@ -163,6 +177,18 @@ class PairingController:
 
         log.warning("chrome pairing started profile=%s port=%s purse=%s",
                     values["profile"], values["port"], purse)
+
+        def _progress(info: Dict[str, Any]) -> None:
+            """Live DevTools progress for the pairing veil (worker thread)."""
+            with self._lock:
+                if self._state not in (LAUNCHING, WAITING):
+                    return
+                names = sorted(info.get("cookies") or [])
+                if names:
+                    self._message = (
+                        "log in and solve the CAPTCHA in the Chrome window "
+                        f"(cookies so far: {', '.join(names)})")
+
         self._thread = run_pairing(
             session_path=self.config.qx_session_path,
             profile=values["profile"],
@@ -170,6 +196,7 @@ class PairingController:
             timeout=values["timeout"],
             on_done=lambda sess: self._done(sess, epoch),
             on_error=lambda exc: self._failed(exc, epoch),
+            on_poll=_progress,
         )
         return {"ok": True, **self.status()}
 
@@ -184,6 +211,21 @@ class PairingController:
             self._epoch += 1        # a cookie landing after this is ignored
         log.warning("chrome pairing cancelled by the operator")
         return {"ok": True, **self.status()}
+
+    def note_error(self, message: str) -> Dict[str, Any]:
+        """Fail the attempt from the adopting thread (engine refused it).
+
+        The cookie landed but the terminal could not start on it — the veil
+        must say so with a way back (Start again), not spin forever.
+        """
+        with self._lock:
+            self._state = FAILED
+            self._error = message
+            self._message = f"pairing failed: {message}"
+            self._thread = None
+            self._epoch += 1
+        log.warning("pairing adopted badly: %s", message)
+        return {"ok": False, **self.status()}
 
     # -- worker callbacks (on the worker thread) ----------------------------
     def _live(self, epoch: int) -> bool:
@@ -204,14 +246,14 @@ class PairingController:
         if not ssid:
             with self._lock:
                 self._state = FAILED
-                self._message = ("Chrome closed without a sessionid cookie — "
+                self._message = ("Chrome closed without a session cookie — "
                                  "start again")
-                self._error = "no sessionid cookie seen"
+                self._error = "no session cookie seen"
             return
         with self._lock:
             purse = self._purse
         try:
-            self.on_ready(ssid, purse)
+            self.on_ready(ssid, purse, str(sess.get("cookies", "")))
         except Exception as exc:  # noqa: BLE001 — report, never crash a thread
             log.exception("pairing succeeded but the engine refused it")
             with self._lock:
@@ -234,4 +276,4 @@ class PairingController:
 
 
 __all__ = ["PairingController", "STATES", "IDLE", "LAUNCHING", "WAITING",
-           "READY", "FAILED"]
+           "ADOPTING", "READY", "FAILED"]

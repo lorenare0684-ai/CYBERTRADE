@@ -33,6 +33,13 @@
       <span class="corner tl"></span><span class="corner tr"></span>
       <h2>◈ MARKET // <span id="chart-asset">---</span></h2>
       <div class="tabs" id="asset-tabs"></div>
+      <div class="catalog-row">
+        <input id="asset-search" class="neon-input" placeholder="filter assets…" autocomplete="off"
+               title="Type to narrow the board" />
+        <select id="asset-kind" class="neon-select" title="Filter by asset kind"></select>
+        <span class="mini" id="catalog-meta">—</span>
+      </div>
+      <div id="asset-board" class="asset-board" title="Every Quotex asset — click one to chart and trade it"></div>
     </div>
     <div class="chart-wrap">
       <canvas id="chart" width="880" height="380"></canvas>

@@ -22,6 +22,7 @@ from . import layout as layout_mod
 from .boot import BootScreen
 from .pairing import pairing_form, run_pairing
 from .panels import (
+    AssetsPanel,
     ConnectionPanel,
     DashboardPanel,
     RiskLabPanel,
@@ -239,7 +240,7 @@ class CybertradeApp(tk.Tk):
 
         self.tab_buttons = tk.Frame(self.tabs, bg=t["bg"])
         self.tab_buttons.pack(fill="x", padx=6, pady=4)
-        self._tab_names = ("DASH", "TRADE", "STRAT", "RISK", "TEST", "LINK", "CFG")
+        self._tab_names = ("DASH", "TRADE", "ASSETS", "STRAT", "RISK", "TEST", "LINK", "CFG")
         self._tab_btns: Dict[str, tk.Label] = {}
         for name in self._tab_names:
             lbl = tk.Label(self.tab_buttons, text=name, width=8, font=MONO_BOLD,
@@ -253,6 +254,7 @@ class CybertradeApp(tk.Tk):
 
         self.dash = DashboardPanel(self.panes, t)
         self.trader = TraderPanel(self.panes, t, command_cb=self._command)
+        self.assets_p = AssetsPanel(self.panes, t, select_cb=self._pick_asset)
         self.strat = StrategiesPanel(self.panes, t)
         self.risk_p = RiskPanel(self.panes, t)
         self.bt_p = RiskLabPanel(self.panes, t, run_cb=self._mc_summary,
@@ -262,7 +264,8 @@ class CybertradeApp(tk.Tk):
         self.cfg_p = SettingsPanel(self.panes, t, save_cb=self._save_config)
 
         self._panes = {
-            "DASH": self.dash, "TRADE": self.trader, "STRAT": self.strat,
+            "DASH": self.dash, "TRADE": self.trader, "ASSETS": self.assets_p,
+            "STRAT": self.strat,
             "RISK": self.risk_p, "TEST": self.bt_p, "LINK": self.link,
             "CFG": self.cfg_p,
         }
@@ -287,6 +290,10 @@ class CybertradeApp(tk.Tk):
         )
         self.layout_led.pack(side="right", padx=10)
 
+    def _pick_asset(self, name: str) -> None:
+        """Asset-board click: chart (and trade) this asset on TRADE."""
+        self.trader.asset_var.set(name)
+
     def show_tab(self, name: str) -> None:
         for widget in self.panes.winfo_children():
             widget.pack_forget()
@@ -302,9 +309,16 @@ class CybertradeApp(tk.Tk):
         self.boot.destroy()
 
     # -- bridge to engine ---------------------------------------------------
-    def _command(self, body: Dict[str, Any]) -> None:
+    def _command(self, body: Dict[str, Any]) -> Any:
         cmd = body.get("cmd")
         engine = self.engine
+        if cmd == "candles":
+            # Read-only chart query — answers inline, never touches the LEDs.
+            asset = str(body.get("asset") or "")
+            try:
+                return {"candles": engine.candles_for(asset)}
+            except Exception:  # noqa: BLE001
+                return {"candles": []}
         try:
             if cmd == "arm":
                 engine.arm()
@@ -413,7 +427,7 @@ class CybertradeApp(tk.Tk):
         ssid = str(sess.get("ssid", ""))
         self.link.set_busy(False)
         if not ssid:
-            self.link.set_status("Chrome closed without a sessionid cookie", "red")
+            self.link.set_status("Chrome closed without a session cookie", "red")
             return
         self.link.adopt_session(ssid, "session captured — connecting…")
         self._connect({"mode": "quotex", "ssid": ssid, "demo": purse})
@@ -479,6 +493,7 @@ class CybertradeApp(tk.Tk):
             state["strategies"] = self.engine.ensemble.describe()
             self.dash.update_state(state)
             self.trader.update_state(state)
+            self.assets_p.update_state(state)
             self.strat.update_state(state)
             self.risk_p.update_state(state)
             from ..utils import timex

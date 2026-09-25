@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .compat import (
@@ -37,7 +37,7 @@ from .compat import (
 )
 from .shutdown import SAFETY_HOLD_EXIT
 from .config import AppConfig
-from .exceptions import ConfigError
+from .exceptions import BrokerError, ConfigError, FeedError, NetworkError
 from .logging_setup import setup_logging
 from .quant.binary import breakeven_winrate, edge_of, kelly_fraction_for, kelly_stake
 
@@ -103,18 +103,38 @@ def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
     yet, session tooling (login/status/warm) falls back to PRACTICE — data
     commands must never need a money decision.
     """
+    from .brokers.quotex import constants as QXC
     from .brokers.quotex.api import QuotexAPI
 
     if demo is None:
         demo = cfg.broker.demo_account if cfg.broker.demo_account is not None else True
     return QuotexAPI(
+        http_base=cfg.broker.http_base or QXC.HTTP_BASE,
+        ws_url=cfg.broker.ws_url or QXC.WS_URL,
         demo=bool(demo),
         ghost=cfg.broker.ghost_pace,
         order_think_ms=cfg.broker.order_think_ms,
         order_min_gap_ms=cfg.broker.order_min_gap_ms,
         max_orders_per_min=cfg.broker.max_orders_per_min,
+        reconnect_max=cfg.broker.reconnect_max,
         timeout=cfg.broker.request_timeout,
     )
+
+
+def _resolve_session(cfg: AppConfig):
+    """ssid + cookies from cfg/env/paired file (no connect, no login)."""
+    import os
+
+    ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
+    cookies = getattr(cfg.broker, "cookies", "") if cfg.broker.ssid else ""
+    if not ssid:
+        from .brokers.quotex.pairing import load_session
+
+        paired = load_session(getattr(cfg, "qx_session_path", "") or "")
+        if paired:
+            ssid = paired.get("ssid", "")
+            cookies = paired.get("cookies", "")
+    return ssid, cookies
 
 
 def _live_api(cfg: AppConfig, api_factory=None):
@@ -123,21 +143,11 @@ def _live_api(cfg: AppConfig, api_factory=None):
     Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
     paired browser session (``quotex login``) → username/password login.
     """
-    import os
-
     if api_factory is None:
         api_factory = lambda: _qx_api(cfg)  # noqa: E731
 
     api = api_factory()
-    ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
-    cookies = ""
-    if not ssid:
-        from .brokers.quotex.pairing import load_session
-
-        paired = load_session(getattr(cfg, "qx_session_path", "") or "")
-        if paired:
-            ssid = paired.get("ssid", "")
-            cookies = paired.get("cookies", "")
+    ssid, cookies = _resolve_session(cfg)
     if ssid:
         api.set_ssid(ssid, cookies)
     elif cfg.broker.username and cfg.broker.password:
@@ -149,7 +159,123 @@ def _live_api(cfg: AppConfig, api_factory=None):
             "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
         )
     api.connect()
+    try:
+        _verify_session_data(api)
+        ensure = getattr(api, "ensure_purse", None)
+        if callable(ensure):
+            ensure()
+    except Exception:
+        # A failed boot must not strand a live socket behind it (its
+        # reader/pumper threads would haunt the process).
+        try:
+            closer = getattr(api, "close", None)
+            if callable(closer):
+                closer()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            pass
+        raise
     return api
+
+
+def _verify_session_data(api, timeout: float = 10.0) -> None:
+    """Prove the session carries market data, not just an auth ack.
+
+    The venue says ``s_authorization`` even for sessions it will never
+    send data on (a stale/rotated cookie authorizes fine and then
+    starves).  So after connecting we poke the wire — a canary subscribe
+    plus a catalog request — and require ANY data event back within the
+    window.  Silence raises (a pairing-screen case), saving a 90-second
+    warmup on a dead wire and the degraded boot behind it.
+    """
+    for poke in (lambda: api.subscribe("EURUSD_otc", 60),
+                 lambda: api.request_instruments()):
+        try:
+            poke()
+        except Exception:  # noqa: BLE001 — the wait below is the verdict
+            pass
+    waiter = getattr(api, "wait_for_data", None)
+    if not callable(waiter):
+        return  # stub apis in tests don't speak the wire protocol
+    if waiter(timeout=timeout):
+        return
+    from .exceptions import BrokerConnectionError
+
+    raise BrokerConnectionError(
+        "venue accepted the session but sent no market data in "
+        f"{timeout:.0f}s"
+    )
+
+
+BOOTSTRAP_HOLD = "live continuity needs an authenticated venue user ID"
+
+
+def _needs_rebuild(engine) -> bool:
+    """True when a re-pair should rebuild the engine, not re-seat it.
+
+    A degraded engine (or one stuck on the bootstrap identity hold) that
+    never armed holds no positions and no financial memory — rebuilding
+    it on the fresh session re-runs warmup, re-pins continuity, and
+    re-seeds balances, where an in-place re-seat would leave the kill
+    latch and the empty books behind.  Anything LIVE (or holding venue
+    positions) keeps the in-place re-seat — a rebuild must never orphan
+    a live book.
+    """
+    from .constants import EngineState
+
+    broker = getattr(engine, "broker", None)
+    opener = getattr(broker, "open_positions", None)
+    if callable(opener):
+        try:
+            if list(opener() or []):
+                return False
+        except Exception:  # noqa: BLE001 — an unreadable book is not rebuildable
+            return False
+    if getattr(engine, "state", None) is EngineState.LIVE:
+        return False
+    if getattr(engine, "degraded", ""):
+        return True
+    fault = getattr(getattr(engine, "continuity", None), "fault", "") or ""
+    return BOOTSTRAP_HOLD in fault
+
+
+def _auto_sniff_report(port: int, seconds: float = 10.0,
+                         runner=None) -> str:
+    """Capture the trade tab's wire after a starve (best-effort).
+
+    Runs when a fresh adoption starves with the pairing Chrome still up:
+    the report this returns is the ground truth the Python wire gets
+    diffed against.  Never raises — diagnosis must not break serving.
+    """
+    from .brokers.quotex.sniff import sniff_and_report
+
+    runner = runner or sniff_and_report
+    head = ("  ── AUTO-DIAGNOSIS: trade-tab wire "
+            "(paste this whole block) ──")
+    try:
+        return head + "\n" + runner(port, seconds)
+    except Exception as exc:  # noqa: BLE001 — diagnosis never breaks serving
+        return head + f"\n  tab wire unavailable ({exc})"
+
+
+def _arm_or_hold(engine) -> bool:
+    """Auto-arm that never kills the terminal.
+
+    A kill latch (recovery hold, operator kill) or an unreadable book
+    holds the engine DISARMED with a loud message instead of raising out
+    of the serving loop — the terminal, the pairing screen, and the
+    background rewarm all stay up.
+    """
+    from .exceptions import KillSwitchEngaged
+    from .statestore import StateError
+
+    try:
+        engine.arm()
+    except (KillSwitchEngaged, StateError) as exc:
+        log.warning("auto-arm held DISARMED: %s", exc)
+        print(f"  \u25b8 engine DISARMED (auto-arm held: {exc})")
+        print("  \u25b8 resolve it (re-pair / clear the kill) and ARM from the terminal")
+        return False
+    return True
 
 
 def _resolve_purse(cfg: AppConfig, args: argparse.Namespace) -> None:
@@ -261,6 +387,18 @@ def _missing_session(exc: Exception) -> bool:
     return "no quotex session" in str(exc).lower()
 
 
+def _session_trouble(exc: Exception) -> bool:
+    """True when an engine build failed for a re-pairable venue reason.
+
+    No session, a rejected session, an unreachable venue, or a silent one —
+    pairing again fixes all of them, so the terminals stay up and offer the
+    pairing screen instead of dying with a traceback.
+    """
+    if isinstance(exc, (BrokerError, NetworkError, FeedError, OSError)):
+        return True
+    return isinstance(exc, ConfigError) and _missing_session(exc)
+
+
 def _has_live_session(hub) -> bool:
     """True when the running engine holds a venue session right now.
 
@@ -271,10 +409,17 @@ def _has_live_session(hub) -> bool:
     engine = getattr(hub, "engine", None)
     if engine is None:
         return False
-    return bool(getattr(getattr(engine.feed, "api", None), "ssid", ""))
+    api = getattr(getattr(engine, "feed", None), "api", None)
+    if api is None:
+        return False
+    # The venue api holds the cookie at session.ssid; test stubs hang it
+    # directly off the api — accept either, or the probe always lies.
+    sess = getattr(api, "session", None)
+    ssid = getattr(sess, "ssid", "") if sess is not None else ""
+    return bool(ssid or getattr(api, "ssid", ""))
 
 
-def _reseat_session(engine, ssid: str) -> None:
+def _reseat_session(engine, ssid: str, cookies: str = "") -> None:
     """Re-seat a live engine on a fresh session, with no restart.
 
     The api is the only thing that holds the cookie, so a re-pair mid-run is
@@ -287,11 +432,12 @@ def _reseat_session(engine, ssid: str) -> None:
     if api is None:
         raise ConfigError("this engine has no venue api to re-seat")
     if isinstance(api, QuotexAPI):
-        api.set_ssid(ssid)
+        api.set_ssid(ssid, cookies)
     else:  # a stub in tests: exercise the seam without the venue protocol
         setattr(api, "ssid", ssid)
     if not api.connect():
         raise ConfigError("the paired session was rejected by the venue")
+    _verify_session_data(api)
     engine.health.note_message("venue session re-paired in place")
 
 
@@ -312,11 +458,12 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
         port = _checked_port(args.port, cfg.display.web_port)
     pending: List[Any] = []
 
-    def _on_ready(ssid: str, purse: bool) -> None:
+    def _on_ready(ssid: str, purse: bool, cookies: str = "") -> None:
         """Runs on the pairing worker thread — queue, never touch the hub."""
         cfg.broker.ssid = ssid          # session-only, never on disk
+        cfg.broker.cookies = cookies    # same: the paired tab's jar
         cfg.broker.demo_account = purse
-        pending.append(ssid)
+        pending.append((ssid, cookies))
 
     hub = EngineHub(None, cfg)
     hub.pairing = PairingController(
@@ -344,35 +491,69 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
     try:
         try:
             engine = _build_engine(cfg, durable=True)
-        except ConfigError as exc:
-            if not _missing_session(exc):
+        except Exception as exc:  # noqa: BLE001 — a bad session must not kill the terminal
+            if not _session_trouble(exc):
                 raise
-            print("  ▸ no venue session yet — pair from the web terminal\n")
+            log.error("engine failed to boot (%s) — serving the pairing screen",
+                      exc)
+            log.debug("boot failure", exc_info=True)
+            print(f"  ▸ engine failed to boot ({exc})")
+            print("  ▸ pair a venue session from the web terminal — "
+                  "the wire diagnosis runs automatically once one lands\n")
         else:
             hub.engine = engine
             print(f"  ▸ mode         : LIVE VENUE CANDLES · "
                   f"purse {cfg.broker.purse_label}")
-            if args.auto:
-                engine.arm()
+            if getattr(engine, "degraded", ""):
+                print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
+                      "retrying in the background")
+            if args.auto and _arm_or_hold(engine):
                 print("  ▸ engine ARMED (LIVE — real order flow)\n")
 
+        auto_sniffed = False
         while True:
             time.sleep(1.0)
             if not pending:
                 continue
             # a cookie landed on a worker thread: adopt it here, serially
-            ssid = pending.pop(0)
-            if hub.engine is None:
-                engine = _build_engine(cfg, durable=True)
-                hub.engine = engine
-                print(f"  ▸ session paired — purse "
-                      f"{cfg.broker.purse_label}\n")
-                if args.auto:
-                    engine.arm()
-                    print("  ▸ engine ARMED (LIVE — real order flow)\n")
-            else:
-                _reseat_session(engine, ssid)
-                print("  ▸ venue session re-paired in place\n")
+            ssid, cookies = pending.pop(0)
+            try:
+                if hub.engine is None or _needs_rebuild(hub.engine):
+                    fresh = _build_engine(cfg, durable=True)
+                    if hub.engine is not None:
+                        # Build-first, then retire: a bad cookie must leave
+                        # the old engine serving, not a dead one attached.
+                        try:
+                            hub.engine.shutdown()
+                        except Exception:  # noqa: BLE001 — teardown is best-effort
+                            pass
+                    engine = hub.engine = fresh
+                    print(f"  ▸ session paired — purse "
+                          f"{cfg.broker.purse_label}\n")
+                    if getattr(engine, "degraded", ""):
+                        print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
+                              "retrying in the background")
+                    if args.auto and _arm_or_hold(engine):
+                        print("  ▸ engine ARMED (LIVE — real order flow)\n")
+                else:
+                    _reseat_session(engine, ssid, cookies)
+                    print("  ▸ venue session re-paired in place\n")
+            except Exception as exc:  # noqa: BLE001 — a bad cookie must not kill the terminal
+                log.error("session adoption failed (%s)", exc)
+                log.debug("adoption failure", exc_info=True)
+                print(f"  ▸ session adoption failed ({exc})")
+                try:
+                    hub.pairing.note_error(str(exc) or exc.__class__.__name__)
+                except Exception:  # noqa: BLE001 — the veil is best-effort
+                    pass
+                if not auto_sniffed and "no market data" in str(exc):
+                    # The pairing Chrome is up with the trade tab open RIGHT
+                    # NOW — capture what the working tab does differently
+                    # before the moment passes. Once per process; the loop
+                    # never depends on it.
+                    auto_sniffed = True
+                    port = getattr(hub.pairing, "_port", 9333) or 9333
+                    print(_auto_sniff_report(int(port)) + "\n")
     except KeyboardInterrupt:
         print("\n  shutting down…")
     finally:
@@ -393,17 +574,35 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .gui import GUI_AVAILABLE, run_app
 
     if not GUI_AVAILABLE:
-        print("tkinter unavailable — install python3-tk or use `python -m cybertrade web`",
+        if sys.platform == "win32":
+            hint = ("your Python has no tkinter — reinstall it with "
+                    "\"tcl/tk and IDLE\" checked, or run `conda install tk` "
+                    "in this environment")
+        else:
+            hint = "install python3-tk (Debian/Ubuntu) or the matching tk package"
+        print(f"  ✗ desktop GUI unavailable: {hint},", file=sys.stderr)
+        print("    or use the browser terminal instead: `python -m cybertrade web`",
               file=sys.stderr)
         return 2
-    try:
-        engine = _build_engine(cfg, durable=True)
-    except ConfigError as exc:
-        if not _missing_session(exc):
-            raise
-        print(f"  no venue session yet — opening the pairing window ({exc})")
-        from .gui.session_gate import run_gate
+    from .gui.session_gate import run_gate
 
+    notice = ""
+    while True:
+        # Any venue-side failure lands back in the pairing window (with the
+        # reason shown) instead of killing the process before it opens.
+        try:
+            engine = _build_engine(cfg, durable=True)
+        except Exception as exc:  # noqa: BLE001 — pairing covers venue trouble
+            if not _session_trouble(exc):
+                raise
+            log.error("engine failed to boot (%s) — opening the pairing window",
+                      exc)
+            log.debug("boot failure", exc_info=True)
+            notice = str(exc) or exc.__class__.__name__
+            print(f"  engine failed to boot ({notice})")
+        else:
+            break
+        print("  opening the pairing window — pair again or quit")
         ready = []
 
         def _on_ready(ssid: str, purse: bool) -> None:
@@ -411,10 +610,11 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
             cfg.broker.demo_account = purse
             ready.append(True)
 
-        run_gate(cfg, on_ready=_on_ready)
+        run_gate(cfg, on_ready=_on_ready, notice=notice)
         if not ready:
             return 1
-        engine = _build_engine(cfg, durable=True)
+    if getattr(engine, "degraded", ""):
+        print(f"  NO VENUE DATA ({engine.degraded}) — retrying in the background")
     try:
         run_app(engine, cfg)
     finally:
@@ -461,6 +661,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             if not _confirm_live(args, cfg):
                 return 1
             engine = _build_engine(cfg, durable=True)
+            if getattr(engine, "degraded", ""):
+                # Headless has no pairing screen: a blind engine holds here
+                # instead of arming on an empty book.
+                print(f"  SAFETY HOLD — no venue data ({engine.degraded})",
+                      file=sys.stderr)
+                return SAFETY_HOLD_EXIT
             engine.arm()
             print("  engine ARMED (LIVE — real order flow) — ctrl+c to stop\n")
             while True:
@@ -491,6 +697,10 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     if getattr(args, "action", "") == "login":
         return cmd_quotex_login(args, cfg)
+    if getattr(args, "action", "") == "sniff":
+        return cmd_quotex_sniff(args, cfg)
+    if getattr(args, "action", "") == "tlsprobe":
+        return cmd_quotex_tlsprobe(args, cfg)
     if getattr(args, "ssid", ""):
         cfg.broker.ssid = args.ssid  # session-only: never written to disk
     try:
@@ -508,6 +718,10 @@ def cmd_quotex(args: argparse.Namespace) -> int:
             api.request_instruments()
         except Exception:  # noqa: BLE001
             pass
+        try:
+            api.wait_for_data(timeout=6.0)
+        except Exception:  # noqa: BLE001 — the report below shows the silence
+            pass
         sess = getattr(api, "session", None)
         print(f"  connected : {getattr(api, 'connected', False)}")
         print(f"  host      : {getattr(sess, 'host', '?')}"
@@ -516,9 +730,20 @@ def cmd_quotex(args: argparse.Namespace) -> int:
         if snap is not None:
             print(f"  balance   : {getattr(snap, 'balance', 0.0):.2f}")
         print(f"  instruments: {len(getattr(api, 'assets', {}) or {})}")
+        try:
+            stats = api.socket.stats() if api.socket is not None else {}
+            heard = stats.get("stream_events", []) or ["(silent)"]
+            print(f"  stream    : {', '.join(heard)}")
+            drops = stats.get("drops", {})
+            if drops:
+                print(f"  drops     : {drops}")
+        except Exception:  # noqa: BLE001 — status never crashes on stats
+            pass
         for asset in cfg.strategy.universe[:3]:
             print(f"  payout {asset}: {api.payout_for(asset, 60):.2f}")
         return 0
+    if args.action == "assets":
+        return cmd_quotex_assets(api)
     from .brokers.quotex.sync import warm_universe
 
     total = warm_universe(
@@ -530,12 +755,110 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     return 0 if total else 1
 
 
+def cmd_quotex_sniff(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """Record what the working trade tab actually says on its wire.
+
+    Needs the paired Chrome running with a visible tab (start pairing
+    first): this only observes the tab the operator already opened, so
+    there is nothing to log into and no session to configure.  The
+    report — message order, timing, exact Socket.IO strings — is the
+    ground truth a starving Python wire gets diffed against.
+    """
+    from .brokers.quotex.sniff import sniff_and_report
+
+    port = int(getattr(args, "cdp_port", 9333))
+    seconds = float(getattr(args, "seconds", 20.0) or 20.0)
+    print(f"  listening to the trade tab for {seconds:.0f}s "
+          f"(DevTools port {port})…")
+    print("  (the paired Chrome must be running with the trade page open — "
+          "start pairing first)")
+    try:
+        print(sniff_and_report(port, seconds))
+    except Exception as exc:  # noqa: BLE001 — sniff trouble is a CLI error
+        print(f"  sniff failed ({exc})")
+        return 1
+    return 0
+
+
+def cmd_quotex_tlsprobe(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """Decisive transport test: stdlib TLS vs Chrome TLS, same script.
+
+    Runs the connect burst both ways back-to-back and reports which leg
+    the venue streams to.  Needs a paired session (pair first); the
+    chrome leg additionally needs ``python -m pip install curl_cffi``.
+    """
+    from .brokers.quotex import constants as QXC
+    from .brokers.quotex.tlsprobe import run_probe
+
+    ssid, cookies = _resolve_session(cfg)
+    if not ssid:
+        print("  no venue session — pair first (option 4), then re-run")
+        return 1
+    demo = cfg.broker.demo_account if cfg.broker.demo_account is not None else True
+    seconds = float(getattr(args, "seconds", 12.0) or 12.0)
+    print(f"  probing both transports ({seconds:.0f}s per leg)…")
+    print(run_probe(
+        ssid, cookies,
+        ws_url=cfg.broker.ws_url or QXC.WS_URL,
+        origin=cfg.broker.http_base or QXC.HTTP_BASE,
+        user_agent=QXC.USER_AGENT,
+        is_demo=bool(demo),
+        seconds=seconds,
+    ))
+    return 0
+
+
+def cmd_quotex_assets(api) -> int:
+    """Print every known Quotex asset with live payout/open flags.
+
+    Requests a fresh instrument listing first; whatever the venue confirms
+    within a few seconds is marked LIVE, the rest is the static floor.
+    """
+    import time as _time
+
+    try:
+        api.request_instruments()
+    except Exception:  # noqa: BLE001 — static floor still prints
+        pass
+    cat = getattr(api, "catalog", None)
+    before = float(getattr(cat, "synced_at", 0.0) or 0.0)
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        now_sync = float(getattr(cat, "synced_at", 0.0) or 0.0)
+        if now_sync > before:
+            break
+        _time.sleep(0.25)
+    rows = list(cat.to_list()) if cat is not None else []
+    live = before > 0.0 or (cat is not None
+                            and float(getattr(cat, "synced_at", 0.0) or 0.0) > 0.0)
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("kind") or "unknown"), []).append(row)
+    print(f"  assets: {len(rows)} ({'LIVE venue listing' if live else 'static floor — venue listing not received'})")
+    last_price = getattr(api, "last_price", None)
+    for kind in sorted(groups):
+        print(f"  [{kind}] ({len(groups[kind])})")
+        for row in groups[kind]:
+            px = None
+            if callable(last_price):
+                try:
+                    px = last_price(row["name"])
+                except Exception:  # noqa: BLE001
+                    px = None
+            flag = "OPEN" if row.get("open") else "SHUT"
+            ident = f" id={row['id']}" if row.get("id") not in ("", row["name"]) else ""
+            price = f" @ {px}" if px else ""
+            print(f"    {row['name']:<14} {float(row.get('payout') or 0.0) * 100:>5.1f}%"
+                  f" {flag:<4}{ident}{price}")
+    return 0
+
+
 def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
     """Chrome + your hands beat any headless login.
 
     Opens a persistent Chrome profile on qxbroker.com; you sign in and solve
-    the CAPTCHA yourself; we detect the `sessionid` cookie over localhost
-    DevTools and persist it (0600) for the websocket wire.
+    the CAPTCHA yourself; we detect the session (cookie or page token) over
+    localhost DevTools and persist it (0600) for the websocket wire.
     """
     import os
 
@@ -566,9 +889,26 @@ def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
         api = _qx_api(cfg)
         api.set_ssid(sess["ssid"], sess.get("cookies", ""))
         api.connect()
+        # connect() only proves the transport; the balance push proves the
+        # venue accepted the session. Wait for it instead of reading a
+        # balance that is still 0.0 because the reply is in flight.
+        api.wait_for_balance(timeout=8.0)
+        stale = bool(getattr(api, "_session_stale", False))
         snap = api.account_snapshot()
-        print(f"  ✓ verified — balance {float(snap.balance):.2f}: live session ready")
+        stats = api.socket.stats() if api.socket is not None else {}
         api.close()
+        if stale:
+            print("  ⚠ captured, but the venue rejected the session "
+                  "(re-pair and solve the CAPTCHA again)")
+            print("    (session kept — `cybertrade quotex status` will retry)")
+            return 1
+        frames = int(stats.get("messages_in", 0) or 0)
+        if frames <= 0 and float(snap.balance or 0.0) <= 0.0:
+            print("  ⚠ captured, but the venue stayed silent — run "
+                  "`cybertrade quotex status` to retry")
+            print("    (session kept)")
+            return 1
+        print(f"  ✓ verified — balance {float(snap.balance):.2f}: live session ready")
         return 0
     except Exception as exc:  # noqa: BLE001 — report, don't discard the cookie
         print(f"  ⚠ captured, but venue verify failed: {exc}")
@@ -994,8 +1334,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the I UNDERSTAND confirmation")
     r.set_defaults(func=cmd_run)
 
-    qx = sub.add_parser("quotex", help="venue session: login / status / warm")
-    qx.add_argument("action", choices=["status", "warm", "login"])
+    qx = sub.add_parser("quotex", help="venue session: login / status / warm / "
+                                       "assets / sniff / tlsprobe")
+    qx.add_argument("action", choices=["status", "warm", "login", "assets",
+                                       "sniff", "tlsprobe"])
+    qx.add_argument("--seconds", type=float, default=20.0,
+                    help="capture window for sniff (per-leg window for tlsprobe)")
     qx.add_argument("--ssid", default="",
                     help="session cookie (session-only, never stored)")
     qx.add_argument("--bars", type=int, default=250,

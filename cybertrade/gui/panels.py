@@ -191,8 +191,20 @@ class TraderPanel(tk.Frame):
         row.pack(fill="x", padx=6, pady=4)
         self.asset_var = tk.StringVar(value="EURUSD_otc")
         tk.Label(row, text="ASSET", bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL).pack(side="left")
-        tk.Entry(row, textvariable=self.asset_var, width=14, font=MONO,
-                 bg="#0a0c18", fg=theme["text"], insertbackground=theme["cyan"]).pack(side="left", padx=6)
+        from ..constants import DEFAULT_ASSETS
+
+        self.asset_menu = tk.OptionMenu(row, self.asset_var, *DEFAULT_ASSETS)
+        self.asset_menu.config(bg="#0a0c18", fg=theme["text"], font=MONO,
+                               width=14, highlightthickness=0)
+        try:
+            self.asset_menu["menu"].config(bg="#0a0c18", fg=theme["text"],
+                                           font=MONO)
+        except Exception:  # noqa: BLE001 — headless shim has no menu theme
+            pass
+        self.asset_menu.pack(side="left", padx=6)
+        self._menu_names = tuple(DEFAULT_ASSETS)
+        self._charted = ""
+        self._updates = 0
         self.stake_var = tk.StringVar(value="5")
         tk.Label(row, text="STAKE", bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL).pack(side="left")
         tk.Entry(row, textvariable=self.stake_var, width=6, font=MONO,
@@ -247,18 +259,58 @@ class TraderPanel(tk.Frame):
             "expiry": int(self.expiry_var.get() or 60),
         })
 
+    def _rebuild_menu(self, names: List[str]) -> None:
+        """Refresh the asset dropdown when the venue catalog changes."""
+        try:
+            menu = self.asset_menu["menu"]
+            menu.delete(0, "end")
+            for name in names:
+                menu.add_command(label=name,
+                                 command=lambda v=name: self.asset_var.set(v))
+        except Exception:  # noqa: BLE001 — a stale menu never breaks trading
+            pass
+        self._menu_names = tuple(names)
+
+    def _fetch_candles(self, asset: str) -> List[Dict[str, Any]]:
+        """On-demand chart payload for assets outside the snapshot window."""
+        try:
+            res = self.command_cb({"cmd": "candles", "asset": asset})
+        except Exception:  # noqa: BLE001
+            return []
+        if isinstance(res, dict):
+            return list(res.get("candles") or [])
+        return []
+
     def update_state(self, state: Dict[str, Any]) -> None:
-        assets = state.get("assets", [])
-        asset = self.asset_var.get() if self.asset_var.get() in assets else (assets[0] if assets else "")
+        catalog = (state.get("catalog") or {}).get("rows", [])
+        names = [r.get("name", "") for r in catalog if r.get("name")]
+        pool = names or list(state.get("assets", []))
+        if names and tuple(names) != self._menu_names:
+            self._rebuild_menu(names)
+        current = self.asset_var.get()
+        asset = current if current in pool else (pool[0] if pool else "")
+        self._updates += 1
         candles = (state.get("candles") or {}).get(asset, [])
+        if not candles and asset and (asset != self._charted
+                                      or self._updates % 30 == 0):
+            candles = self._fetch_candles(asset)
+        self._charted = asset
         self.chart.set_data(
             [{"o": c["o"], "h": c["h"], "l": c["l"], "c": c["c"]} for c in candles[-160:]],
             asset=asset,
         )
+        info = ""
+        for row in catalog:
+            if row.get("name") == asset:
+                payout = float(row.get("payout") or 0.0) * 100.0
+                flag = "OPEN" if row.get("open") else "SHUT"
+                info = f" · {asset} {payout:.0f}% {flag}"
+                break
         health = state.get("health", {})
         self.status.config(
             text=f"◈ {health.get('engine_state', '?').upper()} · posture {health.get('posture', '-')} · "
                  f"signals {health.get('signals_total', 0)} · vetoes {health.get('vetoes', 0)}"
+                 f"{info}"
         )
 
 
@@ -510,7 +562,7 @@ class ConnectionPanel(tk.Frame):
         self.hint = tk.Label(
             form,
             text="Chrome opens qxbroker.com in that profile — sign in and solve\n"
-                 "the CAPTCHA yourself; we only read the sessionid cookie\n"
+                 "the CAPTCHA yourself; we only read the session cookie\n"
                  "Chrome grants over localhost DevTools. Nothing is bypassed.",
             bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL, justify="left",
         )
@@ -600,7 +652,170 @@ class ConnectionPanel(tk.Frame):
         self.status.config(text=text, fg=self.theme[color or "dim"])
 
 
+# asset-board row marks (kept as names so the source stays ASCII-clean)
+TRI = "\u25b8"  # active asset on the TRADE tab
+DOT = "\u25cf"  # engine-tracked asset
+IDLE = "\u00b7"  # listed but idle
+DASH = "\u2014"  # missing payout / price
+
+
+class AssetsPanel(tk.Frame):
+    """Scrollable asset board: every catalog symbol at a glance.
+
+    One row per asset — name, payout %, OPEN/SHUT flag, last price.
+    A search box plus a kind filter narrow the 200-strong list;
+    clicking a row selects that asset on the TRADE tab (charts it).
+    """
+
+    _ROW = "{mark} {name:<12} {pay:>5} {flag:<4} {px:>11}"
+
+    def __init__(self, master, theme: Theme, select_cb: Callable[[str], Any],
+                 **kw) -> None:
+        super().__init__(master, bg=theme["bg"], **kw)
+        self.theme = theme
+        self._select_cb = select_cb
+        self._shown: List[Dict[str, Any]] = []
+        self._lines: List[str] = []
+        self._kinds = ["ALL"]
+        self.search_var = tk.StringVar(value="")
+        self.kind_var = tk.StringVar(value="ALL")
+
+        self.head = tk.Label(self, text="ASSETS", bg=theme["bg"],
+                             fg=theme["cyan"], font=MONO_BOLD, anchor="w")
+        self.head.pack(fill="x", padx=8, pady=(6, 2))
+
+        bar = tk.Frame(self, bg=theme["bg"])
+        bar.pack(fill="x", padx=8, pady=2)
+        tk.Label(bar, text="FIND", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).pack(side="left")
+        tk.Entry(bar, textvariable=self.search_var, width=16, font=MONO,
+                 bg="#0a0c18", fg=theme["text"],
+                 insertbackground=theme["cyan"]).pack(side="left", padx=6)
+        tk.Label(bar, text="KIND", bg=theme["bg"], fg=theme["dim"],
+                 font=MONO_SMALL).pack(side="left")
+        self.kind_menu = tk.OptionMenu(bar, self.kind_var, *self._kinds)
+        self.kind_menu.config(bg="#0a0c18", fg=theme["text"], font=MONO,
+                              width=10, highlightthickness=0)
+        try:
+            self.kind_menu["menu"].config(bg="#0a0c18", fg=theme["text"],
+                                         font=MONO)
+        except Exception:  # noqa: BLE001 — headless shim has no menu theme
+            pass
+        self.kind_menu.pack(side="left", padx=6)
+
+        body = tk.Frame(self, bg=theme["bg"])
+        body.pack(fill="both", expand=True, padx=8, pady=4)
+        self.scroll = tk.Scrollbar(body, orient=tk.VERTICAL)
+        self.board = tk.Listbox(body, font=MONO, bg="#0a0c18",
+                                fg=theme["text"], selectbackground=theme["cyan"],
+                                selectforeground="#04060f", activestyle="none",
+                                yscrollcommand=self.scroll.set)
+        self.scroll.config(command=self.board.yview)
+        self.scroll.pack(side="right", fill="y")
+        self.board.pack(side="left", fill="both", expand=True)
+        self.board.bind("<<ListboxSelect>>", self._on_pick)
+
+        self.info = tk.Label(self, text="", bg=theme["bg"], fg=theme["dim"],
+                             font=MONO_SMALL, anchor="w")
+        self.info.pack(fill="x", padx=8, pady=(0, 6))
+
+    @staticmethod
+    def _format(row: Dict[str, Any], active: str,
+                tracked: set) -> str:
+        name = str(row.get("name", "?"))
+        pay = row.get("payout")
+        pay_s = f"{float(pay) * 100.0:.0f}%" if isinstance(pay, (int, float)) else DASH
+        flag = "OPEN" if row.get("open") else "SHUT"
+        px = row.get("price")
+        px_s = f"{float(px):.5f}" if isinstance(px, (int, float)) else DASH
+        mark = TRI if name == active else (DOT if name in tracked else IDLE)
+        return AssetsPanel._ROW.format(mark=mark, name=name[:12], pay=pay_s,
+                                       flag=flag, px=px_s)
+
+    def _selected_name(self) -> str:
+        sel = self.board.curselection()
+        if sel and 0 <= int(sel[0]) < len(self._shown):
+            return str(self._shown[int(sel[0])].get("name", ""))
+        return ""
+
+    def _rebuild_kind_menu(self) -> None:
+        try:
+            menu = self.kind_menu["menu"]
+            menu.delete(0, "end")
+            for kind in self._kinds:
+                menu.add_command(label=kind,
+                                 command=lambda v=kind: self.kind_var.set(v))
+        except Exception:  # noqa: BLE001 — a stale menu never breaks the board
+            pass
+
+    def _refresh_info(self) -> None:
+        name = self._selected_name()
+        if not name:
+            self.info.config(text="")
+            return
+        row = next((r for r in self._shown
+                    if str(r.get("name")) == name), {})
+        pay = row.get("payout")
+        pay_s = f"{float(pay) * 100.0:.0f}%" if isinstance(pay, (int, float)) else DASH
+        flag = "OPEN" if row.get("open") else "SHUT"
+        px = row.get("price")
+        px_s = f"{float(px):.5f}" if isinstance(px, (int, float)) else DASH
+        kind = str(row.get("kind") or "OTHER")
+        self.info.config(text=f"{name} {TRI} {kind} {TRI} payout {pay_s} "
+                              f"{TRI} {flag} {TRI} {px_s}")
+
+    def _on_pick(self, _event: Any = None) -> None:
+        name = self._selected_name()
+        if name:
+            self._select_cb(name)
+            self._refresh_info()
+
+    def update_state(self, state: Dict[str, Any]) -> None:
+        cat = state.get("catalog") or {}
+        rows = [r for r in (cat.get("rows") or []) if r.get("name")]
+        active = str(state.get("asset") or "")
+        tracked = set(state.get("watch") or [])
+        kinds = ["ALL", *sorted({str(r.get("kind") or "OTHER") for r in rows})]
+        if kinds != self._kinds:
+            self._kinds = kinds
+            self._rebuild_kind_menu()
+            if self.kind_var.get() not in self._kinds:
+                self.kind_var.set("ALL")
+        want = self.search_var.get().strip().lower()
+        kind = self.kind_var.get()
+        shown = [r for r in rows
+                 if (kind == "ALL" or str(r.get("kind") or "OTHER") == kind)
+                 and (not want or want in str(r.get("name", "")).lower())]
+        lines = [self._format(r, active, tracked) for r in shown]
+        if lines != self._lines:
+            # Prices tick every poll, so the board rebuilds often — keep the
+            # user's row selected across rebuilds by asset name.
+            sel = self._selected_name()
+            self.board.delete(0, tk.END)
+            for line in lines:
+                self.board.insert(tk.END, line)
+            self._lines = lines
+            self._shown = shown
+            if sel:
+                for i, r in enumerate(shown):
+                    if str(r.get("name")) == sel:
+                        try:
+                            self.board.selection_clear(0, tk.END)
+                            self.board.selection_set(i)
+                        except Exception:  # noqa: BLE001 — cosmetic only
+                            pass
+                        break
+        else:
+            self._shown = shown
+        n_open = sum(1 for r in rows if r.get("open"))
+        live = "LIVE" if cat.get("live") else "STATIC"
+        self.head.config(text=f"ASSETS {TRI} {len(shown)}/{len(rows)} shown "
+                              f"{TRI} {n_open} open {TRI} {live}")
+        self._refresh_info()
+
+
 __all__ = [
+    "AssetsPanel",
     "DashboardPanel",
     "TraderPanel",
     "StrategiesPanel",

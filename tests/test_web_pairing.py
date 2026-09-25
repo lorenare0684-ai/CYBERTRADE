@@ -27,7 +27,7 @@ import urllib.request
 
 from cybertrade.config import AppConfig
 from cybertrade.web.server import WebTerminal
-from cybertrade.exceptions import ConfigError
+from cybertrade.exceptions import BrokerConnectionError, ConfigError
 
 from tests.venue_stubs import VenueFeed, VenueStub
 
@@ -108,8 +108,8 @@ class TestPairingController(unittest.TestCase):
         self.cfg = _cfg(self.tmp.name)
         self.ready = []
         self.ctl = PairingController(self.cfg,
-                                    lambda ssid, purse: self.ready.append(
-                                        (ssid, purse)))
+                                    lambda ssid, purse, cookies="": self.ready.append(
+                                        (ssid, purse, cookies)))
         self._real = PairingController.start.__globals__["run_pairing"]
 
     def tearDown(self):
@@ -168,7 +168,7 @@ class TestPairingController(unittest.TestCase):
         # WAITING is set *before* the launch, so a worker that finishes first
         # is never clobbered by start()'s own bookkeeping
         self.assertEqual(self.ctl.state(), "ready")
-        self.assertEqual(self.ready, [("QX.x", False)])
+        self.assertEqual(self.ready, [("QX.x", False, "")])
 
     def test_a_synchronous_launcher_is_not_clobbered(self):
         """The bug this guards: start() used to overwrite the worker's READY."""
@@ -235,7 +235,7 @@ class TestPairingController(unittest.TestCase):
         self.assertEqual(self.ctl.state(), "ready")
         # the stale worker's result is dropped, the fresh one wins
         hold["on_done"]({"ssid": "QX.stale"})
-        self.assertEqual(self.ready, [("QX.new", True)])
+        self.assertEqual(self.ready, [("QX.new", True, "")])
 
     def test_a_live_terminal_does_not_claim_to_have_no_session(self):
         """The message an operator reads when opening RE-PAIR on a live engine."""
@@ -261,6 +261,42 @@ class TestPairingController(unittest.TestCase):
         self.assertIn("session", st)
         self.assertEqual(st["session_path"], self.cfg.qx_session_path)
         self.assertFalse(st["busy"])
+
+    def test_captured_but_unadopted_reports_adopting(self):
+        """READY-the-cookie vs READY-the-terminal are minutes apart.
+
+        Reporting "ready" while the engine boots makes the browser veil
+        flap open/closed, so a probed controller reports "adopting" until
+        the engine actually holds the session.
+        """
+        from cybertrade.web.pairing import PairingController
+
+        live = {"on": False}
+        ctl = PairingController(self.cfg, lambda s, p, c="": None,
+                                probe=lambda: live["on"])
+        ctl._done({"ssid": "QX.x"}, ctl._epoch)
+        st = ctl.status()
+        self.assertEqual(st["state"], "adopting")
+        self.assertTrue(st["busy"])
+        live["on"] = True
+        st = ctl.status()
+        self.assertEqual(st["state"], "ready")
+        self.assertFalse(st["busy"])
+
+    def test_note_error_fails_with_a_way_back(self):
+        from cybertrade.web.pairing import PairingController
+
+        ctl = PairingController(self.cfg, lambda s, p: None,
+                                probe=lambda: False)
+        ctl._done({"ssid": "QX.x"}, ctl._epoch)
+        r = ctl.note_error("venue unreachable")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["state"], "failed")
+        self.assertIn("venue unreachable", r["message"])
+        # the operator can pair again without restarting anything
+        self._ok()
+        r2 = ctl.start("data/chrome-profile", 9333, 240, True)
+        self.assertTrue(r2["ok"])
 
 
 class TestHubWithoutAnEngine(unittest.TestCase):
@@ -300,6 +336,52 @@ class TestHubWithoutAnEngine(unittest.TestCase):
         self.assertIn("pairing", st)
 
 
+class TestQuietHttpServer(unittest.TestCase):
+    """Dropped browser connections must not print tracebacks.
+
+    Stock ``socketserver`` logs a full traceback every time a browser
+    aborts an idle keep-alive connection (Windows: ``ConnectionAbortedError``
+    10053), burying real errors.  Only those exact failures go quiet.
+    """
+
+    def _server(self):
+        from http.server import BaseHTTPRequestHandler
+
+        from cybertrade.web.server import _QuietHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def handle(self):  # pragma: no cover - never serves
+                pass
+
+        srv = _QuietHTTPServer(("127.0.0.1", 0), Handler)
+        self.addCleanup(srv.server_close)
+        return srv
+
+    def _handled(self, srv, exc):
+        import io
+        from contextlib import redirect_stderr
+
+        try:
+            raise exc
+        except Exception:
+            buf = io.StringIO()
+            with redirect_stderr(buf):
+                srv.handle_error(None, ("127.0.0.1", 1))
+            return buf.getvalue()
+
+    def test_aborted_connections_are_silent(self):
+        srv = self._server()
+        for exc in (ConnectionAbortedError(10053, "aborted"),
+                    ConnectionResetError(104, "reset"),
+                    BrokenPipeError(32, "broken pipe")):
+            self.assertEqual(self._handled(srv, exc), "", repr(exc))
+
+    def test_real_errors_still_shout(self):
+        srv = self._server()
+        out = self._handled(srv, ValueError("boom"))
+        self.assertIn("ValueError", out)
+
+
 class TestWebBootsWithoutASession(unittest.TestCase):
     """``cmd_web`` must serve a pairing screen, not refuse to start."""
 
@@ -324,9 +406,9 @@ class TestWebBootsWithoutASession(unittest.TestCase):
             self.built.append(cfg.broker.ssid)
             return _StubEngine()
 
-        def fake_reseat(engine, ssid):
+        def fake_reseat(engine, ssid, cookies=""):
             self.reseats.append(ssid)
-            return self._real_reseat(engine, ssid)
+            return self._real_reseat(engine, ssid, cookies)
 
         cli._build_engine = fake_build
         cli._reseat_session = fake_reseat
@@ -426,6 +508,73 @@ class TestWebBootsWithoutASession(unittest.TestCase):
         args = argparse.Namespace(host="127.0.0.1", port=8901, auto=True)
         with self.assertRaises(ConfigError):
             self.cli._run_web(self.cfg, args)
+
+    def test_dead_venue_serves_pairing_instead_of_dying(self):
+        """A rejected/unreachable venue must not kill the terminal.
+
+        Regression: ``FeedError``/``BrokerConnectionError`` from the first
+        engine build propagated out of ``_run_web`` and took the whole
+        server (and its pairing screen) down with it.
+        """
+        def down(cfg, durable=False):
+            raise BrokerConnectionError("venue down")
+
+        self.cli._build_engine = down
+        port, st, errs = self._boot()
+        self.assertEqual(errs, [])
+        self.assertFalse(st["paired"])
+        self.assertEqual(st["engine_state"], "pairing")
+
+    def test_failed_adoption_reports_failed_and_stays_up(self):
+        """A cookie the engine cannot start on fails the veil, not the process."""
+        port, _st, _errs = self._boot()
+
+        def down(cfg, durable=False):
+            raise BrokerConnectionError("venue down")
+
+        self.cli._build_engine = down
+        self._pair(port, "QX.doomed")
+        for _ in range(60):
+            time.sleep(0.2)
+            with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/api/pair/status",
+                    timeout=5) as r:
+                st = json.loads(r.read())
+            if st["state"] == "failed":
+                break
+        else:
+            self.fail("adoption failure never reached the veil")
+        self.assertIn("venue down", st["message"])
+        # and the terminal is still serving the pairing screen
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/state", timeout=5) as r:
+            state = json.loads(r.read())
+        self.assertFalse(state["paired"])
+
+    def test_adopting_shown_until_engine_attaches(self):
+        """The veil must not claim "ready" while the engine still boots."""
+        def slow_build(cfg, durable=False):
+            if not cfg.broker.ssid:
+                raise ConfigError("no Quotex session")
+            time.sleep(2.0)
+            eng = _StubEngine()
+            eng._eng.feed.api.ssid = cfg.broker.ssid
+            return eng
+
+        self.cli._build_engine = slow_build
+        port, _st, _errs = self._boot()
+        self._pair(port, "QX.slow")
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/pair/status",
+                timeout=5) as r:
+            st = json.loads(r.read())
+        self.assertEqual(st["state"], "adopting")
+        self._wait_paired(port)
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/pair/status",
+                timeout=5) as r:
+            st = json.loads(r.read())
+        self.assertEqual(st["state"], "ready")
 
 
 class TestReseatSession(unittest.TestCase):

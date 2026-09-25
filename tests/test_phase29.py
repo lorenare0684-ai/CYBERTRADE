@@ -21,7 +21,10 @@ import unittest
 from cybertrade.brokers.quotex.pairing import (
     chrome_argv,
     cdp_cookies,
+    cdp_page_token,
     devtools_browser_ws,
+    devtools_page_ws,
+    devtools_targets,
     extract_session,
     load_session,
     pair_session,
@@ -84,12 +87,58 @@ class TestExtractSession(unittest.TestCase):
         ])
         self.assertIsNotNone(sess)
         self.assertEqual(sess["ssid"], "SESS123")
-        self.assertEqual(sess["cookies"], "sessionid=SESS123")
+        # session cookie leads; sibling venue cookies (CF clearance) ride along
+        self.assertTrue(sess["cookies"].startswith("sessionid=SESS123"))
+        self.assertIn("other=x", sess["cookies"])
+        self.assertNotIn("nope", sess["cookies"])
+        self.assertEqual(sess["source"], "cookie")
+
+    def test_live_cookie_names_win_in_priority_order(self):
+        sess = extract_session([
+            {"name": "sessionid", "domain": ".qxbroker.com", "value": "LEGACY"},
+            {"name": "qx_session", "domain": ".qxbroker.com", "value": "QX3"},
+            {"name": "session", "domain": ".qxbroker.com", "value": "LIVE1"},
+        ])
+        self.assertEqual(sess["ssid"], "LIVE1")
+        self.assertTrue(sess["cookies"].startswith("session=LIVE1"))
+
+    def test_names_match_case_insensitively(self):
+        sess = extract_session([
+            {"name": "SESSION", "domain": ".qxbroker.com", "value": "UPPER"},
+        ])
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["ssid"], "UPPER")
+
+    def test_page_token_is_the_fallback_session(self):
+        sess = extract_session(
+            [{"name": "__cf_bm", "domain": ".qxbroker.com", "value": "cf"}],
+            token="TOK123")
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess["ssid"], "TOK123")
+        self.assertEqual(sess["source"], "token")
+        self.assertIn("__cf_bm=cf", sess["cookies"])
+
+    def test_cookie_beats_token(self):
+        sess = extract_session(
+            [{"name": "ssid", "domain": ".qxbroker.com", "value": "C1"}],
+            token="TOK123")
+        self.assertEqual(sess["ssid"], "C1")
+        self.assertEqual(sess["source"], "cookie")
+
+    def test_accepts_quotex_front_doors(self):
+        for domain in (".quotex.com", "quotex.io", ".qxbroker.com"):
+            sess = extract_session([
+                {"name": "sessionid", "domain": domain, "value": "S1"},
+            ])
+            self.assertIsNotNone(sess, domain)
+            self.assertEqual(sess["ssid"], "S1")
 
     def test_none_without_cookie(self):
         self.assertIsNone(extract_session([]))
         self.assertIsNone(extract_session(
             [{"name": "sessionid", "domain": ".evil.com", "value": "z"}]))
+        self.assertIsNone(extract_session(
+            [{"name": "other", "domain": ".qxbroker.com", "value": "z"}]))
 
 
 class TestSessionStore(unittest.TestCase):
@@ -130,6 +179,42 @@ class TestDevTools(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             devtools_browser_ws(9333, fetch=boom, deadline=0.4)
 
+    def test_page_ws_prefers_quotex_tab(self):
+        targets = [
+            {"type": "page", "url": "https://www.google.com/",
+             "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/g"},
+            {"type": "page", "url": "https://qxbroker.com/en/trade",
+             "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/qx"},
+        ]
+        ws = devtools_page_ws(9333, fetch=lambda *a, **k: targets)
+        self.assertTrue(ws.endswith("/page/qx"))
+
+    def test_page_ws_empty_when_no_targets(self):
+        self.assertEqual(devtools_page_ws(9333, fetch=lambda *a, **k: []), "")
+        self.assertEqual(
+            devtools_page_ws(9333, fetch=lambda *a, **k: {"not": "a-list"}), "")
+        self.assertEqual(devtools_targets(9333, fetch=lambda *a, **k: {}), [])
+
+    def test_wait_for_session_uses_page_target(self):
+        seen = {}
+
+        def fetch(url, timeout=0):
+            seen.setdefault("urls", []).append(url)
+            if url.endswith("/json/list"):
+                return [{"type": "page", "url": "https://quotex.com/en/trade",
+                         "webSocketDebuggerUrl": "ws://page-qx"}]
+            return {"webSocketDebuggerUrl": "ws://browser"}
+
+        def cdp(ws):
+            seen["ws"] = ws
+            return [{"name": "sessionid", "domain": ".quotex.com",
+                     "value": "PAGE1"}]
+
+        sess = wait_for_session(9333, timeout=2.0, fetch=fetch, cdp=cdp,
+                                poll=0.05)
+        self.assertEqual(sess["ssid"], "PAGE1")
+        self.assertEqual(seen.get("ws"), "ws://page-qx")
+
     def test_cdp_cookies_parses_storage_response(self):
         class FakeWS:
             def __init__(self, url, timeout=0):
@@ -150,6 +235,171 @@ class TestDevTools(unittest.TestCase):
                 pass
         cookies = cdp_cookies("ws://x", timeout=1.0, ws_factory=FakeWS)
         self.assertEqual(cookies[0]["value"], "CDP1")
+
+    def test_default_transport_talks_real_cdp(self):
+        """The no-injection path (what production uses) must import and speak.
+
+        Regression: the lazy transport import used one dot too few, so every
+        real pairing poll died with ModuleNotFoundError and no login was
+        ever detected — while injected-factory tests stayed green.
+        """
+        import base64
+        import hashlib
+        import socket
+        import struct
+        import threading
+
+        from cybertrade.network.websocket import encode_frame
+
+        replies = [
+            json.dumps({"id": 1, "result": {"cookies": [
+                {"name": "session", "domain": ".qxbroker.com",
+                 "value": "E2E1"}]}}),
+            json.dumps({"id": 1, "result": {"result": {
+                "type": "string", "value": "E2ETOK"}}}),
+        ]
+
+        def recvn(conn, n):
+            buf = b""
+            while len(buf) < n:
+                chunk = conn.recv(n - len(buf))
+                if not chunk:
+                    raise ConnectionError("closed")
+                buf += chunk
+            return buf
+
+        def serve(srv):
+            for reply in replies:
+                conn, _ = srv.accept()
+                with conn:
+                    req = b""
+                    while b"\r\n\r\n" not in req:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        req += chunk
+                    key = [line.split(":", 1)[1].strip()
+                           for line in req.decode("iso-8859-1").split("\r\n")
+                           if line.lower().startswith("sec-websocket-key")][0]
+                    accept = base64.b64encode(hashlib.sha1(
+                        (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()
+                    ).digest()).decode()
+                    conn.sendall(
+                        ("HTTP/1.1 101 Switching Protocols\r\n"
+                         "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                         "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
+                    conn.settimeout(5)
+                    try:
+                        hdr = recvn(conn, 2)
+                    except ConnectionError:
+                        continue
+                    ln = hdr[1] & 0x7F
+                    if ln == 126:
+                        ln = struct.unpack(">H", recvn(conn, 2))[0]
+                    elif ln == 127:
+                        ln = struct.unpack(">Q", recvn(conn, 8))[0]
+                    mask = recvn(conn, 4)
+                    payload = recvn(conn, ln) if ln else b""
+                    payload = bytes(c ^ mask[i % 4]
+                                    for i, c in enumerate(payload))
+                    if hdr[0] & 0x0F != 0x8:
+                        conn.sendall(encode_frame(reply.encode(), mask=False))
+
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        port = srv.getsockname()[1]
+        worker = threading.Thread(target=serve, args=(srv,), daemon=True)
+        worker.start()
+        try:
+            url = f"ws://127.0.0.1:{port}/devtools/page/x"
+            cookies = cdp_cookies(url, timeout=5.0)  # real transport
+            self.assertEqual(cookies[0]["value"], "E2E1")
+            token = cdp_page_token(url, timeout=5.0)
+            self.assertEqual(token, "E2ETOK")
+        finally:
+            srv.close()
+            worker.join(timeout=5)
+
+    def test_cdp_page_token_reads_window_settings(self):
+        class FakeWS:
+            def __init__(self, url, timeout=0):
+                self.sent = []
+            def connect(self):
+                pass
+            def send(self, data):
+                self.sent.append(json.loads(data))
+            def recv_text(self):
+                return json.dumps({
+                    "id": 1,
+                    "result": {"result": {"type": "string", "value": "TOK999"}},
+                })
+            def close(self):
+                pass
+        token = cdp_page_token("ws://x", timeout=1.0, ws_factory=FakeWS)
+        self.assertEqual(token, "TOK999")
+
+    def test_cdp_page_token_tolerates_errors(self):
+        class ErrWS:
+            def __init__(self, url, timeout=0):
+                pass
+            def connect(self):
+                pass
+            def send(self, data):
+                pass
+            def recv_text(self):
+                return json.dumps({"id": 1, "error": {"message": "no context"}})
+            def close(self):
+                pass
+        self.assertEqual(cdp_page_token("ws://x", timeout=0.2, ws_factory=ErrWS), "")
+
+        class DeadWS:
+            def __init__(self, url, timeout=0):
+                pass
+            def connect(self):
+                raise OSError("refused")
+        self.assertEqual(cdp_page_token("ws://x", timeout=0.2, ws_factory=DeadWS), "")
+
+    def test_wait_for_session_detects_page_token(self):
+        seen = {}
+
+        def fetch(url, timeout=0):
+            if url.endswith("/json/list"):
+                return [{"type": "page", "url": "https://qxbroker.com/en/trade",
+                         "webSocketDebuggerUrl": "ws://page-qx"}]
+            return {"webSocketDebuggerUrl": "ws://browser"}
+
+        def token(ws):
+            seen["ws"] = ws
+            return "TOKTOKEN"
+
+        sess = wait_for_session(
+            9333, timeout=2.0, fetch=fetch,
+            cdp=lambda ws: [{"name": "__cf_bm", "domain": ".qxbroker.com",
+                             "value": "cf"}],
+            page_token=token,
+            poll=0.05,
+        )
+        self.assertEqual(sess["ssid"], "TOKTOKEN")
+        self.assertEqual(sess["source"], "token")
+        self.assertEqual(seen.get("ws"), "ws://page-qx")
+
+    def test_wait_for_session_reports_progress(self):
+        polls = []
+        sess = wait_for_session(
+            9333, timeout=2.0,
+            fetch=lambda *a, **k: {"webSocketDebuggerUrl": "ws://x"},
+            cdp=lambda ws: [{"name": "session", "domain": ".qxbroker.com",
+                             "value": "P1"}],
+            page_token=lambda ws: (_ for _ in ()).throw(
+                AssertionError("token must not be fetched when a cookie hit")),
+            poll=0.05,
+            on_poll=polls.append,
+        )
+        self.assertEqual(sess["ssid"], "P1")
+        self.assertTrue(polls)
+        self.assertIn("session", polls[0]["cookies"])
+        self.assertIn(polls[0]["target"], ("page", "browser"))
 
     def test_wait_for_session_finds_and_times_out(self):
         sess = wait_for_session(
@@ -179,8 +429,8 @@ class TestPairSession(unittest.TestCase):
         def launcher(url, profile, port, chrome):
             seen["launch"] = (url, profile, port, chrome)
 
-        def waiter(port, timeout=0):
-            seen["wait"] = (port, timeout)
+        def waiter(port, timeout=0, on_poll=None):
+            seen["wait"] = (port, timeout, on_poll)
             return {"ssid": "P1", "cookies": "sessionid=P1"}
 
         sess = pair_session(session_path=path, profile_dir="/tmp/p", port=9444,

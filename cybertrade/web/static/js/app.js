@@ -5,6 +5,7 @@ const chart = new NeonChart("chart");
 let currentAsset = null;
 let lastState = null;
 let sseTries = 0;
+let chartCache = {}; // candles for watched assets outside the state window
 
 /* ---------- helpers ---------- */
 const $ = (id) => document.getElementById(id);
@@ -186,9 +187,10 @@ function render(state) {
     if (!currentAsset && state.assets && state.assets.length) currentAsset = state.assets[0];
     refreshTabs();
   }
+  renderCatalog(state);
 
   // chart
-  const candles = (state.candles || {})[currentAsset] || [];
+  const candles = (state.candles || {})[currentAsset] || chartCache[currentAsset] || [];
   if (candles.length) {
     chart.setData(candles.map((c) => ({ o: c.o, h: c.h, l: c.l, c: c.c })));
     const last = candles[candles.length - 1];
@@ -242,6 +244,127 @@ function refreshTabs() {
   document.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.dataset.asset === currentAsset);
   });
+}
+
+/* ---------- asset board: every Quotex instrument, click a row to chart ----------
+   Rows rebuild only when the shown set changes; each poll just refreshes
+   the payout / OPEN-SHUT / price cells in place (no flicker, no scroll jump). */
+const boardEls = new Map(); // name -> {row, mark, pay, st, px, last}
+function renderCatalog(state, refilter) {
+  const board = $("asset-board");
+  if (!board) return;
+  st = state || lastState || {};
+  const search = $("asset-search");
+  const kindPick = $("asset-kind");
+  if (search && !search.oninput) search.oninput = () => renderCatalog(lastState, true);
+  if (kindPick && !kindPick.onchange) kindPick.onchange = () => renderCatalog(lastState, true);
+  const cat = st.catalog || { rows: [] };
+  const rows = cat.rows || [];
+  const byName = new Map(rows.map((r) => [r.name, r]));
+  // kind filter options follow whatever the venue actually lists
+  const kinds = [...new Set(rows.map((r) => r.kind || "other"))].sort();
+  if (kindPick && kindPick.dataset.sig !== kinds.join(",")) {
+    kindPick.dataset.sig = kinds.join(",");
+    const cur = kindPick.value || "ALL";
+    kindPick.innerHTML = "";
+    const all = document.createElement("option");
+    all.value = "ALL";
+    all.textContent = "ALL KINDS";
+    kindPick.appendChild(all);
+    kinds.forEach((k) => {
+      const o = document.createElement("option");
+      o.value = k;
+      o.textContent = k.toUpperCase().replace(/_/g, " ");
+      kindPick.appendChild(o);
+    });
+    kindPick.value = kinds.includes(cur) ? cur : "ALL";
+  }
+  const want = ((search && search.value) || "").trim().toLowerCase();
+  const kind = (kindPick && kindPick.value) || "ALL";
+  const shown = rows.filter((r) =>
+    (kind === "ALL" || (r.kind || "other") === kind) &&
+    (!want || (r.name || "").toLowerCase().includes(want)));
+  const sig = shown.map((r) => r.name).join(",") + "|" + kind + "|" + want;
+  if (refilter || board.dataset.sig !== sig) {
+    const top = refilter ? 0 : board.scrollTop;
+    board.dataset.sig = sig;
+    board.innerHTML = "";
+    boardEls.clear();
+    if (!shown.length) {
+      const d = document.createElement("div");
+      d.className = "ab-empty";
+      d.textContent = rows.length ? "no assets match the filter" : "catalog loading…";
+      board.appendChild(d);
+    }
+    shown.forEach((r) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ab-row";
+      b.dataset.asset = r.name;
+      const mark = document.createElement("span");
+      mark.className = "mark";
+      const nm = document.createElement("span");
+      nm.className = "nm";
+      nm.textContent = r.name;
+      const pay = document.createElement("span");
+      pay.className = "pay";
+      const flag = document.createElement("span");
+      flag.className = "st";
+      const px = document.createElement("span");
+      px.className = "px";
+      b.append(mark, nm, pay, flag, px);
+      b.addEventListener("click", () => watchAsset(r.name));
+      board.appendChild(b);
+      boardEls.set(r.name, { row: b, mark, pay, st: flag, px, last: null });
+    });
+    board.scrollTop = top;
+  }
+  const tracked = new Set(st.watch || []);
+  let nOpen = 0;
+  rows.forEach((r) => { if (r.open) nOpen++; });
+  boardEls.forEach((el, name) => {
+    const r = byName.get(name);
+    if (!r) return;
+    const pct = Math.round((r.payout || 0) * 100) + "%";
+    if (el.pay.textContent !== pct) el.pay.textContent = pct;
+    const flag = r.open ? "OPEN" : "SHUT";
+    if (el.st.textContent !== flag) {
+      el.st.textContent = flag;
+      el.st.classList.toggle("open", !!r.open);
+      el.st.classList.toggle("shut", !r.open);
+    }
+    const px = typeof r.price === "number" ? r.price.toFixed(5) : "—";
+    if (el.px.textContent !== px) {
+      if (typeof r.price === "number" && typeof el.last === "number") {
+        el.px.classList.toggle("up", r.price > el.last);
+        el.px.classList.toggle("dn", r.price < el.last);
+      }
+      el.last = r.price;
+      el.px.textContent = px;
+    }
+    el.row.classList.toggle("active", name === currentAsset);
+    const mark = name === currentAsset ? "▸" : (tracked.has(name) ? "●" : "·");
+    if (el.mark.textContent !== mark) el.mark.textContent = mark;
+  });
+  const meta = $("catalog-meta");
+  if (meta) meta.textContent = `${shown.length}/${rows.length} shown · ${nOpen} open · ${cat.live ? "LIVE" : "STATIC"}`;
+}
+
+async function watchAsset(name) {
+  if (!name) return;
+  const res = await cmd({ cmd: "watch", asset: name });
+  if (res && res.candles && res.candles.length) {
+    chartCache[name] = res.candles;
+  } else {
+    try {
+      const r = await fetch("/api/candles?asset=" + encodeURIComponent(name) + "&limit=180");
+      const j = await r.json();
+      if (j.candles && j.candles.length) chartCache[name] = j.candles;
+    } catch (e) { /* keep whatever the chart already shows */ }
+  }
+  currentAsset = name;
+  refreshTabs();
+  if (lastState) render(lastState);
 }
 
 /* ---------- Phase-2: intel (calendar / alerts / clusters) ---------- */
@@ -530,6 +653,12 @@ function pairRender(s) {
   if (st === "launching" || st === "waiting") {
     const wait = s.elapsed ? ` (${Math.round(s.elapsed)}s elapsed)` : "";
     pairSay(msg + wait, "busy");
+    return;
+  }
+  if (st === "adopting") {
+    // Cookie landed, engine still booting: stay on the veil, keep polling.
+    // Reporting "ready" here would flap the veil until the engine attaches.
+    pairSay(msg || "session captured — starting the terminal…", "busy");
     return;
   }
   // idle
