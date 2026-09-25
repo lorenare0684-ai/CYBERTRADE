@@ -181,7 +181,10 @@ class TestApiGhostBehaviour(unittest.TestCase):
         self.assertEqual(api.pace.orders, 1)
         self.assertGreaterEqual(fc.t, 0.03)          # think-time happened
         self.assertGreater(api.pace.slept_total, 0.0)
-        self.assertIn("orders/open", api.socket.sent[0])
+        wires = "".join(api.socket.sent)
+        self.assertIn("settings/apply", api.socket.sent[0])   # tab parity
+        self.assertIn("orders/open", api.socket.sent[-1])
+        self.assertLess(wires.index("settings/apply"), wires.index("orders/open"))
 
     def test_subscribe_registry_and_reconnect_replay(self):
         api = self._api()

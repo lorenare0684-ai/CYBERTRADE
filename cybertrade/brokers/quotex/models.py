@@ -33,8 +33,8 @@ class QXBalance:
             balance = float(dig(data, "data.balance", dig(data, "balance", 0.0)) or 0.0)
             demo = kind.upper() != "REAL"
         user_id = str(
-            dig(data, "userId", dig(data, "user_id",
-                dig(data, "data.userId", dig(data, "id", "")))) or ""
+            dig(data, "uid", dig(data, "userId", dig(data, "user_id",
+                dig(data, "data.userId", dig(data, "id", ""))))) or ""
         )
         return cls(
             account_type=kind,
@@ -128,21 +128,35 @@ class QXOrderRequest:
     action: str                      # "call" | "put"
     duration: int                    # seconds
     is_demo: bool = True
-    option_type: int = 1
+    option_type: int = 100           # 100 = TIMER (time=duration), 1/3 = TIME (time=expiry)
     request_id: str = ""
     tournament_id: int = 0
-    time: int = 0                    # unix expiry timestamp (orders/open style)
+    time: int = 0                    # TIMER: duration seconds; TIME: aligned expiry ts
+    expiry_ts: float = 0.0           # when the contract settles (epoch seconds)
+
+    @property
+    def time_mode(self) -> str:
+        return "TIMER" if int(self.option_type) == 100 else "TIME"
 
     def to_payload(self) -> Dict[str, Any]:
+        """``orders/open`` body — byte-shape of the reference client.
+
+        ``time`` is the duration for TIMER contracts and the aligned
+        expiry timestamp otherwise; ``requestId`` rides as an integer
+        when it is numeric (the venue echoes an epoch int back).
+        """
+        wire_time = self.time
+        if not wire_time:
+            wire_time = int(self.duration) if self.time_mode == "TIMER" else int(self.expiry_ts)
         return {
             "asset": self.asset,
             "amount": int(self.amount) if self.amount == int(self.amount) else self.amount,
-            "time": self.time,
+            "time": int(wire_time),
             "action": self.action,
             "isDemo": 1 if self.is_demo else 0,
-            "requestId": self.request_id,
-            "optionType": self.option_type,
             "tournamentId": self.tournament_id,
+            "requestId": _wire_request_id(self.request_id),
+            "optionType": int(self.option_type),
         }
 
     def to_legacy_payload(self) -> Dict[str, Any]:
@@ -153,12 +167,24 @@ class QXOrderRequest:
             "action": self.action,
             "duration": self.duration,
             "isDemo": 1 if self.is_demo else 0,
-            "requestId": self.request_id,
+            "requestId": _wire_request_id(self.request_id),
         }
 
     @property
     def side(self) -> Side:
         return Side.CALL if self.action.lower() == "call" else Side.PUT
+
+
+def _wire_request_id(value: Any) -> Any:
+    """Numeric request ids go out as ints (venue parity); others untouched."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    text = str(value)
+    if text.isdigit():
+        return int(text)
+    return value
 
 
 @dataclass
@@ -173,6 +199,7 @@ class QXOrderResult:
     close_price: float = 0.0
     profit: float = 0.0
     payout: float = 0.85
+    expiry_ts: float = 0.0
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -183,29 +210,88 @@ class QXOrderResult:
     def lost(self) -> bool:
         return self.status.lower() in ("loss", "lost", "loose")
 
+    @property
+    def closed(self) -> bool:
+        return self.status.lower() not in ("open", "", "pending")
+
     @classmethod
-    def from_payload(cls, payload: Any) -> "QXOrderResult":
+    def from_payload(cls, payload: Any, closed: Optional[bool] = None) -> "QXOrderResult":
+        """Absorb an order row.
+
+        Venue rows (``s_orders/open`` ack, ``deals`` settlement) look like
+        ``{id, requestId, asset, amount, command, openPrice, closePrice,
+        profit, percentProfit, openTimestamp, closeTimestamp, …}`` — no
+        ``status`` field.  ``profit`` on the *open ack* is the potential
+        win, so the caller says whether the row is a settlement
+        (``closed=True``) or an ack (``closed=False``); when it does not,
+        an explicit ``status`` key decides and anything else is ``open``.
+        """
         data = payload if isinstance(payload, dict) else {}
         inner = dig(data, "data", data) or {}
         if not isinstance(inner, dict):
             inner = {}
-        payout_raw = dig(inner, "payout", dig(inner, "profit", 85)) or 85
-        payout = float(payout_raw)
+        payout_raw = dig(inner, "percentProfit",
+                         dig(inner, "payout", dig(inner, "profitPercent", 85))) or 85
+        try:
+            payout = float(payout_raw)
+        except (TypeError, ValueError):
+            payout = 85.0
         if payout > 1:
             payout = payout / 100.0
+        profit = _num(dig(inner, "profit", 0.0))
+        close_price = _num(dig(inner, "closePrice", dig(inner, "close_price", 0.0)))
+        open_price = _num(dig(inner, "openPrice", dig(inner, "open_price", 0.0)))
+
+        action = str(dig(inner, "action", dig(inner, "direction", "")) or "")
+        if not action and "command" in inner:
+            try:
+                action = "put" if int(inner["command"]) == 1 else "call"
+            except (TypeError, ValueError):
+                action = ""
+
+        explicit = dig(inner, "status", dig(inner, "state", None))
+        if closed is None and explicit is not None:
+            status = str(explicit)
+        elif closed:
+            if profit > 0:
+                status = "win"
+            elif profit < 0:
+                status = "loss"
+            else:
+                status = "refund"
+        elif closed is False:
+            status = "open"
+        else:
+            status = "open"
+        if status.lower() == "closed":
+            status = "win" if profit > 0 else ("loss" if profit < 0 else "refund")
+
+        expiry_raw = dig(inner, "closeTimestamp", dig(inner, "expiry", dig(inner, "expiryTime", 0)))
+        expiry = _num(expiry_raw)
+        if expiry > 1e11:
+            expiry /= 1000.0
+
         return cls(
-            order_id=str(dig(inner, "id", dig(inner, "orderId", ""))),
-            request_id=str(dig(inner, "requestId", "")),
-            status=str(dig(inner, "status", dig(inner, "state", "open"))),
+            order_id=str(dig(inner, "id", dig(inner, "orderId", dig(inner, "ticket", ""))) or ""),
+            request_id=str(dig(inner, "requestId", "") or ""),
+            status=status,
             asset=str(dig(inner, "asset", "")),
-            amount=float(dig(inner, "amount", 0.0) or 0.0),
-            action=str(dig(inner, "action", dig(inner, "direction", ""))),
-            open_price=float(dig(inner, "openPrice", dig(inner, "open_price", 0.0)) or 0.0),
-            close_price=float(dig(inner, "closePrice", dig(inner, "close_price", 0.0)) or 0.0),
-            profit=float(dig(inner, "profit", 0.0) or 0.0),
+            amount=_num(dig(inner, "amount", 0.0)),
+            action=action,
+            open_price=open_price,
+            close_price=close_price,
+            profit=profit,
             payout=payout,
+            expiry_ts=expiry,
             raw=data if isinstance(data, dict) else {},
         )
+
+
+def _num(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass

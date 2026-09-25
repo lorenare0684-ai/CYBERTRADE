@@ -118,6 +118,7 @@ def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
         max_orders_per_min=cfg.broker.max_orders_per_min,
         reconnect_max=cfg.broker.reconnect_max,
         timeout=cfg.broker.request_timeout,
+        time_mode=getattr(cfg.broker, "time_mode", QXC.TIME_MODE_TIMER),
     )
 
 

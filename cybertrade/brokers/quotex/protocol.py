@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import itertools
+import threading
 import time
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from ...network.socketio import (
@@ -18,9 +18,49 @@ from . import constants as C
 from .models import QXAsset, QXBalance, QXCandle, QXOrderRequest, QXOrderResult
 
 
-def make_request_id() -> str:
-    """Quotex request ids look like compact epoch-ish integers/strings."""
-    return str(int(time.time() * 1000))[-12:] + uuid.uuid4().hex[:4]
+_rid_lock = threading.Lock()
+_rid_last = 0
+
+
+def make_request_id(now: Optional[float] = None) -> str:
+    """Venue request ids are epoch-second integers (``requestId``).
+
+    The reference client sends ``int(time.time())``; the venue echoes it
+    back on the ``s_orders/open`` ack, which is how an order is matched
+    to its fill.  Two orders inside one second must not collide, so the
+    id is strictly monotonic per process.  Returned as a string (the
+    broker layer keys on strings); :meth:`QXOrderRequest.to_payload`
+    puts it on the wire as an int.
+    """
+    global _rid_last
+    candidate = int(now if now is not None else time.time())
+    with _rid_lock:
+        if candidate <= _rid_last:
+            candidate = _rid_last + 1
+        _rid_last = candidate
+    return str(candidate)
+
+
+def expiration_for(now: float, duration: int) -> int:
+    """Period-aligned expiry for TIME-mode contracts (optionType 1/3).
+
+    Port of pyquotex ``get_expiration_time_quotex`` on a UTC clock:
+    sub-minute durations expire at the next minute boundary (or the one
+    after when fewer than 30s remain); longer ones land on the next
+    ``duration`` grid line since midnight, skipping one grid step when
+    more than half the current period has already elapsed.
+    """
+    now_i = int(now)
+    duration = max(1, int(duration))
+    if duration < 60:
+        base = now_i - (now_i % 60)
+        shift = 1 if (now_i % 60) >= 30 else 0
+        return base + 60 * (shift + 1)
+    midnight = now_i - (now_i % 86400)
+    since = now_i - midnight
+    remainder = since % duration
+    step = 2 if remainder > (duration / 2) else 1
+    return midnight + ((since // duration) + step) * duration
 
 
 # ---------------------------------------------------------------------------
@@ -58,12 +98,64 @@ def build_order(req: QXOrderRequest, legacy: bool = False) -> str:
 
 
 def build_sell_option(order_id: str) -> str:
-    """Early-sale / close of an open option (sell_option in stable_api)."""
-    return encode_event(C.EV_SELL_OPTION, {"id": order_id})
+    """Early sale of an open option — ``42["orders/cancel",{"ticket":id}]``.
+
+    ``ticket`` is the venue order id from the ``s_orders/open`` ack (not
+    our ``requestId``).  Numeric ids ride as ints, like the reference
+    client sends them.
+    """
+    ticket: Any = order_id
+    if isinstance(order_id, str) and order_id.isdigit():
+        ticket = int(order_id)
+    return encode_event(C.EV_ORDERS_CANCEL, {"ticket": ticket})
 
 
-def build_orders_close(order_id: str) -> str:
-    return encode_event(C.EV_ORDERS_CANCEL, {"id": order_id})
+build_orders_close = build_sell_option
+
+
+def build_settings_apply(
+    asset: str,
+    period: int,
+    is_fast_option: bool = False,
+    end_time: Optional[int] = None,
+    deal: float = 5,
+    now: Optional[float] = None,
+) -> str:
+    """``settings/apply`` — what the trade tab sends before an order.
+
+    Mirrors the reference client field-for-field (chart id/type, expiry
+    settings, one-click flag, colours).  ``period`` is the contract
+    duration in seconds; ``end_time`` is the aligned expiry for TIME
+    contracts and is echoed in ``currentExpirationTime`` + ``endTime``.
+    """
+    current = int(now if now is not None else time.time())
+    payload: Dict[str, Any] = {
+        "chartId": "graph",
+        "settings": {
+            "chartId": "graph",
+            "chartType": 2,
+            "currentExpirationTime": end_time if (is_fast_option and end_time) else current,
+            "isFastOption": bool(is_fast_option),
+            "isFastAmountOption": False,
+            "isIndicatorsMinimized": False,
+            "isIndicatorsShowing": True,
+            "isShortBetElement": False,
+            "chartPeriod": 4,
+            "currentAsset": {"symbol": asset},
+            "dealValue": int(deal) if float(deal) == int(deal) else deal,
+            "dealPercentValue": 1,
+            "isVisible": True,
+            "timePeriod": int(period),
+            "gridOpacity": 8,
+            "isAutoScrolling": 1,
+            "isOneClickTrade": True,
+            "upColor": "#0FAF59",
+            "downColor": "#FF6251",
+        },
+    }
+    if end_time:
+        payload["endTime"] = int(end_time)
+    return encode_event(C.EV_SETTINGS_APPLY, payload)
 
 
 def build_tick() -> str:
@@ -430,8 +522,41 @@ def parse_portfolio(args: List[Any]) -> List[QXOrderResult]:
     return out
 
 
-def parse_order_result(args: List[Any]) -> QXOrderResult:
-    return QXOrderResult.from_payload(args[0] if args else {})
+def parse_order_result(args: List[Any], closed: Optional[bool] = None) -> QXOrderResult:
+    return QXOrderResult.from_payload(args[0] if args else {}, closed=closed)
+
+
+def parse_order_rows(args: List[Any], closed: Optional[bool] = None) -> List[QXOrderResult]:
+    """Every order row in an order-lifecycle payload.
+
+    Shapes: a single row dict (``s_orders/open`` ack), a list of rows
+    (``orders/closed``), or ``{"deals": [row, …]}`` (settlement push).
+    Rows without an id or requestId are dropped rather than guessed.
+    """
+    out: List[QXOrderResult] = []
+
+    def _absorb(obj: Any) -> None:
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                _absorb(item)
+        elif isinstance(obj, dict):
+            deals = obj.get("deals")
+            if isinstance(deals, list):
+                for item in deals:
+                    _absorb(item)
+                return
+            if not any(k in obj for k in ("id", "ticket", "orderId", "requestId")):
+                nested = obj.get("data")
+                if nested is not None:
+                    _absorb(nested)
+                return
+            row = QXOrderResult.from_payload(obj, closed=closed)
+            if row.order_id or row.request_id:
+                out.append(row)
+
+    for entry in args or []:
+        _absorb(entry)
+    return out
 
 
 def parse_error(args: List[Any]) -> str:
@@ -445,7 +570,9 @@ def parse_error(args: List[Any]) -> str:
 
 __all__ = [
     "make_request_id",
+    "expiration_for",
     "build_authorization",
+    "build_settings_apply",
     "build_order",
     "build_sell_option",
     "build_orders_close",
@@ -470,5 +597,6 @@ __all__ = [
     "parse_balance",
     "parse_portfolio",
     "parse_order_result",
+    "parse_order_rows",
     "parse_error",
 ]

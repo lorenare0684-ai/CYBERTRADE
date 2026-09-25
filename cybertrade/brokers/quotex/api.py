@@ -47,12 +47,15 @@ from .protocol import (
     build_pending_list,
     build_portfolio,
     build_sell_option,
+    build_settings_apply,
     build_subscribe_candles,
     build_unsubscribe_candles,
+    expiration_for,
     make_request_id,
     parse_balance,
     parse_candles,
     parse_order_result,
+    parse_order_rows,
     parse_portfolio,
     parse_quotes,
     parse_tick,
@@ -148,6 +151,7 @@ class QuotexAPI:
         demo: bool = True,
         timeout: float = 15.0,
         legacy_orders: bool = False,
+        time_mode: str = C.TIME_MODE_TIMER,
         ghost: bool = True,
         order_think_ms: int = 140,
         order_min_gap_ms: int = 350,
@@ -161,6 +165,11 @@ class QuotexAPI:
         self.demo = demo
         self.timeout = timeout
         self.legacy_orders = legacy_orders
+        # TIMER (optionType 100, time=duration) settles exactly ``duration``
+        # after the fill — the local settlement clock's assumption.  TIME
+        # (optionType 3, period-aligned expiry) is what the trade tab
+        # sends when the expiry picker is in clock mode.
+        self.time_mode = str(time_mode or C.TIME_MODE_TIMER).upper()
         self.reconnect_max = max(1, int(reconnect_max))
 
         self.pace = pace or Pacekeeper(
@@ -186,6 +195,10 @@ class QuotexAPI:
         self._last_tick: Dict[str, Tick] = {}
         self._candles: Dict[Tuple[str, int], List[Candle]] = {}
         self._orders: Dict[str, QXOrderResult] = {}
+        # requestId -> request, until the venue ack names the order id.
+        self._pending_orders: Dict[str, QXOrderRequest] = {}
+        # requestId -> venue order id (the ``ticket`` for sell-back).
+        self._order_ids: Dict[str, str] = {}
         self._listeners: List[Callable[[str, Any], None]] = []
         self._lock = threading.RLock()
         self._tick_handlers: List[Callable[[Tick], None]] = []
@@ -563,7 +576,7 @@ class QuotexAPI:
             balance=self.balance.balance,
             equity=self.balance.balance,
             margin_used=0.0,
-            open_positions=len([o for o in self._orders.values() if o.status == "open"]),
+            open_positions=len([o for o in self._orders.values() if not o.closed]),
             currency=self.balance.currency,
         )
 
@@ -574,40 +587,138 @@ class QuotexAPI:
         amount: float,
         action: str,
         duration: int,
-        option_type: int = C.OPTION_TYPE_DIGITAL,
+        option_type: Optional[int] = None,
+        time_mode: Optional[str] = None,
     ) -> QXOrderRequest:
+        """Place a binary option (reference-client wire shape).
+
+        TIMER (default): ``optionType=100``, ``time=duration`` — expires
+        ``duration`` seconds after the fill.  TIME: ``optionType=3``
+        (or the given type), ``time`` = period-aligned expiry, which is
+        what the venue requires for non-timer contracts — an unaligned
+        ``now + duration`` is refused.  A ``settings/apply`` (asset +
+        expiry) and an app ``tick`` precede the order, like the tab does.
+        """
         action = action.lower()
         if action not in ("call", "put"):
             raise OrderRejected(f"action must be call/put, got {action!r}", code="BAD_SIDE")
         if duration not in C.DURATIONS:
             # round to nearest allowed duration
             duration = min(C.DURATIONS, key=lambda d: abs(d - duration))
+        mode = str(time_mode or self.time_mode).upper()
+        now = timex.now()
+        if option_type == C.OPTION_TYPE_TIMER:
+            mode = C.TIME_MODE_TIMER
+        elif option_type is not None:
+            mode = C.TIME_MODE_TIME
+        if mode == C.TIME_MODE_TIMER:
+            option_type = C.OPTION_TYPE_TIMER
+            wire_time = int(duration)
+            expiry_ts = float(int(now) + duration)
+        else:
+            option_type = option_type or C.OPTION_TYPE_FAST
+            wire_time = expiration_for(now, duration)
+            expiry_ts = float(wire_time)
         req = QXOrderRequest(
             asset=asset,
             amount=amount,
             action=action,
             duration=duration,
             is_demo=self.demo,
-            option_type=option_type,
-            request_id=make_request_id(),
-            time=int(timex.now()) + duration,
+            option_type=int(option_type),
+            request_id=make_request_id(now),
+            time=wire_time,
+            expiry_ts=expiry_ts,
         )
+        # Chart/expiry settings first (best-effort — the tab always sends
+        # them, and a TIME contract needs the venue to know the expiry).
+        try:
+            self._send(build_settings_apply(
+                asset, duration,
+                is_fast_option=(mode != C.TIME_MODE_TIMER),
+                end_time=(wire_time if mode != C.TIME_MODE_TIMER else None),
+                deal=amount, now=now,
+            ), kind="frame")
+        except BrokerConnectionError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — settings are advisory
+            log.debug("settings/apply failed: %s", exc)
         # Phase-30: think-time + min gap + orders/min window all ride here.
         self._send(build_order(req, legacy=self.legacy_orders), kind="order")
         log.info(
-            "qx order sent %s %s %.2f exp=%ds demo=%s rid=%s",
-            asset, action, amount, duration, self.demo, req.request_id,
+            "qx order sent %s %s %.2f exp=%ds mode=%s demo=%s rid=%s",
+            asset, action, amount, duration, mode, self.demo, req.request_id,
         )
+        with self._lock:
+            self._pending_orders[req.request_id] = req
         self._emit("order_sent", req.to_payload())
         return req
 
     def sell_option(self, order_id: str) -> None:
+        """Sell an open contract back — needs the venue *ticket*.
+
+        Callers may still hold our ``requestId`` (the ack can lag the
+        fill); translate it when the venue has named the order.
+        """
+        ticket = self.order_id_for(order_id)
         # sell-backs are trade actions too — same organic gate as orders.
-        self._send(build_sell_option(order_id), kind="order")
+        self._send(build_sell_option(ticket), kind="order")
+
+    def order_id_for(self, key: str) -> str:
+        """Venue order id for a requestId (or the key itself when unknown)."""
+        with self._lock:
+            return self._order_ids.get(str(key), str(key))
+
+    def order_result(self, key: str) -> Optional[QXOrderResult]:
+        """Latest known state of an order by venue id *or* requestId."""
+        with self._lock:
+            row = self._orders.get(str(key))
+            if row is None:
+                mapped = self._order_ids.get(str(key))
+                if mapped:
+                    row = self._orders.get(mapped)
+            return row
+
+    def _absorb_orders(self, name: str, args: List[Any], closed: bool) -> None:
+        """Fold order acks/settlements into order state, then emit."""
+        rows = parse_order_rows(args, closed=closed)
+        if not rows:
+            return
+        with self._lock:
+            for row in rows:
+                if row.request_id and row.order_id:
+                    self._order_ids[row.request_id] = row.order_id
+                if row.order_id and not row.request_id:
+                    # settlement rows rarely echo requestId — recover it
+                    for rid, oid in self._order_ids.items():
+                        if oid == row.order_id:
+                            row.request_id = rid
+                            break
+                key = row.order_id or row.request_id
+                prev = self._orders.get(key)
+                if prev is not None and closed:
+                    # keep identity/asset from the ack when the settlement
+                    # row is terse
+                    row.request_id = row.request_id or prev.request_id
+                    row.asset = row.asset or prev.asset
+                    row.amount = row.amount or prev.amount
+                    row.action = row.action or prev.action
+                    row.open_price = row.open_price or prev.open_price
+                    row.expiry_ts = row.expiry_ts or prev.expiry_ts
+                self._orders[key] = row
+                if row.request_id:
+                    self._pending_orders.pop(row.request_id, None)
+        for row in rows:
+            log.info("venue %s: %s %s rid=%s id=%s profit=%.2f",
+                     "settled" if closed else "accepted", row.asset or "?",
+                     row.status, row.request_id or "-", row.order_id or "-",
+                     row.profit)
+            self._emit("order", row)
 
     def open_trades(self) -> List[QXOrderResult]:
         self._send(build_portfolio(), kind="poll")
-        return [o for o in self._orders.values() if o.status == "open"]
+        with self._lock:
+            return [o for o in self._orders.values() if not o.closed]
 
     # -- event plumbing ----------------------------------------------------
     def add_listener(self, fn: Callable[[str, Any], None]) -> None:
@@ -694,7 +805,20 @@ class QuotexAPI:
             self._handle_live_candle(args[0] if args else {})
         elif name == C.SV_S_AUTHORIZATION:
             log.info("venue authorized the session")
-            self._emit("authorized", {})
+            head = args[0] if args else None
+            if isinstance(head, dict) and (
+                    "liveBalance" in head or "demoBalance" in head
+                    or "balance" in head):
+                # The auth ack carries the purse balances — that is the
+                # first (often only) balance push a fresh wire sees.
+                self._on_socket_event(C.SV_BALANCE, [head])
+            self._emit("authorized", head if isinstance(head, dict) else {})
+        elif name in C.ORDER_OPEN_EVENTS:
+            self._note_data(name)
+            self._absorb_orders(name, args, closed=False)
+        elif name in C.ORDER_CLOSE_EVENTS:
+            self._note_data(name)
+            self._absorb_orders(name, args, closed=True)
         elif name == C.SV_S_ACCOUNT_CHANGE or (
                 isinstance(name, str) and name.startswith("s_")):
             log.info("venue confirm: %s", name)
@@ -745,6 +869,8 @@ class QuotexAPI:
                 key = result.order_id or result.request_id
                 with self._lock:
                     self._orders[key] = result
+                    if result.order_id and result.request_id:
+                        self._order_ids[result.request_id] = result.order_id
                 self._emit("order", result)
 
         elif name in (C.SV_PORTFOLIO, C.EV_PORTFOLIO, "portfolio", "openOrders"):
