@@ -510,7 +510,7 @@ class ConnectionPanel(tk.Frame):
         self.hint = tk.Label(
             form,
             text="Chrome opens qxbroker.com in that profile — sign in and solve\n"
-                 "the CAPTCHA yourself; we only read the sessionid cookie\n"
+                 "the CAPTCHA yourself; we only read the session cookie\n"
                  "Chrome grants over localhost DevTools. Nothing is bypassed.",
             bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL, justify="left",
         )

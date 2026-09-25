@@ -85,7 +85,7 @@ class SessionGate(tk.Tk):
             pad,
             text="This build trades LIVE at Quotex and needs a venue session\n"
                  "before anything can boot. Pair one with Chrome: sign in and\n"
-                 "solve the CAPTCHA yourself — we only read the sessionid\n"
+                 "solve the CAPTCHA yourself — we only read the session\n"
                  "cookie Chrome hands back over localhost DevTools.",
             bg=t["bg"], fg=t["text"], font=MONO_SMALL, justify="left",
         ).pack(anchor="w", pady=(14, 6))
@@ -172,6 +172,7 @@ class SessionGate(tk.Tk):
             self._say(error, "yellow")
             return
         self._set_busy(True)
+        self._poll_names = None
         self._say("launching Chrome — log in and solve the CAPTCHA…", "yellow")
         run_pairing(
             session_path=self.config.qx_session_path,
@@ -182,18 +183,37 @@ class SessionGate(tk.Tk):
                 0, lambda: self._done(sess, purse)),
             on_error=lambda exc: self.after(
                 0, lambda: self._failed(exc)),
+            on_poll=lambda info: self.after(
+                0, lambda: self._progress(info)),
         )
+
+    def _progress(self, info: dict) -> None:
+        """Live DevTools progress: which venue cookies the browser has."""
+        names = tuple(sorted(info.get("cookies", []) or []))
+        if names == self._poll_names or not self._pairing:
+            return
+        self._poll_names = names
+        if names:
+            self._say("Chrome is up (" + ", ".join(names) + " seen) — "
+                      "log in and solve the CAPTCHA…", "yellow")
+        else:
+            self._say("launching Chrome — log in and solve the CAPTCHA…",
+                      "yellow")
 
     def _done(self, sess: dict, purse: bool) -> None:
         self._set_busy(False)
         ssid = str(sess.get("ssid", ""))
         if not ssid:
-            self._say("Chrome closed without a sessionid cookie — try again",
+            self._say("Chrome closed without a session cookie — try again",
                       "red")
             return
         self._say("session captured — starting the terminal…", "green")
         if self.on_ready is not None:
             self.on_ready(ssid, purse)
+        # run_gate() blocks in mainloop(): without this the window sits on
+        # its success message forever and the terminal never boots — a login
+        # the app never detects.
+        self.destroy()
 
     def _failed(self, exc: Exception) -> None:
         self._set_busy(False)

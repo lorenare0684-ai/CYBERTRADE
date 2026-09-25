@@ -545,8 +545,8 @@ def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
     """Chrome + your hands beat any headless login.
 
     Opens a persistent Chrome profile on qxbroker.com; you sign in and solve
-    the CAPTCHA yourself; we detect the `sessionid` cookie over localhost
-    DevTools and persist it (0600) for the websocket wire.
+    the CAPTCHA yourself; we detect the session (cookie or page token) over
+    localhost DevTools and persist it (0600) for the websocket wire.
     """
     import os
 

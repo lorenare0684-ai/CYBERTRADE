@@ -21,8 +21,8 @@ Two entry points matter:
   in place: ``set_ssid`` + ``connect`` on the live api, no restart.
 
 Nothing here bypasses the CAPTCHA: a human solves it in a real Chrome
-profile, and this only reads the ``sessionid`` cookie over localhost
-DevTools afterwards.
+profile, and this only reads the session (cookie or page token) over
+localhost DevTools afterwards.
 """
 
 from __future__ import annotations
@@ -163,6 +163,18 @@ class PairingController:
 
         log.warning("chrome pairing started profile=%s port=%s purse=%s",
                     values["profile"], values["port"], purse)
+
+        def _progress(info: Dict[str, Any]) -> None:
+            """Live DevTools progress for the pairing veil (worker thread)."""
+            with self._lock:
+                if self._state not in (LAUNCHING, WAITING):
+                    return
+                names = sorted(info.get("cookies") or [])
+                if names:
+                    self._message = (
+                        "log in and solve the CAPTCHA in the Chrome window "
+                        f"(cookies so far: {', '.join(names)})")
+
         self._thread = run_pairing(
             session_path=self.config.qx_session_path,
             profile=values["profile"],
@@ -170,6 +182,7 @@ class PairingController:
             timeout=values["timeout"],
             on_done=lambda sess: self._done(sess, epoch),
             on_error=lambda exc: self._failed(exc, epoch),
+            on_poll=_progress,
         )
         return {"ok": True, **self.status()}
 

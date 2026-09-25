@@ -413,7 +413,7 @@ class CybertradeApp(tk.Tk):
         ssid = str(sess.get("ssid", ""))
         self.link.set_busy(False)
         if not ssid:
-            self.link.set_status("Chrome closed without a sessionid cookie", "red")
+            self.link.set_status("Chrome closed without a session cookie", "red")
             return
         self.link.adopt_session(ssid, "session captured — connecting…")
         self._connect({"mode": "quotex", "ssid": ssid, "demo": purse})

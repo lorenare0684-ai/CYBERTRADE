@@ -250,6 +250,17 @@ class TestLoginSession(unittest.TestCase):
             status=200, headers={}, body=b'{"ok":true}')
         self.assertEqual(api2.login("u@x.com", "pw").ssid, "COOKIE99")
 
+    def test_login_prefers_live_session_cookie(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.network.http_client import HttpResponse
+
+        api = QuotexAPI()
+        api.http.jar.set_from_header("sessionid=OLD; Path=/")
+        api.http.jar.set_from_header("session=NEWLIVE; Path=/")
+        api.http.post = lambda *a, **k: HttpResponse(
+            status=200, headers={}, body=b'{"ok":true}')
+        self.assertEqual(api.login("u@x.com", "pw").ssid, "NEWLIVE")
+
     def test_login_falls_back_to_alt_base(self):
         from cybertrade.brokers.quotex import constants as C
         from cybertrade.brokers.quotex.api import QuotexAPI

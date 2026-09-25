@@ -61,8 +61,9 @@ _SSID_PATHS = (
     "result.session", "result.ssid", "payload.session", "payload.ssid",
 )
 
-# Session cookie names worth trying when the JSON body carries no token.
-_SSID_COOKIES = ("sessionid", "ssid", "session", "PHPSESSID")
+# Session cookie names worth trying when the JSON body carries no token
+# (same priority as pairing: the live site's names first, legacy last).
+_SSID_COOKIES = ("session", "ssid", "qx_session", "sessionid", "PHPSESSID")
 
 # Markers that say "a browser challenge ate your login", not "bad password".
 _CHALLENGE_MARKERS = (

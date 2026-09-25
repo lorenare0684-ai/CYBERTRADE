@@ -44,8 +44,9 @@ Login robustness notes (all implemented, all covered by tests):
   A dead route reads as a dead route, not a dead account.
 - **Response tolerance** — the token is harvested from `session` / `ssid` /
   `token` / `access_token` at top level or under `data` / `result` /
-  `payload`, from a bare JSON string, or from the `sessionid` / `ssid` /
-  `session` / `PHPSESSID` cookie. Chunked+gzipped bodies are decoded.
+  `payload`, from a bare JSON string, or from the `session` / `ssid` /
+  `qx_session` / `sessionid` / `PHPSESSID` cookie. Chunked+gzipped bodies
+  are decoded.
 - **Error taxonomy** — HTTP 401 says bad password; a challenge page (HTML /
   `cf-challenge` markers) says to pair via `cybertrade quotex login`
   instead of blaming the password.
@@ -224,7 +225,8 @@ cybertrade quotex login
     --remote-debugging-port=9333, persistent profile: do this once)
   → YOU log in and solve the CAPTCHA by hand
   → pairing polls DevTools on 127.0.0.1:9333 (Storage.getCookies, with
-    Network.getAllCookies as fallback) for the `sessionid` cookie
+    Network.getAllCookies as fallback) for the session cookie, with the
+    trade page's `window.settings.token` (Runtime.evaluate) as fallback
   → session persisted to cfg.qx_session_path (0600): {ssid, cookies, domain}
   → QuotexAPI.set_ssid(ssid, cookies) → websocket authorization §4
 ```
