@@ -43,8 +43,13 @@ EV_HISTORY_SUBSCRIBE_ALL = "history/subscribe_all"
 EV_ACCOUNT_CHANGE = "account/change"              # switch demo/real purse
 EV_ORDERS_OPEN = "orders/open"          # place a binary option
 EV_ORDER_OPEN_ALT = "buyOption"         # legacy name used by older clients
-EV_ORDERS_CANCEL = "orders/close"       # early sale / cancel window
-EV_SELL_OPTION = "sellOption"
+# Early sale / cancel: the venue's frame is ``orders/cancel`` with a
+# ``ticket`` (the venue order id).  Older docs named ``sellOption`` /
+# ``orders/close`` — the live venue answers neither (``orders/close`` is
+# the *server → client* settlement event, not a request).
+EV_ORDERS_CANCEL = "orders/cancel"
+EV_SELL_OPTION = EV_ORDERS_CANCEL
+EV_SETTINGS_APPLY = "settings/apply"    # chart/expiry settings before an order
 EV_PORTFOLIO = "portfolio"
 EV_PROFIT = "profit"
 EV_NOTIFICATION = "notification"
@@ -71,6 +76,18 @@ SV_BALANCE_UPDATE = "balanceUpdate"
 SV_ORDER = "order"
 SV_ORDERS = "orders"
 SV_ORDER_RESULT = "orderResult"
+# Order lifecycle (binary attachments — ``451-["s_orders/open",…]`` + raw
+# frame).  The open ack echoes ``requestId`` and carries the venue ``id``
+# (the *ticket* needed for sell-back); settlement arrives as ``deals``
+# rows (``{deals: [{id, profit, closePrice, …}]}``) or ``orders/closed``.
+SV_S_ORDERS_OPEN = "s_orders/open"
+SV_ORDERS_OPENED = "orders/opened"
+SV_S_ORDERS_CLOSE = "s_orders/close"
+SV_ORDERS_CLOSED = "orders/closed"
+SV_ORDERS_CLOSE = "orders/close"
+SV_DEALS = "deals"
+ORDER_OPEN_EVENTS = (SV_S_ORDERS_OPEN, "orders/open", SV_ORDERS_OPENED)
+ORDER_CLOSE_EVENTS = (SV_S_ORDERS_CLOSE, SV_ORDERS_CLOSE, SV_ORDERS_CLOSED, SV_DEALS)
 SV_PORTFOLIO = "portfolio"
 SV_ASSETS_LIST = "assets_list"
 # Every spelling the instrument listing has been seen under (community
@@ -88,10 +105,21 @@ SV_PROFIT = "profit"
 SV_ERROR = "error"
 SV_NOTIFICATION = "notification"
 
-# Option types (optionType field on orders/open)
-OPTION_TYPE_DIGITAL = 1
+# Option types (optionType field on orders/open) — pyquotex parity:
+#   1   = "TIME" contract, ``time`` is a period-aligned expiry timestamp
+#   3   = fast option (same aligned expiry; what the trade tab sends by default)
+#   100 = "TIMER" contract, ``time`` is the duration in seconds
+# TIMER is the bot default: it works for OTC and non-OTC, every duration
+# from 5s up, and expires exactly ``duration`` after the fill — which is
+# what the local settlement clock assumes.
+OPTION_TYPE_TIME = 1
+OPTION_TYPE_FAST = 3
+OPTION_TYPE_TIMER = 100
+OPTION_TYPE_DIGITAL = OPTION_TYPE_TIME   # legacy aliases
 OPTION_TYPE_BINARY = 2
-OPTION_TYPE_TURBO = 3
+OPTION_TYPE_TURBO = OPTION_TYPE_FAST
+TIME_MODE_TIMER = "TIMER"
+TIME_MODE_TIME = "TIME"
 
 # Account kinds
 ACCOUNT_DEMO = "PRACTICE"
@@ -140,6 +168,7 @@ __all__ = [
     "EV_ORDER_OPEN_ALT",
     "EV_ORDERS_CANCEL",
     "EV_SELL_OPTION",
+    "EV_SETTINGS_APPLY",
     "EV_PORTFOLIO",
     "EV_PROFIT",
     "EV_NOTIFICATION",
@@ -154,8 +183,20 @@ __all__ = [
     "SV_TRADER_HISTORY",
     "SV_SENTIMENT",
     "SV_QUOTES",
+    "SV_S_ORDERS_OPEN",
+    "SV_ORDERS_OPENED",
+    "SV_S_ORDERS_CLOSE",
+    "SV_ORDERS_CLOSED",
+    "SV_DEALS",
+    "ORDER_OPEN_EVENTS",
+    "ORDER_CLOSE_EVENTS",
+    "OPTION_TYPE_TIME",
+    "OPTION_TYPE_FAST",
+    "OPTION_TYPE_TIMER",
     "OPTION_TYPE_DIGITAL",
     "OPTION_TYPE_BINARY",
+    "TIME_MODE_TIMER",
+    "TIME_MODE_TIME",
     "ACCOUNT_DEMO",
     "ACCOUNT_REAL",
     "DURATIONS",

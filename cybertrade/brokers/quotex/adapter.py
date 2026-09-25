@@ -166,13 +166,19 @@ class QuotexBroker(Broker):
         order.broker_id = req.request_id
         self._fills[fill.id] = fill
         self._by_request[req.request_id] = fill.id
+        # TIMER contracts expire ``duration`` after the fill; TIME
+        # contracts on the venue's aligned grid — the request knows which.
+        expiry = float(getattr(req, "expiry_ts", 0.0) or 0.0)
+        if expiry <= fill.ts:
+            expiry = fill.ts + order.expiry_seconds
         position = Position(
             fill=fill,
-            expiry_ts=fill.ts + order.expiry_seconds,
+            expiry_ts=expiry,
             strategy=order.strategy,
             label=order.tag,
         )
-        self._positions[position.id] = position
+        with self._lock:
+            self._positions[position.id] = position
         self._notify("fill", fill)
         return fill
 
@@ -217,6 +223,8 @@ class QuotexBroker(Broker):
                 return False
             broker_id = pos.fill.broker_id
         try:
+            # broker_id is the venue ticket once the ack landed, else our
+            # requestId — the API translates whichever it is given.
             self.api.sell_option(broker_id)
         except Exception as exc:  # noqa: BLE001 — salvage locally anyway
             log.warning("venue sell-back failed (%s) — local salvage mark", exc)
@@ -250,14 +258,34 @@ class QuotexBroker(Broker):
         self._notify(kind, payload)
 
     def _reconcile(self, result: QXOrderResult) -> None:
-        """Fold venue settlement events into local position accounting."""
-        fill_id = self._by_request.get(result.request_id or "")
+        """Fold venue order events into local position accounting.
+
+        The open ack (``s_orders/open``) names the venue order id for our
+        ``requestId`` — adopt it as the fill's ``broker_id`` (sell-back
+        needs that ticket) and trust the venue's expiry when it sends
+        one.  Settlement rows (``deals`` / ``orders/closed``) close the
+        position with the venue's verdict; they may carry only the venue
+        id, so both keys resolve.
+        """
+        with self._lock:
+            fill_id = (self._by_request.get(result.request_id or "")
+                       or self._by_request.get(result.order_id or ""))
         if not fill_id:
             return
         for pos_id, pos in list(self._positions.items()):
             if pos.fill.id != fill_id:
                 continue
-            if result.status.lower() in ("open", ""):
+            if result.order_id and pos.fill.broker_id != result.order_id:
+                with self._lock:
+                    pos.fill.broker_id = result.order_id
+                    self._by_request[result.order_id] = fill_id
+                log.info("venue ticket %s for %s (%s)",
+                         result.order_id, pos.fill.order_id, pos.asset)
+            if not result.closed:
+                if result.expiry_ts > pos.fill.ts:
+                    pos.expiry_ts = float(result.expiry_ts)
+                if result.open_price > 0:
+                    pos.fill.price = result.open_price
                 return
             refunded = not (result.won or result.lost)
             settlement = Settlement(

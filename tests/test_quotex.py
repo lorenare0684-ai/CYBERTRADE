@@ -65,7 +65,9 @@ class TestWireBuilders(unittest.TestCase):
         self.assertIn('"buyOption"', legacy)
 
     def test_helpers_shapes(self):
-        self.assertIn('"sellOption"', build_sell_option("o-1"))
+        # early sale is orders/cancel with the venue ticket (int when numeric)
+        self.assertEqual(build_sell_option("o-1"), '42["orders/cancel",{"ticket":"o-1"}]')
+        self.assertEqual(build_sell_option("4711"), '42["orders/cancel",{"ticket":4711}]')
         # purse switch rides account/change with a demo flag
         self.assertIn('"account/change"', build_change_balance("REAL"))
         self.assertIn('"demo":0', build_change_balance("REAL"))

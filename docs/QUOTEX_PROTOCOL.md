@@ -97,35 +97,78 @@ confirms with an `s_authorization` event and refuses with
 
 ## 5. Trading frames
 
-### Place a binary option (modern `orders/open`, confirmed via Stack Overflow trace)
+### Place a binary option (`orders/open`, byte-shape of pyquotex `Buy`)
 
 ```json
+42["settings/apply",{"chartId":"graph","settings":{"chartId":"graph","chartType":2,
+  "currentExpirationTime":1637892541,"isFastOption":false,"isFastAmountOption":false,
+  "isIndicatorsMinimized":false,"isIndicatorsShowing":true,"isShortBetElement":false,
+  "chartPeriod":4,"currentAsset":{"symbol":"AUDCAD_otc"},"dealValue":6,
+  "dealPercentValue":1,"isVisible":true,"timePeriod":60,"gridOpacity":8,
+  "isAutoScrolling":1,"isOneClickTrade":true,"upColor":"#0FAF59","downColor":"#FF6251"}}]
 42["orders/open",{
   "asset":"AUDCAD_otc",
   "amount":6,
-  "time":1637893200,
+  "time":60,
   "action":"put",
   "isDemo":1,
+  "tournamentId":0,
   "requestId":1637892541,
-  "optionType":1
+  "optionType":100
 }]
 ```
 
 - `action`: `"call"` | `"put"`
-- `time`: unix **expiry timestamp** (seconds)
-- `optionType`: 1 = digital, 2 = binary (venue variants)
+- `requestId`: **integer** epoch seconds (monotonic per process); the venue
+  echoes it on the ack — that is how a fill is matched.
+- Two contract clocks (`broker.time_mode`):
+  - **TIMER** (default): `optionType: 100`, `time` = **duration in
+    seconds**.  Expires exactly `duration` after the fill — matches the
+    local settlement clock; works for OTC and non-OTC, 5s and up.
+  - **TIME**: `optionType: 3` (fast option; `1` = classic), `time` =
+    **period-aligned expiry timestamp** from `protocol.expiration_for`
+    (port of pyquotex `get_expiration_time_quotex`: next minute boundary
+    for <60s, else the next `duration` grid line since midnight, skipping
+    a step once more than half the period elapsed).  `settings/apply`
+    then carries `isFastOption:true` + `endTime`.  A raw `now + duration`
+    is **not** on the grid and the venue refuses it silently — the bug
+    that made every live order vanish.
+- `settings/apply` precedes each order (what the tab does on every
+  asset/expiry change); it is advisory and failure-tolerant.
+
+### Order lifecycle (server → client, binary attachments)
+
+```
+451-["s_orders/open",{"_placeholder":true,"num":0}]   + raw frame:
+{"id":123456789,"requestId":1637892541,"asset":"AUDCAD_otc","amount":6,
+ "command":1,"openPrice":0.9123,"closePrice":0,"profit":5.1,"percentProfit":85,
+ "openTimestamp":1637892541,"closeTimestamp":1637892601,"isDemo":1,"uid":42,…}
+```
+
+- `id` is the venue **ticket** (needed for sell-back); `command` 0 = call,
+  1 = put; `profit` on the *ack* is the **potential** win — never a result.
+- Settlement arrives as `{"deals":[{"id":…,"profit":-6,"closePrice":…},…]}`
+  (bare frame or `orders/closed` / `s_orders/close`): `profit > 0` win,
+  `< 0` loss, `== 0` refund.  `QuotexAPI` folds acks + settlements into
+  order state (`order_result()`, `order_id_for()`), and the adapter adopts
+  the ticket onto the fill and settles the position on the venue's verdict.
 
 ### Legacy placement (older clients / `stable_api.buy`)
 
 ```json
-42["buyOption",{"asset":"AUDCAD_otc","amount":6,"action":"put","duration":60,"isDemo":1,"requestId":"..."}]
+42["buyOption",{"asset":"AUDCAD_otc","amount":6,"action":"put","duration":60,"isDemo":1,"requestId":1637892541}]
 ```
 
 ### Early sale / close
 
 ```json
-42["sellOption",{"id":"<orderId>"}>
+42["orders/cancel",{"ticket":123456789}]
 ```
+
+`ticket` is the venue order id from the `s_orders/open` ack (ints ride as
+ints).  `QuotexAPI.sell_option()` translates a `requestId` into the ticket
+when the ack has landed.  Older docs' `sellOption` / `orders/close` frames
+are not answered by the live venue (`orders/close` is a *server* event).
 
 ### Purse switching (deferred past data verification)
 
@@ -181,14 +224,16 @@ Older community docs named `subscribeCandle` / `candleHistory` /
 | Event | Payload (community shapes) |
 |-------|----------------------------|
 | `candles` (legacy tolerance) | `{"asset":..., "candles":[{t,o,h,l,c}\| [t,o,c,h,l] ...]}` |
-| `s_authorization` / `authorization/reject` | auth accepted / refused |
+| `s_authorization` / `authorization/reject` | auth accepted (payload carries `{liveBalance, demoBalance, uid, …}` — absorbed as the first balance push) / refused |
 | `s_account/change` (any `s_*`) | server confirm of the matching request (purse switch, …) |
 | `instruments/list` (binary) | positional rows `[id, symbol, name, type, ?, payment, …, open@14, …, turbo@18, 24H/1M/5M@-10/-9/-8]` |
 | `history/load` / `history/list/v2` (binary) | `{asset, index, candles: [[ts, price, direction], …]}` — ticks, aggregated client-side into OHLC (forming bar dropped) |
 | `candle-generated` | `{asset, period, index, open, high, low, close}` — a closed bar |
 | bare quote batch (no event) | `[[asset, ts, price, direction], …]` |
 | `balance` | `{demoBalance, liveBalance, …}` — pick by active purse |
-| `order` / `orderResult` | `{"id","requestId","status","openPrice","closePrice","profit"}` |
+| `s_orders/open` / `orders/opened` (binary) | order **ack**: `{id (ticket), requestId, asset, amount, command, openPrice, percentProfit, closeTimestamp, …}` |
+| `deals` / `orders/closed` / `s_orders/close` (binary) | **settlement** rows `{id, profit, closePrice, …}` — sign of `profit` is the verdict |
+| `order` / `orderResult` (legacy tolerance) | `{"id","requestId","status","openPrice","closePrice","profit"}` |
 | `profit` | settlement PnL update |
 | `notification` / `error` | human-readable strings/dicts |
 

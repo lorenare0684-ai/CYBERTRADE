@@ -468,9 +468,14 @@ class QuotexSocket:
             if obj.get("asset") and any(k in obj for k in ("candles", "data", "history", "list")):
                 self._got_event(C.SV_CANDLES, [obj])
                 return True
-            if "deals" in obj:
-                # order-flow push — the trade path doesn't consume it yet.
-                log.debug("drop unsolicited deals payload")
+            if isinstance(obj.get("deals"), list):
+                # settlement push: closed contracts with realised profit
+                self._got_event(C.SV_DEALS, [obj])
+                return True
+            if "id" in obj and ("requestId" in obj or "asset" in obj) and "amount" in obj:
+                # bare order confirmation (the ack sometimes arrives
+                # without its placeholder): venue id + echoed requestId
+                self._got_event(C.SV_ORDERS_OPENED, [obj])
                 return True
             return False
         return False

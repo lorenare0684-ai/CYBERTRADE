@@ -206,8 +206,15 @@ class BrokerConfig:
     order_think_ms: int = 140                 # jittered pre-order think-time base
     order_min_gap_ms: int = 350               # min spacing between order frames
     max_orders_per_min: int = 10              # sliding window cap (never burst)
+    # Contract clock on ``orders/open``: TIMER = expires ``duration`` after
+    # the fill (optionType 100, time=duration); TIME = venue's period-aligned
+    # expiry grid (optionType 3, time=expiry timestamp) — the trade tab's
+    # clock-mode picker.
+    time_mode: str = "TIMER"
 
     def validate(self) -> None:
+        if str(self.time_mode).upper() not in ("TIMER", "TIME"):
+            raise ConfigError("broker.time_mode must be \"TIMER\" or \"TIME\"")
         if self.mode != "quotex":
             raise ConfigError(
                 f"broker.mode={self.mode!r} is not supported — this build is LIVE ONLY; "
