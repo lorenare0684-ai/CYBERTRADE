@@ -6,6 +6,7 @@ docs/QUOTEX_PROTOCOL.md — no sockets are opened.
 
 from __future__ import annotations
 
+import threading
 import unittest
 
 from cybertrade.brokers.quotex.catalog import AssetCatalog
@@ -183,6 +184,169 @@ class TestApiDispatcherOffline(unittest.TestCase):
         a = QXAsset.from_payload("BTCUSD", {"payout": 70, "type": "crypto"})
         self.assertEqual(a.kind, "crypto")
         self.assertAlmostEqual(a.payout, 0.70)
+
+
+class TestLoginSession(unittest.TestCase):
+    def test_extract_ssid_shapes(self):
+        from cybertrade.brokers.quotex.api import _extract_ssid
+
+        self.assertEqual(_extract_ssid({"session": "s1"}), "s1")
+        self.assertEqual(_extract_ssid({"ssid": "s2"}), "s2")
+        self.assertEqual(_extract_ssid({"data": {"session": "s3"}}), "s3")
+        self.assertEqual(_extract_ssid({"data": {"ssid": "s4"}}), "s4")
+        self.assertEqual(_extract_ssid({"data": {"token": "t6"}}), "t6")
+        self.assertEqual(_extract_ssid('"bare-token-123"'), "bare-token-123")
+        self.assertEqual(_extract_ssid({}), "")
+        self.assertEqual(_extract_ssid({"session": ""}), "")
+
+    def test_coerce_ssid_unwraps_pasted_frame(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI, _coerce_ssid
+
+        frame = '42["authorization",{"session":"FRM123","isDemo":0}]'
+        self.assertEqual(_coerce_ssid(frame), "FRM123")
+        self.assertEqual(_coerce_ssid("  bare123  "), "bare123")
+        self.assertEqual(_coerce_ssid(""), "")
+        api = QuotexAPI()
+        api.set_ssid(frame)
+        self.assertEqual(api.session.ssid, "FRM123")
+
+    def test_login_bad_password_message(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.exceptions import BrokerAuthError
+        from cybertrade.network.http_client import HttpResponse
+
+        api = QuotexAPI()
+        api.http.post = lambda *a, **k: HttpResponse(
+            status=401, headers={}, body=b'{"message":"bad"}')
+        with self.assertRaises(BrokerAuthError) as ctx:
+            api.login("u@x.com", "wrong")
+        self.assertIn("bad email/password", str(ctx.exception))
+
+    def test_login_challenge_message(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.exceptions import BrokerAuthError
+        from cybertrade.network.http_client import HttpResponse
+
+        api = QuotexAPI()
+        api.http.post = lambda *a, **k: HttpResponse(
+            status=200, headers={},
+            body=b"<html><body>Just a moment... cf-challenge</body></html>")
+        with self.assertRaises(BrokerAuthError) as ctx:
+            api.login("u@x.com", "pw")
+        self.assertIn("quotex login", str(ctx.exception))
+
+    def test_login_nested_token_and_cookie_fallback(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.network.http_client import HttpResponse
+
+        api = QuotexAPI()
+        api.http.post = lambda *a, **k: HttpResponse(
+            status=200, headers={}, body=b'{"data":{"token":"NESTED123456"}}')
+        self.assertEqual(api.login("u@x.com", "pw").ssid, "NESTED123456")
+
+        api2 = QuotexAPI()
+        api2.http.jar.set_from_header("sessionid=COOKIE99; Path=/")
+        api2.http.post = lambda *a, **k: HttpResponse(
+            status=200, headers={}, body=b'{"ok":true}')
+        self.assertEqual(api2.login("u@x.com", "pw").ssid, "COOKIE99")
+
+    def test_login_falls_back_to_alt_base(self):
+        from cybertrade.brokers.quotex import constants as C
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.exceptions import NetworkError
+        from cybertrade.network.http_client import HttpResponse
+
+        api = QuotexAPI()
+        calls = []
+
+        def fake_post(path, **kw):
+            calls.append(api.http.base_url)
+            if len(calls) == 1:
+                raise NetworkError("route dead")
+            return HttpResponse(
+                status=200, headers={}, body=b'{"session":"ALTROUTE1"}')
+
+        api.http.post = fake_post
+        sess = api.login("u@x.com", "pw")
+        self.assertEqual(sess.ssid, "ALTROUTE1")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(api.http_base, C.HTTP_BASE_ALT)
+
+
+class TestSocketAuth(unittest.TestCase):
+    def test_auth_event_constant_exists(self):
+        from cybertrade.brokers.quotex import constants as C
+
+        # A misspelled attribute here once killed the reader thread on the
+        # first venue frame, so every login silently went deaf.
+        self.assertEqual(C.EV_AUTH_SUCCESS, "authorization")
+        self.assertEqual(C.EV_AUTHORIZATION, "authorization")
+
+    def test_authorize_fails_fast_on_session_fault(self):
+        from cybertrade.brokers.quotex.client import QuotexSocket
+        from cybertrade.exceptions import BrokerAuthError
+
+        sock = QuotexSocket("dead-session")
+
+        class Conn:
+            closed = False
+
+            def send(self, wire):
+                pass
+
+        sock.conn = Conn()
+        # The reader thread reports the fault mid-handshake; authorize()
+        # must surface it instead of waiting out the window.
+        timer = threading.Timer(
+            0.05, sock._note_session_fault,
+            args=("invalid session, please login again",))
+        timer.start()
+        try:
+            with self.assertRaises(BrokerAuthError) as ctx:
+                sock.authorize(timeout=2.0)
+        finally:
+            timer.join()
+        self.assertIn("quotex login", str(ctx.exception))
+
+    def test_authorize_proceeds_when_quiet(self):
+        from cybertrade.brokers.quotex.client import QuotexSocket
+
+        sock = QuotexSocket("maybe-session")
+
+        class Conn:
+            closed = False
+
+            def send(self, wire):
+                pass
+
+        sock.conn = Conn()
+        self.assertIsNone(sock.authorize(timeout=0.05))
+
+    def test_error_frame_reaches_api_dispatcher(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+
+        api = QuotexAPI()
+        seen = []
+        api.add_listener(lambda kind, payload: seen.append(kind))
+        api._on_socket_event("error", [{"message": "invalid session"}])
+        self.assertIn("error", seen)
+        self.assertIn("session_stale", seen)
+
+    def test_has_live_session_reads_api_session(self):
+        import types
+
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.cli import _has_live_session
+
+        def hub_for(api):
+            return types.SimpleNamespace(
+                engine=types.SimpleNamespace(feed=types.SimpleNamespace(api=api)))
+
+        live = QuotexAPI()
+        live.set_ssid("LIVE123")
+        self.assertTrue(_has_live_session(hub_for(live)))
+        self.assertFalse(_has_live_session(hub_for(QuotexAPI())))
+        self.assertFalse(_has_live_session(types.SimpleNamespace(engine=None)))
 
 
 if __name__ == "__main__":

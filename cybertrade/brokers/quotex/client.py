@@ -28,8 +28,8 @@ from ...network.socketio import (
 from ...network.websocket import WebSocketConnection
 from ...utils import timex
 from . import constants as C
-from .ghost import parity_headers, reconnect_delay
-from .protocol import parse_event
+from .ghost import is_session_fault, parity_headers, reconnect_delay
+from .protocol import build_authorization, parse_error, parse_event
 
 log = logging.getLogger("cybertrade.qx.client")
 
@@ -71,7 +71,12 @@ class QuotexSocket:
         self._reader: Optional[threading.Thread] = None
         self._pumper: Optional[threading.Thread] = None
         self._connected = threading.Event()
+        self.was_connected = False  # latch: a live wire self-heals, a new one reports
         self._authorized = threading.Event()
+        self._auth_failed = ""
+        self._auth_failed_event = threading.Event()
+        self._reconnect_lock = threading.Lock()
+        self._gen = 0  # connection generation: stale readers exit, never steal frames
         self._last_pong = time.time()
         self.reconnects = 0
         self.messages_in = 0
@@ -85,14 +90,20 @@ class QuotexSocket:
         self._running = True
         self._reader = threading.Thread(target=self._read_loop, daemon=True, name="qx-read")
         self._reader.start()
-        # engine.io open must arrive quickly
+        # engine.io open must arrive quickly; abort early if the reader
+        # already died (a dead wire must not burn the whole timeout).
         deadline = time.time() + self.timeout
         while not self.eio.sid and time.time() < deadline:
+            if self._reader is not None and not self._reader.is_alive():
+                raise BrokerConnectionError(
+                    f"engine.io handshake failed: {self.last_error or 'reader died'}"
+                )
             time.sleep(0.02)
         if not self.eio.sid:
             raise BrokerConnectionError("engine.io handshake timeout")
         self._raw_send(encode_connect())
         self._connected.set()
+        self.was_connected = True
         if authorize:
             self.authorize()
         self._pumper = threading.Thread(target=self._heartbeat_loop, daemon=True, name="qx-beat")
@@ -100,12 +111,21 @@ class QuotexSocket:
         log.info("quotex socket connected sid=%s", self.eio.sid[:8])
 
     def _open_socket(self) -> None:
+        # A reconnect replaces the wire: retire the old connection first so
+        # no stale reader keeps a dead socket (or steals the new one's
+        # frames) — the generation counter below is the second half of that.
+        old, self.conn = self.conn, None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:  # noqa: BLE001 — teardown is best-effort
+                pass
         # Browser-parity handshake: same identity as the paired Chrome tab.
         # Origin rides the dedicated parameter (the transport writes it
         # once); headers carry UA + locale + no-cache only — we never
         # advertise websocket extensions we do not implement.
         headers = parity_headers(self.user_agent)
-        self.conn = WebSocketConnection(
+        conn = WebSocketConnection(
             self.ws_url,
             headers=headers,
             cookie=self.cookies,
@@ -113,22 +133,42 @@ class QuotexSocket:
             timeout=self.timeout,
         )
         try:
-            self.conn.connect()
+            conn.connect()
         except (NetworkError, OSError) as exc:
             raise BrokerConnectionError(f"ws connect failed: {exc}") from exc
+        self.conn = conn
 
     def authorize(self, timeout: float = 10.0) -> None:
-        from .protocol import build_authorization
+        """Send the session frame; fail fast when the venue rejects it.
 
+        The venue usually confirms authorization implicitly (balance and
+        data start flowing) rather than with an explicit ack, so a quiet
+        window still proceeds — but an explicit session fault
+        (``invalid session`` / ``unauthorized`` / …) raises
+        :class:`BrokerAuthError` instead of masquerading as a live login.
+        """
+        self._auth_failed = ""
+        self._auth_failed_event.clear()
         self._raw_send(build_authorization(self.session_ssid, self.is_demo))
         deadline = time.time() + timeout
         # authorization is confirmed by an event OR just by absence of error;
         # optimistically proceed after a short grace period.
         while time.time() < deadline:
+            self._raise_if_auth_failed()
             if self._authorized.is_set():
                 return
             time.sleep(0.05)
+        self._raise_if_auth_failed()
         log.warning("authorization ack not observed within %.1fs — proceeding", timeout)
+
+    def _raise_if_auth_failed(self) -> None:
+        if self._auth_failed_event.is_set():
+            detail = self._auth_failed or "unauthorized"
+            raise BrokerAuthError(
+                f"venue rejected the session ({detail}) — "
+                "re-pair via `cybertrade quotex login` (Chrome opens; "
+                "log in and solve the CAPTCHA once)"
+            )
 
     def disconnect(self) -> None:
         self._running = False
@@ -161,16 +201,27 @@ class QuotexSocket:
         self.messages_out += 1
 
     def _read_loop(self) -> None:
-        while self._running and self.conn is not None and not self.conn.closed:
+        gen = self._gen
+        while self._running and gen == self._gen:
+            conn = self.conn
+            if conn is None or conn.closed:
+                return
             try:
-                raw = self.conn.recv_text()
+                raw = conn.recv_text()
             except NetworkError as exc:
+                if gen != self._gen:
+                    return  # superseded by a reconnect — exit quietly
                 self.last_error = str(exc)
                 self._connected.clear()
-                if self._running:
-                    self._try_reconnect()
+                # Only a *live* wire self-heals. During the initial
+                # handshake the waiter above owns the failure (and the
+                # API layer owns host fallback) — healing here would fork
+                # a second connection behind connect()'s back.
+                if self._running and self.was_connected:
+                    self._try_reconnect_guarded()
                 return
             self.messages_in += 1
+            self._last_pong = time.time()  # any traffic proves liveness
             try:
                 eng, sio = self.eio.on_raw(raw)
             except Exception as exc:  # noqa: BLE001 - tolerate schema drift
@@ -182,23 +233,49 @@ class QuotexSocket:
                     self._raw_send(encode_pong(eng.payload))
                 except BrokerConnectionError:
                     return
-                self._last_pong = time.time()
             if sio is None:
                 continue
             if sio.type == "0":  # namespace connected
                 self._connected.set()
+                self.was_connected = True
                 if sio.data and isinstance(sio.data, dict) and "sid" in sio.data:
                     pass
             if sio.type == "4":  # error frame
-                from .protocol import parse_error
-
-                self.last_error = parse_error(sio.data if isinstance(sio.data, list) else [sio.data])
+                payload = sio.data if isinstance(sio.data, list) else [sio.data]
+                self.last_error = parse_error(payload)
                 log.warning("venue error: %s", self.last_error)
-            name, args = parse_event(sio)
+                # Error frames used to die here silently, so a rejected
+                # session looked exactly like a slow one. Surface them to
+                # the API layer (session-fault detection lives there) and
+                # wake authorize() when the session itself is at fault.
+                self._note_session_fault(self.last_error)
+                self._dispatch("error", payload)
+                continue
+            try:
+                name, args = parse_event(sio)
+            except Exception as exc:  # noqa: BLE001 — a bad frame is not fatal
+                self.last_error = f"parse: {exc}"
+                continue
             if name:
-                if name in (C.EV_AUTH_SUCCESS, "authorization", "authorized"):
-                    self._authorized.set()
+                try:
+                    if name in (C.EV_AUTHORIZATION, C.EV_AUTH_SUCCESS, "authorized"):
+                        self._authorized.set()
+                    elif name in (C.SV_ERROR, "error") and not self._authorized.is_set():
+                        self._note_session_fault(parse_error(args))
+                    elif not self._authorized.is_set():
+                        # Implicit authorization: the venue answered the
+                        # session frame with data instead of an error, which
+                        # is how it usually confirms (no explicit ack).
+                        self._authorized.set()
+                except Exception:  # noqa: BLE001 — bookkeeping never kills the wire
+                    log.debug("auth bookkeeping failed", exc_info=True)
                 self._dispatch(name, args)
+
+    def _note_session_fault(self, message: str) -> None:
+        """Record a venue error that condemns the session pre-authorization."""
+        if not self._authorized.is_set() and is_session_fault(message or ""):
+            self._auth_failed = message or "unauthorized"
+            self._auth_failed_event.set()
 
     def _dispatch(self, name: str, args: List[Any]) -> None:
         if self.on_event is None:
@@ -214,8 +291,9 @@ class QuotexSocket:
         Application-level watchdog: if nothing arrived for 2 ping intervals,
         nudge with an engine ping; if that fails, reconnect.
         """
-        interval = self.eio.handshake.ping_interval if self.eio.handshake else 25.0
         while self._running:
+            # Re-read every lap: a reconnect replaces the handshake.
+            interval = self.eio.handshake.ping_interval if self.eio.handshake else 25.0
             time.sleep(max(5.0, interval / 2.0))
             if not self._running:
                 return
@@ -225,9 +303,21 @@ class QuotexSocket:
                 try:
                     self._raw_send("2")  # engine.io ping probe
                 except BrokerConnectionError:
-                    self._try_reconnect()
+                    self._try_reconnect_guarded()
                     return
                 self._last_pong = time.time()
+
+    def _try_reconnect_guarded(self) -> None:
+        """Single-owner entry: reader and watchdog race here on a drop."""
+        if not self._reconnect_lock.acquire(blocking=False):
+            return  # another thread already owns the reconnect loop
+        try:
+            self._try_reconnect()
+        finally:
+            try:
+                self._reconnect_lock.release()
+            except RuntimeError:  # pragma: no cover — defensive
+                pass
 
     def _try_reconnect(self) -> None:
         """Jittered exponential backoff; replay hook fires on success."""
@@ -246,26 +336,44 @@ class QuotexSocket:
                 self._open_socket()
                 self.eio = EngineIOSession()
                 self._authorized.clear()
+                self._connected.clear()
+                # The reader is what fills eio.sid from the handshake, so it
+                # must be running BEFORE we wait for it (same order as
+                # connect()). Waiting first deadlocked every reconnect.
+                self._gen += 1
+                self._reader = threading.Thread(
+                    target=self._read_loop, daemon=True, name="qx-read"
+                )
+                self._reader.start()
                 deadline = time.time() + self.timeout
                 while not self.eio.sid and time.time() < deadline:
+                    if not self._running:
+                        return
+                    if self._reader is not None and not self._reader.is_alive():
+                        break  # wire died mid-handshake — next attempt, no wait
                     time.sleep(0.02)
                 if not self.eio.sid:
                     continue
                 self._raw_send(encode_connect())
                 self.authorize(timeout=5.0)
                 self._connected.set()
+                self.was_connected = True
                 self._last_pong = time.time()
                 self.reconnects += 1
-                self._reader = threading.Thread(
-                    target=self._read_loop, daemon=True, name="qx-read"
-                )
-                self._reader.start()
                 log.info("reconnected (attempt %d)", attempt)
                 if self.on_reconnected is not None:
                     try:
                         self.on_reconnected()
                     except Exception:  # noqa: BLE001 — restore must not kill wire
                         log.exception("on_reconnected hook crashed")
+                return
+            except BrokerAuthError as exc:
+                # A dead session never heals by retrying — a human must
+                # re-pair it. Burning the backoff budget here only delays
+                # that message by minutes.
+                self.last_error = str(exc)
+                log.critical("reconnect aborted: %s", exc)
+                self._running = False
                 return
             except Exception as exc:  # noqa: BLE001
                 self.last_error = str(exc)
@@ -283,6 +391,7 @@ class QuotexSocket:
             "reconnects": self.reconnects,
             "last_error": self.last_error,
             "authorized": self._authorized.is_set(),
+            "auth_error": self._auth_failed,
         }
 
 

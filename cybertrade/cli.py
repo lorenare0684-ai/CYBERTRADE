@@ -103,16 +103,20 @@ def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
     yet, session tooling (login/status/warm) falls back to PRACTICE — data
     commands must never need a money decision.
     """
+    from .brokers.quotex import constants as QXC
     from .brokers.quotex.api import QuotexAPI
 
     if demo is None:
         demo = cfg.broker.demo_account if cfg.broker.demo_account is not None else True
     return QuotexAPI(
+        http_base=cfg.broker.http_base or QXC.HTTP_BASE,
+        ws_url=cfg.broker.ws_url or QXC.WS_URL,
         demo=bool(demo),
         ghost=cfg.broker.ghost_pace,
         order_think_ms=cfg.broker.order_think_ms,
         order_min_gap_ms=cfg.broker.order_min_gap_ms,
         max_orders_per_min=cfg.broker.max_orders_per_min,
+        reconnect_max=cfg.broker.reconnect_max,
         timeout=cfg.broker.request_timeout,
     )
 
@@ -271,7 +275,14 @@ def _has_live_session(hub) -> bool:
     engine = getattr(hub, "engine", None)
     if engine is None:
         return False
-    return bool(getattr(getattr(engine.feed, "api", None), "ssid", ""))
+    api = getattr(getattr(engine, "feed", None), "api", None)
+    if api is None:
+        return False
+    # The venue api holds the cookie at session.ssid; test stubs hang it
+    # directly off the api — accept either, or the probe always lies.
+    sess = getattr(api, "session", None)
+    ssid = getattr(sess, "ssid", "") if sess is not None else ""
+    return bool(ssid or getattr(api, "ssid", ""))
 
 
 def _reseat_session(engine, ssid: str) -> None:
@@ -566,9 +577,26 @@ def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
         api = _qx_api(cfg)
         api.set_ssid(sess["ssid"], sess.get("cookies", ""))
         api.connect()
+        # connect() only proves the transport; the balance push proves the
+        # venue accepted the session. Wait for it instead of reading a
+        # balance that is still 0.0 because the reply is in flight.
+        api.wait_for_balance(timeout=8.0)
+        stale = bool(getattr(api, "_session_stale", False))
         snap = api.account_snapshot()
-        print(f"  ✓ verified — balance {float(snap.balance):.2f}: live session ready")
+        stats = api.socket.stats() if api.socket is not None else {}
         api.close()
+        if stale:
+            print("  ⚠ captured, but the venue rejected the session "
+                  "(re-pair and solve the CAPTCHA again)")
+            print("    (session kept — `cybertrade quotex status` will retry)")
+            return 1
+        frames = int(stats.get("messages_in", 0) or 0)
+        if frames <= 0 and float(snap.balance or 0.0) <= 0.0:
+            print("  ⚠ captured, but the venue stayed silent — run "
+                  "`cybertrade quotex status` to retry")
+            print("    (session kept)")
+            return 1
+        print(f"  ✓ verified — balance {float(snap.balance):.2f}: live session ready")
         return 0
     except Exception as exc:  # noqa: BLE001 — report, don't discard the cookie
         print(f"  ⚠ captured, but venue verify failed: {exc}")

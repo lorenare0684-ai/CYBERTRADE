@@ -37,6 +37,29 @@ token (`session` / `ssid`) used by the websocket authorization frame.  When
 Cloudflare's browser challenge blocks headless login, copy the `ssid` from a
 real browser session and inject it (`QuotexAPI.set_ssid` / CLI `--ssid`).
 
+Login robustness notes (all implemented, all covered by tests):
+
+- **Host fallback** — sign-in tries `HTTP_BASE` then `HTTP_BASE_ALT`;
+  `connect()` tries the configured `ws_url` then `WS_URL` / `WS_URL_ALT`.
+  A dead route reads as a dead route, not a dead account.
+- **Response tolerance** — the token is harvested from `session` / `ssid` /
+  `token` / `access_token` at top level or under `data` / `result` /
+  `payload`, from a bare JSON string, or from the `sessionid` / `ssid` /
+  `session` / `PHPSESSID` cookie. Chunked+gzipped bodies are decoded.
+- **Error taxonomy** — HTTP 401 says bad password; a challenge page (HTML /
+  `cf-challenge` markers) says to pair via `cybertrade quotex login`
+  instead of blaming the password.
+- **Pasted frames** — `set_ssid` unwraps a copied
+  `42["authorization",{"session":"…",…}]` frame down to the token.
+- **Explicit rejection** — a venue `invalid session` / `unauthorized` error
+  during authorization raises `BrokerAuthError` immediately (re-pair hint
+  included) instead of proceeding as a fake-live login; the first data
+  event counts as implicit authorization so healthy connects return fast.
+- **Pairing capture** — Chrome pairing keeps *every* venue cookie
+  (`sessionid` first, CF clearance included) for the websocket handshake,
+  accepts all venue front doors (`qxbroker.com` / `quotex.com` /
+  `quotex.io`), and reads cookies in the Quotex tab's DevTools context.
+
 ## 3. Engine.IO v3 handshake
 
 The first websocket text frame from the server:

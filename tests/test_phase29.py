@@ -22,6 +22,8 @@ from cybertrade.brokers.quotex.pairing import (
     chrome_argv,
     cdp_cookies,
     devtools_browser_ws,
+    devtools_page_ws,
+    devtools_targets,
     extract_session,
     load_session,
     pair_session,
@@ -84,12 +86,25 @@ class TestExtractSession(unittest.TestCase):
         ])
         self.assertIsNotNone(sess)
         self.assertEqual(sess["ssid"], "SESS123")
-        self.assertEqual(sess["cookies"], "sessionid=SESS123")
+        # sessionid leads; sibling venue cookies (CF clearance) ride along
+        self.assertTrue(sess["cookies"].startswith("sessionid=SESS123"))
+        self.assertIn("other=x", sess["cookies"])
+        self.assertNotIn("nope", sess["cookies"])
+
+    def test_accepts_quotex_front_doors(self):
+        for domain in (".quotex.com", "quotex.io", ".qxbroker.com"):
+            sess = extract_session([
+                {"name": "sessionid", "domain": domain, "value": "S1"},
+            ])
+            self.assertIsNotNone(sess, domain)
+            self.assertEqual(sess["ssid"], "S1")
 
     def test_none_without_cookie(self):
         self.assertIsNone(extract_session([]))
         self.assertIsNone(extract_session(
             [{"name": "sessionid", "domain": ".evil.com", "value": "z"}]))
+        self.assertIsNone(extract_session(
+            [{"name": "other", "domain": ".qxbroker.com", "value": "z"}]))
 
 
 class TestSessionStore(unittest.TestCase):
@@ -129,6 +144,42 @@ class TestDevTools(unittest.TestCase):
             raise OSError("refused")
         with self.assertRaises(TimeoutError):
             devtools_browser_ws(9333, fetch=boom, deadline=0.4)
+
+    def test_page_ws_prefers_quotex_tab(self):
+        targets = [
+            {"type": "page", "url": "https://www.google.com/",
+             "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/g"},
+            {"type": "page", "url": "https://qxbroker.com/en/trade",
+             "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/page/qx"},
+        ]
+        ws = devtools_page_ws(9333, fetch=lambda *a, **k: targets)
+        self.assertTrue(ws.endswith("/page/qx"))
+
+    def test_page_ws_empty_when_no_targets(self):
+        self.assertEqual(devtools_page_ws(9333, fetch=lambda *a, **k: []), "")
+        self.assertEqual(
+            devtools_page_ws(9333, fetch=lambda *a, **k: {"not": "a-list"}), "")
+        self.assertEqual(devtools_targets(9333, fetch=lambda *a, **k: {}), [])
+
+    def test_wait_for_session_uses_page_target(self):
+        seen = {}
+
+        def fetch(url, timeout=0):
+            seen.setdefault("urls", []).append(url)
+            if url.endswith("/json/list"):
+                return [{"type": "page", "url": "https://quotex.com/en/trade",
+                         "webSocketDebuggerUrl": "ws://page-qx"}]
+            return {"webSocketDebuggerUrl": "ws://browser"}
+
+        def cdp(ws):
+            seen["ws"] = ws
+            return [{"name": "sessionid", "domain": ".quotex.com",
+                     "value": "PAGE1"}]
+
+        sess = wait_for_session(9333, timeout=2.0, fetch=fetch, cdp=cdp,
+                                poll=0.05)
+        self.assertEqual(sess["ssid"], "PAGE1")
+        self.assertEqual(seen.get("ws"), "ws://page-qx")
 
     def test_cdp_cookies_parses_storage_response(self):
         class FakeWS:

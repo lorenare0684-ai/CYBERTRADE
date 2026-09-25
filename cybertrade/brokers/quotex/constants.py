@@ -23,6 +23,10 @@ REFERER = "https://qxbroker.com/en/trade"
 
 # Socket.IO event names ------------------------------------------------------
 EV_AUTHORIZATION = "authorization"
+# Alias kept so every layer spells the auth event one way — the socket
+# reader matches server acks against this (a misspelled attribute here once
+# killed the reader thread on the first venue frame).
+EV_AUTH_SUCCESS = EV_AUTHORIZATION
 EV_ORDERS_OPEN = "orders/open"          # place a binary option
 EV_ORDER_OPEN_ALT = "buyOption"         # legacy name used by older clients
 EV_ORDERS_CANCEL = "orders/close"       # early sale / cancel window
@@ -82,11 +86,15 @@ CANDLE_TIMEFRAMES = {
 
 __all__ = [
     "HTTP_BASE",
+    "HTTP_BASE_ALT",
     "WS_URL",
+    "WS_URL_ALT",
     "SIGNIN_PATH",
     "USER_AGENT",
     "ORIGIN",
+    "REFERER",
     "EV_AUTHORIZATION",
+    "EV_AUTH_SUCCESS",
     "EV_ORDERS_OPEN",
     "EV_ORDER_OPEN_ALT",
     "EV_ORDERS_CANCEL",

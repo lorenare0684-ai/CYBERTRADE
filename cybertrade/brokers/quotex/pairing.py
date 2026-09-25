@@ -33,6 +33,8 @@ log = logging.getLogger("cybertrade.pairing")
 TRADE_URL = "https://qxbroker.com/en/trade"
 SESSION_COOKIE = "sessionid"
 SESSION_DOMAIN = "qxbroker.com"
+# One venue, several front doors — the operator may land on any of them.
+SESSION_DOMAINS = ("qxbroker.com", "quotex.com", "quotex.io")
 
 
 def find_chrome(explicit: str = "") -> str:
@@ -130,23 +132,101 @@ def devtools_browser_ws(
             last = exc
             time.sleep(0.3)
     raise TimeoutError(
-        f"Chrome DevTools never answered on 127.0.0.1:{port} ({last})"
+        f"Chrome DevTools never answered on 127.0.0.1:{port} ({last}) — "
+        "if Chrome is already running, close every window first: a second "
+        "copy cannot take over the profile's DevTools port"
+    )
+
+
+def devtools_targets(
+    port: int,
+    fetch: Optional[Callable[..., Any]] = None,
+) -> List[Dict[str, Any]]:
+    """List DevTools page targets; non-list/empty replies → []."""
+    fetch = fetch or fetch_json
+    try:
+        data = fetch(f"http://127.0.0.1:{port}/json/list", timeout=2.0)
+    except Exception:  # noqa: BLE001 — chrome still starting
+        return []
+    if not isinstance(data, list):
+        return []
+    return [t for t in data if isinstance(t, dict)]
+
+
+def devtools_page_ws(
+    port: int,
+    fetch: Optional[Callable[..., Any]] = None,
+) -> str:
+    """Page-level DevTools socket for the Quotex tab, else ``""``.
+
+    Cookie reads must run in the page's context: the browser-level socket
+    answers ``Storage.getCookies`` from the default storage partition,
+    which on some Chrome builds holds nothing at all — pairing then polls
+    forever for a cookie the operator already earned.
+    """
+    targets = devtools_targets(port, fetch=fetch)
+    fallback = ""
+    for target in targets:
+        if target.get("type") not in (None, "page"):
+            continue
+        ws = str(target.get("webSocketDebuggerUrl") or "")
+        if not ws:
+            continue
+        url = str(target.get("url") or "")
+        if any(dom in url for dom in SESSION_DOMAINS):
+            return ws
+        fallback = fallback or ws
+    return fallback
+
+
+def _resolve_ws(
+    port: int,
+    fetch: Optional[Callable[..., Any]],
+    budget: float,
+) -> str:
+    """Page socket when a tab is visible, else the browser socket."""
+    try:
+        page = devtools_page_ws(port, fetch=fetch)
+    except Exception:  # noqa: BLE001 — fall through to the browser socket
+        page = ""
+    if page:
+        return page
+    return devtools_browser_ws(port, fetch=fetch, deadline=budget)
+
+
+def _is_venue_domain(domain: str) -> bool:
+    domain = (domain or "").lower().lstrip(".")
+    return any(
+        domain == venue or domain.endswith("." + venue)
+        for venue in SESSION_DOMAINS
     )
 
 
 def extract_session(cookies: Iterable[Dict[str, Any]]) -> Optional[Dict[str, str]]:
-    """Pick the Quotex ``sessionid`` cookie (value → ssid + cookie header)."""
-    best: Optional[Dict[str, str]] = None
-    for c in cookies:
+    """Pick the Quotex ``sessionid`` cookie (value → ssid + cookie header).
+
+    The header carries *every* venue cookie, not just ``sessionid``: the
+    websocket handshake must look like the paired Chrome tab's, and that
+    tab sends its Cloudflare clearance (``__cf_bm``/``_cfuvid``) along with
+    the session. Sending ``sessionid`` alone reads as a bare script.
+    """
+    ssid = ""
+    domain = ""
+    jar: Dict[str, str] = {}
+    for c in cookies or []:
         name = str(c.get("name") or "")
-        domain = str(c.get("domain") or "")
+        c_domain = str(c.get("domain") or "")
         value = str(c.get("value") or "")
-        if not value or name != SESSION_COOKIE:
+        if not name or not value or not _is_venue_domain(c_domain):
             continue
-        if SESSION_DOMAIN not in domain:
-            continue
-        best = {"ssid": value, "cookies": f"{name}={value}", "domain": domain}
-    return best
+        jar.setdefault(name, value)
+        if name == SESSION_COOKIE:
+            ssid, domain = value, c_domain
+    if not ssid:
+        return None
+    ordered = [f"{SESSION_COOKIE}={ssid}"]
+    ordered.extend(f"{k}={v}" for k, v in jar.items() if k != SESSION_COOKIE)
+    return {"ssid": ssid, "cookies": "; ".join(ordered), "domain": domain}
 
 
 def cdp_cookies(ws_url: str, timeout: float = 5.0,
@@ -197,9 +277,9 @@ def wait_for_session(
     last_err = ""
     while time.monotonic() < end:
         try:
-            ws = devtools_browser_ws(
+            ws = _resolve_ws(
                 port, fetch=fetch,
-                deadline=min(10.0, max(0.5, end - time.monotonic())),
+                budget=min(10.0, max(0.5, end - time.monotonic())),
             )
             sess = extract_session(cdp(ws) or [])
             if sess:
@@ -209,7 +289,7 @@ def wait_for_session(
         time.sleep(poll)
     raise TimeoutError(
         f"no Quotex session after {timeout:.0f}s — finish the login and CAPTCHA "
-        f"in Chrome ({last_err or 'cookie never appeared'})"
+        f"in the Chrome window this opened ({last_err or 'cookie never appeared'})"
     )
 
 
@@ -279,8 +359,10 @@ def pair_session(
 
 
 __all__ = [
-    "TRADE_URL", "SESSION_COOKIE", "find_chrome", "chrome_argv",
-    "launch_chrome", "devtools_browser_ws", "extract_session",
+    "TRADE_URL", "SESSION_COOKIE", "SESSION_DOMAIN", "SESSION_DOMAINS",
+    "find_chrome", "chrome_argv",
+    "launch_chrome", "devtools_browser_ws", "devtools_targets",
+    "devtools_page_ws", "extract_session",
     "cdp_cookies", "wait_for_session", "save_session", "load_session",
     "pair_session",
 ]

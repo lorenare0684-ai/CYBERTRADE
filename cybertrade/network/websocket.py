@@ -68,6 +68,16 @@ def encode_frame(
     return bytes(header) + payload
 
 
+def host_header_value(scheme: str, host: str, port: int) -> str:
+    """Host header value with browser parity (RFC 7230 §5.4).
+
+    Browsers omit the default port; sending ``ws2.qxbroker.com:443`` is a
+    needless fingerprint and some front-ends match Host exactly.
+    """
+    default = (scheme == "wss" and port == 443) or (scheme == "ws" and port == 80)
+    return host if default else f"{host}:{port}"
+
+
 class Frame:
     __slots__ = ("fin", "opcode", "payload")
 
@@ -132,7 +142,7 @@ class WebSocketConnection:
         key = base64.b64encode(os.urandom(16)).decode("ascii")
         lines = [
             f"GET {self.path} HTTP/1.1",
-            f"Host: {self.host}:{self.port}",
+            f"Host: {host_header_value(self.scheme, self.host, self.port)}",
             "Upgrade: websocket",
             "Connection: Upgrade",
             f"Sec-WebSocket-Key: {key}",
@@ -180,7 +190,12 @@ class WebSocketConnection:
             data += chunk
             if len(data) > 64 * 1024:
                 raise ProtocolError("oversized handshake response")
-        return bytes(data)
+        head, _, rest = bytes(data).partition(b"\r\n\r\n")
+        # The venue routinely flushes the Engine.IO open frame in the same
+        # TCP segment as the 101 headers. Those trailing bytes belong to the
+        # frame reader — dropping them ate the handshake on every connect.
+        self._buf += rest
+        return head + b"\r\n\r\n"
 
     # -- frames ------------------------------------------------------------
     def send(self, data: str | bytes, opcode: Optional[int] = None) -> None:
@@ -328,6 +343,7 @@ __all__ = [
     "WebSocketConnection",
     "Frame",
     "encode_frame",
+    "host_header_value",
     "OP_TEXT",
     "OP_BINARY",
     "OP_CLOSE",

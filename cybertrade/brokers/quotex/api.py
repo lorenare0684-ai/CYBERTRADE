@@ -14,13 +14,19 @@ loudly (re-pair via ``cybertrade quotex login``) instead of retried blindly.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ...data.models import AccountSnapshot, Candle, Tick
-from ...exceptions import BrokerAuthError, BrokerConnectionError, OrderRejected
+from ...exceptions import (
+    BrokerAuthError,
+    BrokerConnectionError,
+    NetworkError,
+    OrderRejected,
+)
 from ...network.http_client import HttpClient
 from ...utils import timex
 from ...utils.jsonx import dig
@@ -47,6 +53,80 @@ from .protocol import (
 
 log = logging.getLogger("cybertrade.qx.api")
 
+# Sign-in responses drift between site deployments: the session token has
+# been seen under all of these keys (and sometimes as a bare JSON string).
+_SSID_PATHS = (
+    "session", "ssid", "token", "access_token", "id",
+    "data.session", "data.ssid", "data.token", "data.access_token", "data.id",
+    "result.session", "result.ssid", "payload.session", "payload.ssid",
+)
+
+# Session cookie names worth trying when the JSON body carries no token.
+_SSID_COOKIES = ("sessionid", "ssid", "session", "PHPSESSID")
+
+# Markers that say "a browser challenge ate your login", not "bad password".
+_CHALLENGE_MARKERS = (
+    "cf-challenge", "just a moment", "cloudflare", "captcha",
+    "__cf_bm", "attention required", "verify you are human",
+)
+
+
+def _extract_ssid(data: Any) -> str:
+    """Harvest the websocket session token from a signin response body."""
+    if isinstance(data, str):
+        candidate = data.strip().strip('"')
+        return candidate if len(candidate) >= 8 else ""
+    if not isinstance(data, dict):
+        return ""
+    for path in _SSID_PATHS:
+        raw = dig(data, path, "")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+        if type(raw) is int and raw:
+            return str(raw)
+    return ""
+
+
+def _coerce_ssid(raw: str) -> str:
+    """Unwrap a pasted authorization frame down to the session token.
+
+    Community guides tell operators to copy the ``42["authorization",…]``
+    frame from DevTools; feeding that whole frame in as the session used to
+    fail auth opaquely. Bare tokens pass through untouched.
+    """
+    text = (raw or "").strip()
+    if not text or ("authorization" not in text and not text.startswith("42[")):
+        return text
+    start = text.find("[")
+    try:
+        data = json.loads(text[start:] if start != -1 else text)
+    except ValueError:
+        return text
+    rows = [data[1]] if isinstance(data, list) and len(data) >= 2 else []
+    if isinstance(data, dict):
+        rows.append(data)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for key in ("session", "ssid", "token"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+            if type(val) is int and val:
+                return str(val)
+    return text
+
+
+def _looks_like_challenge(status: int, text: str) -> bool:
+    """True when the signin reply is a challenge page, not a session."""
+    lowered = (text or "").lower()
+    if any(marker in lowered for marker in _CHALLENGE_MARKERS):
+        return True
+    # A 200 that is HTML rather than JSON is a challenge/error page.
+    if status == 200 and "<html" in lowered:
+        return True
+    return False
+
 
 class QuotexAPI:
     """Session facade used by the broker adapter and the CLI."""
@@ -64,6 +144,7 @@ class QuotexAPI:
         order_think_ms: int = 140,
         order_min_gap_ms: int = 350,
         max_orders_per_min: int = 10,
+        reconnect_max: int = 12,
         pace: Optional[Pacekeeper] = None,
     ) -> None:
         self.http_base = http_base
@@ -72,6 +153,7 @@ class QuotexAPI:
         self.demo = demo
         self.timeout = timeout
         self.legacy_orders = legacy_orders
+        self.reconnect_max = max(1, int(reconnect_max))
 
         self.pace = pace or Pacekeeper(
             enabled=ghost,
@@ -102,6 +184,10 @@ class QuotexAPI:
         # Phase-30: replayable candle subscriptions + session health.
         self._subs: Dict[Tuple[str, int], None] = {}
         self._session_stale = False
+        # Set by the dispatcher on the first balance push — the cheapest
+        # proof that the venue accepted the session (login verification
+        # waits on this instead of reading a balance that is still 0.0).
+        self._balance_seen = threading.Event()
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -114,32 +200,72 @@ class QuotexAPI:
         if is_demo is not None:
             self.demo = is_demo
         payload = {"email": email, "password": password, "remember": 1}
-        try:
-            resp = self.http.post(
-                C.SIGNIN_PATH,
-                json_body=payload,
-                headers={"Origin": self.http_base, "Referer": f"{self.http_base}/en/login"},
-            )
-        except Exception as exc:  # noqa: BLE001
-            raise BrokerAuthError(f"signin request failed: {exc}") from exc
+        # qxbroker.com and quotex.com are the same venue behind different
+        # front doors; a dead route must not read as a dead account.
+        bases = list(dict.fromkeys([self.http_base, C.HTTP_BASE, C.HTTP_BASE_ALT]))
+        resp = None
+        last_net_error: Optional[Exception] = None
+        for base in bases:
+            try:
+                self.http.base_url = base.rstrip("/")
+                resp = self.http.post(
+                    C.SIGNIN_PATH,
+                    json_body=payload,
+                    headers={"Origin": base, "Referer": f"{base}/en/login"},
+                )
+                last_net_error = None
+                break
+            except NetworkError as exc:
+                last_net_error = exc
+                continue
+            except Exception as exc:  # noqa: BLE001
+                raise BrokerAuthError(f"signin request failed: {exc}") from exc
+        if resp is None:
+            tried = ", ".join(bases)
+            raise BrokerAuthError(
+                f"signin request failed ({last_net_error}); tried {tried}"
+            ) from last_net_error
+        self.http_base = self.http.base_url
 
-        if resp.status == 401 or resp.status == 403:
-            raise BrokerAuthError("login rejected: bad credentials or CF challenge")
         data = resp.json(default={}) or {}
-        ssid = str(dig(data, "session", dig(data, "ssid", dig(data, "data.session", ""))))
+        ssid = _extract_ssid(data)
         if not ssid and resp.ok:
-            # cookie-only flows: fall back to sessionid cookie value
-            ssid = self.http.jar.cookies.get("sessionid", "")
+            # cookie-only flows: fall back to the session cookie value
+            for name in _SSID_COOKIES:
+                ssid = self.http.jar.cookies.get(name, "") or ""
+                if ssid:
+                    break
         if not ssid:
+            if resp.status == 401:
+                raise BrokerAuthError("login rejected: bad email/password (HTTP 401)")
+            if _looks_like_challenge(resp.status, resp.text()):
+                raise BrokerAuthError(
+                    "login blocked by a Cloudflare/CAPTCHA browser challenge "
+                    f"(HTTP {resp.status}) — headless sign-in cannot solve it; "
+                    "pair instead: `cybertrade quotex login` (Chrome opens; "
+                    "you sign in and solve the CAPTCHA once)"
+                )
+            if resp.status in (403, 429):
+                raise BrokerAuthError(
+                    f"login rejected (HTTP {resp.status}): bad credentials, "
+                    "rate limit, or CF challenge"
+                )
+            detail = str(dig(data, "message", dig(data, "error", "")) or "").strip()
+            if detail and len(detail) < 200:
+                raise BrokerAuthError(f"login failed (HTTP {resp.status}): {detail}")
             raise BrokerAuthError(
                 f"login failed (HTTP {resp.status}): no session in response — "
                 "site may require browser CF challenge; use --ssid instead"
             )
+        user_id = str(
+            dig(data, "user_id", dig(data, "userId", dig(data, "data.user_id", ""))) or ""
+        )
         self.session = QXSession(
             ssid=ssid,
             cookies=self.http.jar.header(),
             user_agent=self.user_agent,
             demo=self.demo,
+            user_id=user_id,
             host=self.http_base.split("//")[-1],
         )
         self._session_stale = False
@@ -148,9 +274,14 @@ class QuotexAPI:
         return self.session
 
     def set_ssid(self, ssid: str, cookies: str = "") -> QXSession:
-        """Bypass credentials: inject a session id obtained from a browser."""
+        """Bypass credentials: inject a session id obtained from a browser.
+
+        Accepts a bare session token *or* a pasted Socket.IO authorization
+        frame (``42["authorization",{"session":"…",…}]``) — the format
+        community guides tell operators to copy from DevTools.
+        """
         self.session = QXSession(
-            ssid=ssid,
+            ssid=_coerce_ssid(ssid),
             cookies=cookies,
             user_agent=self.user_agent,
             demo=self.demo,
@@ -170,23 +301,53 @@ class QuotexAPI:
                 self.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.socket = QuotexSocket(
-            self.session.ssid,
-            ws_url=self.ws_url,
-            cookies=self.session.cookies,
-            user_agent=self.user_agent,
-            is_demo=self.demo,
-            on_event=self._on_socket_event,
-            on_reconnected=self._on_reconnected,
-            timeout=self.timeout,
-        )
-        self.socket.connect(authorize=authorize)
+        self._balance_seen.clear()
+        errors: List[str] = []
+        for url in dict.fromkeys([self.ws_url, C.WS_URL, C.WS_URL_ALT]):
+            sock = QuotexSocket(
+                self.session.ssid,
+                ws_url=url,
+                cookies=self.session.cookies,
+                user_agent=self.user_agent,
+                origin=self.http_base,
+                is_demo=self.demo,
+                on_event=self._on_socket_event,
+                on_reconnected=self._on_reconnected,
+                reconnect_max=self.reconnect_max,
+                timeout=self.timeout,
+            )
+            try:
+                sock.connect(authorize=authorize)
+            except BrokerAuthError:
+                try:
+                    sock.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                raise  # a rejected session is final — no host will accept it
+            except (BrokerConnectionError, NetworkError, OSError) as exc:
+                errors.append(f"{url}: {exc}")
+                try:
+                    sock.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+                continue
+            self.socket = sock
+            self.ws_url = url
+            break
+        else:
+            raise BrokerConnectionError(
+                "quotex websocket unreachable (" + "; ".join(errors) + ")"
+            )
         # Supervisor heals call api.connect() directly — replay here too so
         # either reconnect path restores the chart stream.
         self._replay_subscriptions()
         self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
         self.request_balance()
         return True
+
+    def wait_for_balance(self, timeout: float = 6.0) -> bool:
+        """Block until the venue confirms the session with a balance push."""
+        return self._balance_seen.wait(timeout)
 
     def close(self) -> None:
         if self.socket is not None:
@@ -369,6 +530,7 @@ class QuotexAPI:
 
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
             self.balance = parse_balance(args)
+            self._balance_seen.set()
             self._emit("balance", self.balance)
 
         elif name in (C.EV_INSTRUMENT, "instruments", "assets", "asset_list"):
