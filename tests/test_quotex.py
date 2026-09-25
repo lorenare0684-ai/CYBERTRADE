@@ -806,6 +806,18 @@ class TestApiMarketData(unittest.TestCase):
                 api._on_socket_event(name, args)
                 self.assertTrue(api.wait_for_data(timeout=0))
 
+    def test_first_data_arrival_is_announced_once(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+
+        api = QuotexAPI()
+        batch = [[["EURUSD_otc", 1700000000, 1.08, 1]]]
+        with self.assertLogs("cybertrade.qx.api", level="INFO") as logs:
+            api._on_socket_event("quotes", batch)
+            api._on_socket_event("balance", [{"demoBalance": 5.0}])
+        flowing = [m for m in logs.output if "venue data flowing" in m]
+        self.assertEqual(len(flowing), 1)
+        self.assertIn("quotes", flowing[0])
+
     def test_data_seen_ignores_control_events(self):
         from cybertrade.brokers.quotex.api import QuotexAPI
 
@@ -880,6 +892,16 @@ class TestApiMarketData(unittest.TestCase):
         api._bootstrap_session()
         api._replay_subscriptions()
         self.assertNotIn("account/change", "\n".join(api.socket.sent))
+
+
+class TestCookieNames(unittest.TestCase):
+    def test_names_only_deduped(self):
+        from cybertrade.brokers.quotex.client import _cookie_names
+
+        self.assertEqual(_cookie_names("ssid=ABC; __cf_bm=xyz; ssid=ABC"),
+                         ["ssid", "__cf_bm"])
+        self.assertEqual(_cookie_names(""), [])
+        self.assertEqual(_cookie_names("  ; =v; k=v "), ["k"])
 
 
 class TestSniff(unittest.TestCase):

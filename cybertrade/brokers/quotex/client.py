@@ -71,6 +71,16 @@ def _decode_binary_json(payload: bytes) -> Any:
         return _MISS
 
 
+def _cookie_names(header: str) -> List[str]:
+    """Cookie *names* from a header value — values never leave the wire."""
+    names: List[str] = []
+    for part in (header or "").split(";"):
+        name = part.split("=", 1)[0].strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
 def _classify_silence(silence: float, interval: float,
                       probe_age: Optional[float]) -> str:
     """Pure watchdog policy: ``ok`` | ``probe`` | ``dead``.
@@ -202,6 +212,8 @@ class QuotexSocket:
             origin=self.origin,
             timeout=self.timeout,
         )
+        log.info("ws handshake cookies: %s",
+                 ", ".join(_cookie_names(self.cookies)) or "(none sent)")
         try:
             conn.connect()
         except (NetworkError, OSError) as exc:

@@ -375,6 +375,17 @@ class QuotexAPI:
         """Block until the first market-data event lands (any kind)."""
         return self._data_seen.wait(timeout)
 
+    def _note_data(self, name: str) -> None:
+        """Latch the data-seen flag; announce the first arrival loudly.
+
+        The single most informative line in a starving-wire log: present
+        means the venue streams to us, absent (with only ``venue
+        stream:`` acks around) means it hears us and answers nothing.
+        """
+        if not self._data_seen.is_set():
+            self._data_seen.set()
+            log.info("venue data flowing: %s", name)
+
     def close(self) -> None:
         if self.socket is not None:
             try:
@@ -675,11 +686,11 @@ class QuotexAPI:
         if name == C.SV_QUOTES:
             rows = list(parse_quotes(args[0] if args else []))
             if rows:
-                self._data_seen.set()
+                self._note_data(name)
             for asset, price, ts in rows:
                 self._handle_tick(asset, price, ts)
         elif name == C.SV_CANDLE_GENERATED:
-            self._data_seen.set()
+            self._note_data(name)
             self._handle_live_candle(args[0] if args else {})
         elif name == C.SV_S_AUTHORIZATION:
             log.info("venue authorized the session")
@@ -692,7 +703,7 @@ class QuotexAPI:
         elif name in (C.SV_TICK, "quote", C.SV_CANDLE):
             asset, price, ts = parse_tick(args)
             if asset and price > 0:
-                self._data_seen.set()
+                self._note_data(name)
                 self._handle_tick(asset, price, ts)
 
         elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES, C.SV_HISTORY_LOAD,
@@ -701,14 +712,14 @@ class QuotexAPI:
             tf = self._hist_tf.get(asset, 60) if asset else 60
             qlist = parse_candles(asset, args, tf)
             if qlist:
-                self._data_seen.set()
+                self._note_data(name)
             for qc in qlist:
                 self._ingest_candle(qc)
 
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
             self.balance = parse_balance(args, demo=self.demo)
             self._balance_seen.set()
-            self._data_seen.set()
+            self._note_data(name)
             if self.balance.user_id and not self.session.user_id:
                 # A paired session carries no identity of its own — adopt
                 # the venue-confirmed account id for continuity scoping.
@@ -721,7 +732,7 @@ class QuotexAPI:
 
             listing = parse_instruments(args)
             if listing:
-                self._data_seen.set()
+                self._note_data(name)
                 with self._lock:
                     for meta in listing:
                         self.assets[meta.name] = meta
