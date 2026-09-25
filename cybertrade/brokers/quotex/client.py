@@ -130,6 +130,7 @@ class QuotexSocket:
         self._gen = 0  # connection generation: stale readers exit, never steal frames
         self._last_pong = time.time()
         self._pending_bin: Optional[Dict[str, Any]] = None  # placeholder → attachments
+        self._drop_counts: Dict[str, int] = {}  # venue frames dropped, by cause
         self._probe_at: Optional[float] = None  # engine probe outstanding since
         self._next_tick = 0.0  # next 42["tick"] heartbeat due
         self._stream_names: List[str] = []  # first venue events (field diagnosis)
@@ -312,7 +313,7 @@ class QuotexSocket:
                 if self._handle_unframed(raw):
                     continue
                 self.last_error = f"parse: {exc}"
-                log.debug("drop undecodable packet: %r", raw[:80])
+                self._note_drop("undecodable frame", f"{raw[:160]} ({exc})")
                 continue
             if eng is not None and eng.type == "2":  # engine ping -> pong
                 try:
@@ -339,6 +340,7 @@ class QuotexSocket:
                 name, args = parse_event(sio)
             except Exception as exc:  # noqa: BLE001 — a bad frame is not fatal
                 self.last_error = f"parse: {exc}"
+                self._note_drop("unparsable event", f"{raw[:160]} ({exc})")
                 continue
             if sio.type == "5":  # binary event: placeholder, attachments follow
                 need = is_placeholder(args)
@@ -351,6 +353,21 @@ class QuotexSocket:
                     continue
             if name:
                 self._got_event(name, args)
+
+    def _note_drop(self, kind: str, sample: str) -> None:
+        """Count a dropped venue frame; warn (sampled) so silence is visible.
+
+        The venue's framing drifts without notice — when it does, the old
+        code dropped the evidence at debug level and the wire just looked
+        dead.  The first three drops of each kind log with a sample, then
+        only the counter grows (see ``stats()["drops"]``).
+        """
+        n = self._drop_counts.get(kind, 0) + 1
+        self._drop_counts[kind] = n
+        if n <= 3:
+            log.warning("venue %s dropped (#%d): %.160s", kind, n, sample)
+        elif n == 4:
+            log.warning("venue %s drops repeat — counting silently", kind)
 
     def _note_session_fault(self, message: str) -> None:
         """Record a venue error that condemns the session pre-authorization."""
@@ -402,7 +419,7 @@ class QuotexSocket:
             return
         # Unsolicited binary (the venue sometimes pushes batches bare).
         if not self._route_payload(obj):
-            log.debug("drop unroutable binary payload %.80r", payload[:80])
+            self._note_drop("unroutable binary", repr(payload[:80]))
 
     def _handle_unframed(self, raw: str) -> bool:
         """Route a frame outside Engine.IO framing.
@@ -590,6 +607,7 @@ class QuotexSocket:
             "authorized": self._authorized.is_set(),
             "auth_error": self._auth_failed,
             "stream_events": list(self._stream_names),
+            "drops": dict(self._drop_counts),
         }
 
 

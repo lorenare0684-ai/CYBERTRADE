@@ -363,3 +363,136 @@ class TestDoctorReadsTheRealConfig(unittest.TestCase):
     def test_the_check_count_is_reported(self):
         rc, out = self._doctor()
         self.assertIn("14/14 checks passed", out)
+
+
+class TestSessionVerify(unittest.TestCase):
+    """_verify_session_data: auth alone is not a live session."""
+
+    def _api(self, data: bool):
+        from types import SimpleNamespace
+
+        pokes = []
+
+        def wait_for_data(timeout=0):
+            return data
+
+        return SimpleNamespace(
+            subscribe=lambda a, tf: pokes.append(("sub", a, tf)),
+            request_instruments=lambda: pokes.append(("inst",)),
+            wait_for_data=wait_for_data,
+            pokes=pokes,
+        )
+
+    def test_flowing_data_passes(self):
+        from cybertrade.cli import _verify_session_data
+
+        api = self._api(True)
+        self.assertIsNone(_verify_session_data(api, timeout=0.01))
+        self.assertTrue(api.pokes)  # the wire was poked first
+
+    def test_silence_raises_pairing_screen_case(self):
+        from cybertrade.cli import _verify_session_data
+        from cybertrade.exceptions import BrokerConnectionError
+
+        with self.assertRaises(BrokerConnectionError) as ctx:
+            _verify_session_data(self._api(False), timeout=0.01)
+        self.assertIn("no market data", str(ctx.exception))
+
+    def test_stub_apis_without_wait_are_skipped(self):
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _verify_session_data
+
+        stub = SimpleNamespace(subscribe=lambda a, t: None,
+                               request_instruments=lambda: None)
+        self.assertIsNone(_verify_session_data(stub, timeout=0.01))
+
+
+class TestArmOrHold(unittest.TestCase):
+    """_arm_or_hold: a latched kill holds, never kills the terminal."""
+
+    def test_success_arms(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _arm_or_hold
+
+        engine = SimpleNamespace(armed=[], arm=lambda: engine.armed.append(1))
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(_arm_or_hold(engine))
+        self.assertEqual(engine.armed, [1])
+
+    def test_kill_switch_holds_with_a_message(self):
+        import io
+        from contextlib import redirect_stdout
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _arm_or_hold
+        from cybertrade.exceptions import KillSwitchEngaged
+
+        def arm():
+            raise KillSwitchEngaged("recovery hold: nope")
+
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertFalse(_arm_or_hold(SimpleNamespace(arm=arm)))
+        self.assertIn("DISARMED", buf.getvalue())
+
+
+class TestNeedsRebuild(unittest.TestCase):
+    """_needs_rebuild: dead-on-arrival rebuilds, live books re-seat."""
+
+    def _engine(self, **kw):
+        from types import SimpleNamespace
+
+        from cybertrade.constants import EngineState
+
+        base = dict(state=EngineState.DISARMED, degraded="",
+                    broker=SimpleNamespace(open_positions=lambda: []),
+                    continuity=SimpleNamespace(fault=""))
+        base.update(kw)
+        return SimpleNamespace(**base)
+
+    def test_degraded_disarmed_rebuilds(self):
+        from cybertrade.cli import _needs_rebuild
+
+        self.assertTrue(_needs_rebuild(self._engine(degraded="0 candles")))
+
+    def test_degraded_live_stays_in_place(self):
+        from cybertrade.cli import _needs_rebuild
+        from cybertrade.constants import EngineState
+
+        engine = self._engine(degraded="0 candles", state=EngineState.LIVE)
+        self.assertFalse(_needs_rebuild(engine))
+
+    def test_bootstrap_hold_rebuilds(self):
+        from cybertrade.cli import BOOTSTRAP_HOLD, _needs_rebuild
+        from types import SimpleNamespace
+
+        engine = self._engine(continuity=SimpleNamespace(fault=BOOTSTRAP_HOLD))
+        self.assertTrue(_needs_rebuild(engine))
+
+    def test_healthy_engine_reseats(self):
+        from cybertrade.cli import _needs_rebuild
+
+        self.assertFalse(_needs_rebuild(self._engine()))
+
+    def test_open_positions_never_rebuild(self):
+        from cybertrade.cli import _needs_rebuild
+        from types import SimpleNamespace
+
+        broker = SimpleNamespace(open_positions=lambda: ["x1"])
+        engine = self._engine(degraded="0 candles", broker=broker)
+        self.assertFalse(_needs_rebuild(engine))
+
+    def test_unreadable_book_never_rebuilds(self):
+        from cybertrade.cli import _needs_rebuild
+        from types import SimpleNamespace
+
+        def boom():
+            raise RuntimeError("book locked")
+
+        broker = SimpleNamespace(open_positions=boom)
+        engine = self._engine(degraded="0 candles", broker=broker)
+        self.assertFalse(_needs_rebuild(engine))

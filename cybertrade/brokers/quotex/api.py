@@ -197,6 +197,11 @@ class QuotexAPI:
         # proof that the venue accepted the session (login verification
         # waits on this instead of reading a balance that is still 0.0).
         self._balance_seen = threading.Event()
+        # Set on the first *data* event (quotes / candles / instruments /
+        # balance).  An authorized wire that never sets this is a
+        # data-starved session — boot fails fast to the pairing screen
+        # instead of warming up on 90 seconds of silence.
+        self._data_seen = threading.Event()
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -311,6 +316,7 @@ class QuotexAPI:
             except Exception:  # noqa: BLE001
                 pass
         self._balance_seen.clear()
+        self._data_seen.clear()
         errors: List[str] = []
         for url in dict.fromkeys([self.ws_url, C.WS_URL, C.WS_URL_ALT]):
             sock = QuotexSocket(
@@ -351,12 +357,18 @@ class QuotexAPI:
         # either reconnect path restores the chart stream.
         self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
         self._bootstrap_session()
+        log.info("session bootstrap sent "
+                 "(indicator/drawing/pending/chart/instruments)")
         self._replay_subscriptions()
         return True
 
     def wait_for_balance(self, timeout: float = 6.0) -> bool:
         """Block until the venue confirms the session with a balance push."""
         return self._balance_seen.wait(timeout)
+
+    def wait_for_data(self, timeout: float = 10.0) -> bool:
+        """Block until the first market-data event lands (any kind)."""
+        return self._data_seen.wait(timeout)
 
     def close(self) -> None:
         if self.socket is not None:
@@ -378,6 +390,7 @@ class QuotexAPI:
         ``depth/follow``, so we send all three, every time.
         """
         self._subs[(asset, int(timeframe_seconds))] = None
+        log.debug("subscribe trio -> %s@%ss", asset, timeframe_seconds)
         self._send(build_subscribe_candles(asset, timeframe_seconds), kind="frame")
         self._send(build_chart_notification(asset), kind="frame")
         self._send(build_depth_follow(asset), kind="frame")
@@ -447,7 +460,16 @@ class QuotexAPI:
                     break
             time.sleep(0.05)
         with self._lock:
-            return list(self._candles.get(key, []))
+            out = list(self._candles.get(key, []))
+        if not out:
+            # The venue heard the trio + history request (the socket would
+            # have raised otherwise) and answered nothing.  Say so per
+            # asset — a wall of these plus zero "venue stream:" lines is a
+            # data-starved session, not a slow one.
+            log.warning("history %s@%ss — venue silent after %.1fs "
+                        "(no reply to subscribe trio + history request)",
+                        asset, timeframe_seconds, wait)
+        return out
 
     def last_price(self, asset: str) -> Optional[float]:
         tick = self._last_tick.get(asset)
@@ -610,16 +632,24 @@ class QuotexAPI:
     def _on_socket_event(self, name: str, args: List[Any]) -> None:
         """Central dispatcher — tolerant of unknown/renamed venue events."""
         if name == C.SV_QUOTES:
-            for asset, price, ts in parse_quotes(args[0] if args else []):
+            rows = list(parse_quotes(args[0] if args else []))
+            if rows:
+                self._data_seen.set()
+            for asset, price, ts in rows:
                 self._handle_tick(asset, price, ts)
         elif name == C.SV_CANDLE_GENERATED:
+            self._data_seen.set()
             self._handle_live_candle(args[0] if args else {})
         elif name == C.SV_S_AUTHORIZATION:
             log.info("venue authorized the session")
             self._emit("authorized", {})
+        elif name == C.SV_S_ACCOUNT_CHANGE or (
+                isinstance(name, str) and name.startswith("s_")):
+            log.info("venue confirm: %s", name)
         elif name in (C.SV_TICK, "quote", C.SV_CANDLE):
             asset, price, ts = parse_tick(args)
             if asset and price > 0:
+                self._data_seen.set()
                 self._handle_tick(asset, price, ts)
 
         elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES, C.SV_HISTORY_LOAD,
@@ -627,12 +657,15 @@ class QuotexAPI:
             asset = str(dig(args[0] if args else {}, "asset", "")) if args else ""
             tf = self._hist_tf.get(asset, 60) if asset else 60
             qlist = parse_candles(asset, args, tf)
+            if qlist:
+                self._data_seen.set()
             for qc in qlist:
                 self._ingest_candle(qc)
 
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
             self.balance = parse_balance(args, demo=self.demo)
             self._balance_seen.set()
+            self._data_seen.set()
             if self.balance.user_id and not self.session.user_id:
                 # A paired session carries no identity of its own — adopt
                 # the venue-confirmed account id for continuity scoping.
@@ -645,6 +678,7 @@ class QuotexAPI:
 
             listing = parse_instruments(args)
             if listing:
+                self._data_seen.set()
                 with self._lock:
                     for meta in listing:
                         self.assets[meta.name] = meta

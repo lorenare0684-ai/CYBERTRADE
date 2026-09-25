@@ -173,6 +173,7 @@ Older community docs named `subscribeCandle` / `candleHistory` /
 |-------|----------------------------|
 | `candles` (legacy tolerance) | `{"asset":..., "candles":[{t,o,h,l,c}\| [t,o,c,h,l] ...]}` |
 | `s_authorization` / `authorization/reject` | auth accepted / refused |
+| `s_account/change` (any `s_*`) | server confirm of the matching request (purse switch, …) |
 | `instruments/list` (binary) | positional rows `[id, symbol, name, type, ?, payment, …, open@14, …, turbo@18, 24H/1M/5M@-10/-9/-8]` |
 | `history/load` / `history/list/v2` (binary) | `{asset, index, candles: [[ts, price, direction], …]}` — ticks, aggregated client-side into OHLC (forming bar dropped) |
 | `candle-generated` | `{asset, period, index, open, high, low, close}` — a closed bar |

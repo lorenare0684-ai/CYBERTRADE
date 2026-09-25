@@ -153,7 +153,91 @@ def _live_api(cfg: AppConfig, api_factory=None):
             "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
         )
     api.connect()
+    _verify_session_data(api)
     return api
+
+
+def _verify_session_data(api, timeout: float = 10.0) -> None:
+    """Prove the session carries market data, not just an auth ack.
+
+    The venue says ``s_authorization`` even for sessions it will never
+    send data on (a stale/rotated cookie authorizes fine and then
+    starves).  So after connecting we poke the wire — a canary subscribe
+    plus a catalog request — and require ANY data event back within the
+    window.  Silence raises (a pairing-screen case), saving a 90-second
+    warmup on a dead wire and the degraded boot behind it.
+    """
+    for poke in (lambda: api.subscribe("EURUSD_otc", 60),
+                 lambda: api.request_instruments()):
+        try:
+            poke()
+        except Exception:  # noqa: BLE001 — the wait below is the verdict
+            pass
+    waiter = getattr(api, "wait_for_data", None)
+    if not callable(waiter):
+        return  # stub apis in tests don't speak the wire protocol
+    if waiter(timeout=timeout):
+        return
+    from .exceptions import BrokerConnectionError
+
+    raise BrokerConnectionError(
+        f"venue accepted the session but sent no market data in "
+        f"{timeout:.0f}s — the session is probably stale (pair again "
+        f"from the terminal), or the venue is slow (wait and retry)"
+    )
+
+
+BOOTSTRAP_HOLD = "live continuity needs an authenticated venue user ID"
+
+
+def _needs_rebuild(engine) -> bool:
+    """True when a re-pair should rebuild the engine, not re-seat it.
+
+    A degraded engine (or one stuck on the bootstrap identity hold) that
+    never armed holds no positions and no financial memory — rebuilding
+    it on the fresh session re-runs warmup, re-pins continuity, and
+    re-seeds balances, where an in-place re-seat would leave the kill
+    latch and the empty books behind.  Anything LIVE (or holding venue
+    positions) keeps the in-place re-seat — a rebuild must never orphan
+    a live book.
+    """
+    from .constants import EngineState
+
+    broker = getattr(engine, "broker", None)
+    opener = getattr(broker, "open_positions", None)
+    if callable(opener):
+        try:
+            if list(opener() or []):
+                return False
+        except Exception:  # noqa: BLE001 — an unreadable book is not rebuildable
+            return False
+    if getattr(engine, "state", None) is EngineState.LIVE:
+        return False
+    if getattr(engine, "degraded", ""):
+        return True
+    fault = getattr(getattr(engine, "continuity", None), "fault", "") or ""
+    return BOOTSTRAP_HOLD in fault
+
+
+def _arm_or_hold(engine) -> bool:
+    """Auto-arm that never kills the terminal.
+
+    A kill latch (recovery hold, operator kill) or an unreadable book
+    holds the engine DISARMED with a loud message instead of raising out
+    of the serving loop — the terminal, the pairing screen, and the
+    background rewarm all stay up.
+    """
+    from .exceptions import KillSwitchEngaged
+    from .statestore import StateError
+
+    try:
+        engine.arm()
+    except (KillSwitchEngaged, StateError) as exc:
+        log.warning("auto-arm held DISARMED: %s", exc)
+        print(f"  \u25b8 engine DISARMED (auto-arm held: {exc})")
+        print("  \u25b8 resolve it (re-pair / clear the kill) and ARM from the terminal")
+        return False
+    return True
 
 
 def _resolve_purse(cfg: AppConfig, args: argparse.Namespace) -> None:
@@ -315,6 +399,7 @@ def _reseat_session(engine, ssid: str) -> None:
         setattr(api, "ssid", ssid)
     if not api.connect():
         raise ConfigError("the paired session was rejected by the venue")
+    _verify_session_data(api)
     engine.health.note_message("venue session re-paired in place")
 
 
@@ -380,8 +465,7 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
             if getattr(engine, "degraded", ""):
                 print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
                       "retrying in the background")
-            if args.auto:
-                engine.arm()
+            if args.auto and _arm_or_hold(engine):
                 print("  ▸ engine ARMED (LIVE — real order flow)\n")
 
         while True:
@@ -391,16 +475,22 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
             # a cookie landed on a worker thread: adopt it here, serially
             ssid = pending.pop(0)
             try:
-                if hub.engine is None:
-                    engine = _build_engine(cfg, durable=True)
-                    hub.engine = engine
+                if hub.engine is None or _needs_rebuild(hub.engine):
+                    fresh = _build_engine(cfg, durable=True)
+                    if hub.engine is not None:
+                        # Build-first, then retire: a bad cookie must leave
+                        # the old engine serving, not a dead one attached.
+                        try:
+                            hub.engine.shutdown()
+                        except Exception:  # noqa: BLE001 — teardown is best-effort
+                            pass
+                    engine = hub.engine = fresh
                     print(f"  ▸ session paired — purse "
                           f"{cfg.broker.purse_label}\n")
                     if getattr(engine, "degraded", ""):
                         print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
                               "retrying in the background")
-                    if args.auto:
-                        engine.arm()
+                    if args.auto and _arm_or_hold(engine):
                         print("  ▸ engine ARMED (LIVE — real order flow)\n")
                 else:
                     _reseat_session(engine, ssid)
@@ -570,6 +660,10 @@ def cmd_quotex(args: argparse.Namespace) -> int:
             api.request_instruments()
         except Exception:  # noqa: BLE001
             pass
+        try:
+            api.wait_for_data(timeout=6.0)
+        except Exception:  # noqa: BLE001 — the report below shows the silence
+            pass
         sess = getattr(api, "session", None)
         print(f"  connected : {getattr(api, 'connected', False)}")
         print(f"  host      : {getattr(sess, 'host', '?')}"
@@ -578,6 +672,15 @@ def cmd_quotex(args: argparse.Namespace) -> int:
         if snap is not None:
             print(f"  balance   : {getattr(snap, 'balance', 0.0):.2f}")
         print(f"  instruments: {len(getattr(api, 'assets', {}) or {})}")
+        try:
+            stats = api.socket.stats() if api.socket is not None else {}
+            heard = stats.get("stream_events", []) or ["(silent)"]
+            print(f"  stream    : {', '.join(heard)}")
+            drops = stats.get("drops", {})
+            if drops:
+                print(f"  drops     : {drops}")
+        except Exception:  # noqa: BLE001 — status never crashes on stats
+            pass
         for asset in cfg.strategy.universe[:3]:
             print(f"  payout {asset}: {api.payout_for(asset, 60):.2f}")
         return 0

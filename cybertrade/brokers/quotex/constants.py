@@ -53,6 +53,7 @@ EV_USER_DATA = "userData"
 # Known server → client events (parsed defensively)
 SV_S_AUTHORIZATION = "s_authorization"  # auth accepted (the real ack)
 SV_AUTH_REJECT = "authorization/reject"  # auth refused — re-pair, don't retry
+SV_S_ACCOUNT_CHANGE = "s_account/change"  # purse-switch confirm (s_ = server ack)
 SV_AUTH_SUCCESS = SV_S_AUTHORIZATION
 SV_INSTRUMENTS_LIST = "instruments/list"  # positional rows, binary attachment
 SV_HISTORY_LOAD = "history/load"        # history reply (binary attachment)
@@ -144,6 +145,7 @@ __all__ = [
     "EV_NOTIFICATION",
     "SV_S_AUTHORIZATION",
     "SV_AUTH_REJECT",
+    "SV_S_ACCOUNT_CHANGE",
     "SV_AUTH_SUCCESS",
     "SV_INSTRUMENTS_LIST",
     "SV_HISTORY_LOAD",

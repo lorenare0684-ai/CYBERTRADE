@@ -787,6 +787,62 @@ class TestApiMarketData(unittest.TestCase):
         self.assertGreater(len(bars), 5)
         self.assertTrue(all(b.timeframe_seconds == 300 for b in bars))
 
+    def test_data_seen_set_by_each_data_event(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+
+        rows = [[1700000000 + i * 60, 1.08, 1] for i in range(10)]
+        events = [
+            ("quotes", [[["EURUSD_otc", 1700000000, 1.08, 1]]]),
+            ("tick", [{"asset": "EURUSD_otc", "price": 1.08, "ts": 1}]),
+            ("history/load", [{"asset": "EURUSD_otc", "candles": rows}]),
+            ("balance", [{"demoBalance": 1000.0}]),
+            ("instruments/list", [[[1, "EURUSD_otc", "EUR/USD", 1, 0, 85]]]),
+        ]
+        for name, args in events:
+            with self.subTest(name=name):
+                api = QuotexAPI()
+                self.assertFalse(api.wait_for_data(timeout=0))
+                api._on_socket_event(name, args)
+                self.assertTrue(api.wait_for_data(timeout=0))
+
+    def test_data_seen_ignores_control_events(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+
+        api = QuotexAPI()
+        api._on_socket_event("s_authorization", [])
+        api._on_socket_event("s_account/change", [])
+        api._on_socket_event("something/unknown", [{"x": 1}])
+        self.assertFalse(api.wait_for_data(timeout=0))
+
+    def test_s_confirms_are_logged_not_dispatched(self):
+        from cybertrade.brokers.quotex.api import QuotexAPI
+
+        api = QuotexAPI()
+        seen = []
+        api.add_listener(lambda kind, payload: seen.append(kind))
+        with self.assertLogs("cybertrade.qx.api", level="INFO"):
+            api._on_socket_event("s_account/change", [])
+            api._on_socket_event("s_anything/new", [])
+        self.assertEqual(seen, [])
+
+    def test_get_candles_warns_when_venue_silent(self):
+        api = self._api()
+        with self.assertLogs("cybertrade.qx.api", level="WARNING") as logs:
+            out = api.get_candles("EURUSD_otc", 60, count=10, wait=0.0)
+        self.assertEqual(out, [])
+        self.assertTrue(any("venue silent" in m for m in logs.output))
+
+    def test_drop_counter_samples_then_counts(self):
+        from cybertrade.brokers.quotex.client import QuotexSocket
+
+        sock = QuotexSocket("x")
+        with self.assertLogs("cybertrade.qx.client", level="WARNING") as logs:
+            for _ in range(6):
+                sock._note_drop("unroutable binary", "sample")
+        # first three sampled + one "counting silently" = 4 records
+        self.assertEqual(len(logs.records), 4)
+        self.assertEqual(sock.stats()["drops"], {"unroutable binary": 6})
+
 
 if __name__ == "__main__":
     unittest.main()
