@@ -148,7 +148,7 @@ class TestConsoleEncoding(unittest.TestCase):
         )
         r = subprocess.run([sys.executable, "-c", code], capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr[-400:])
-        self.assertIn(b"13/13 checks passed", r.stdout + r.stderr)
+        self.assertIn(b"14/14 checks passed", r.stdout + r.stderr)
 
 
 class TestHardenPath(unittest.TestCase):

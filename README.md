@@ -879,9 +879,20 @@ WebSocket/Engine.IO/Socket.IO codecs (wire-level golden strings against the
 confirmed Quotex shapes), and the web terminal's HTTP/SSE surface.
 
 ```bash
-python -m unittest discover -s tests        # 163 tests
-python -m cybertrade doctor                 # 10 environment checks
+python -m unittest discover -s tests        # 748 tests
+python -m cybertrade doctor                 # 14 environment checks
 ```
+
+`doctor` reads *your* config, not a fresh default. The `risk switches` check
+fails the preflight when a risk control has been switched off, naming each one:
+
+```
+  ✗ risk switches   not at protective defaults — survivor playbook DISABLED (each is a deliberate config choice, not a fault)
+  13/14 checks passed
+```
+
+A passing checklist that hides a disabled playbook would be the same lie as a
+config knob that does nothing, so the preflight refuses to bless it.
 
 ## Honest engineering notes
 

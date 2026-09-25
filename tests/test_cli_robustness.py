@@ -316,3 +316,50 @@ class TestAProtectedInstallDirectory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDoctorReadsTheRealConfig(unittest.TestCase):
+    """doctor is the preflight run before going live with real money, so it has
+    to read the operator's config rather than a fresh default -- a passing
+    checklist that hides a disabled playbook is the same lie as a config knob
+    that does nothing."""
+
+    def _doctor(self, cfg_text=None):
+        argv = []
+        if cfg_text is not None:
+            path = os.path.join(tempfile.mkdtemp(prefix="ctdoc_"), "c.json")
+            io.open(path, "w", encoding="utf-8").write(cfg_text)
+            argv += ["--config", path]
+        argv.append("doctor")
+        p = _run_cli(argv, timeout=120)
+        return p.returncode, (p.stdout + p.stderr).decode("utf-8", "replace")
+
+    def test_a_default_config_passes_every_check(self):
+        rc, out = self._doctor()
+        self.assertIn("risk switches", out)
+        self.assertIn("protective defaults", out)
+        self.assertEqual(rc, 0, out[-400:])
+
+    def test_a_disabled_playbook_fails_the_preflight(self):
+        rc, out = self._doctor('{"survivor": {"enabled": false}}')
+        self.assertIn("survivor playbook DISABLED", out)
+        self.assertEqual(rc, 1)
+
+    def test_every_weakened_switch_is_named(self):
+        rc, out = self._doctor(
+            '{"survivor": {"weekend_lock": false, "trend_filter": false},'
+            ' "strategy": {"trade_on_weak": true, "max_signals_per_candle": 3},'
+            ' "risk": {"edge_gate": "off"}}')
+        for needle in ("weekend lock off", "trend filter off",
+                       "trade_on_weak ON", "vote cap 3/candle", "edge gate OFF"):
+            self.assertIn(needle, out)
+        self.assertEqual(rc, 1)
+
+    def test_a_broken_config_fails_rather_than_crashing(self):
+        rc, out = self._doctor('{"strategy": {"max_signals_per_candle": "abc"}}')
+        self.assertNotIn("Traceback", out)
+        self.assertEqual(rc, 1)
+
+    def test_the_check_count_is_reported(self):
+        rc, out = self._doctor()
+        self.assertIn("14/14 checks passed", out)

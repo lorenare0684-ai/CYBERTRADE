@@ -804,6 +804,41 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     check("python >= 3.10", lambda: sys.version.split()[0])
     check("config validate", lambda: AppConfig().validate() or "valid")
 
+    def _risk_switches():
+        """Read the operator's real config, not a fresh default.
+
+        "config validate" above proves the schema is sound; it says nothing
+        about whether the operator has switched a risk control off. doctor is
+        the preflight run before going live with real money, so a disabled
+        playbook has to fail it rather than hide behind a passing checklist.
+        """
+        cfg = AppConfig.load(getattr(args, "config", None))
+        off = []
+        if not cfg.survivor.enabled:
+            off.append("survivor playbook DISABLED")
+        for label, active in (
+            ("weekend lock", cfg.survivor.weekend_lock),
+            ("panic deleverage", cfg.survivor.panic_deleverage),
+            ("trend filter", cfg.survivor.trend_filter),
+            ("regime rotation", cfg.survivor.regime_rotation),
+        ):
+            if not active:
+                off.append(f"{label} off")
+        if cfg.strategy.trade_on_weak:
+            off.append("trade_on_weak ON")
+        if cfg.strategy.max_signals_per_candle:
+            off.append(f"vote cap {cfg.strategy.max_signals_per_candle}/candle")
+        if cfg.risk.edge_gate == "off":
+            off.append("edge gate OFF")
+        if off:
+            raise RuntimeError(
+                "not at protective defaults — " + "; ".join(off)
+                + " (each is a deliberate config choice, not a fault)"
+            )
+        return "all risk switches at their protective defaults"
+
+    check("risk switches", _risk_switches)
+
     def _live_defaults():
         cfg = AppConfig()
         if cfg.broker.mode != "quotex" or not cfg.risk.allow_live:
