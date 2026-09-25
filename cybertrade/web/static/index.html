@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CYBERTRADE // NEON PROTOCOL</title>
+<link rel="stylesheet" href="/static/css/cyber.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>◈</text></svg>">
+</head>
+<body>
+<div class="scanlines"></div>
+<div class="grid-bg"></div>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">◈</span>
+    <h1 data-text="CYBERTRADE">CYBERTRADE</h1>
+    <span class="tag">// NEON PROTOCOL — ALL-WEATHER OPS</span>
+  </div>
+  <div class="leds">
+    <div class="led" id="led-feed"><i></i>FEED</div>
+    <div class="led" id="led-broker"><i></i>VENUE</div>
+    <div class="led" id="led-risk"><i></i>RISK</div>
+    <div class="led" id="led-state"><i></i>DISARMED</div>
+  </div>
+  <div class="clock" id="clock">--:--:--</div>
+</header>
+
+<main class="deck">
+  <!-- ============ LEFT: CHART ============ -->
+  <section class="panel chart-panel">
+    <div class="panel-head">
+      <span class="corner tl"></span><span class="corner tr"></span>
+      <h2>◈ MARKET // <span id="chart-asset">---</span></h2>
+      <div class="tabs" id="asset-tabs"></div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="chart" width="880" height="380"></canvas>
+      <div class="price-tag" id="price-tag">····</div>
+      <div class="regime-tag" id="regime-tag">REGIME: ---</div>
+    </div>
+    <div class="ticker-row">
+      <span>POSTURE: <b id="posture">NORMAL</b></span>
+      <span>CONF: <b id="conf">0.00</b></span>
+      <span>STRESS: <b id="stress">0.00</b></span>
+      <span>VOL: <b id="volstate">—</b></span>
+      <span>SESSION: <b id="session">—</b></span>
+      <span>FEED: <b class="ok">LIVE VENUE CANDLES</b></span>
+      <span>ORDERS: <b class="bad">REAL</b></span>
+    </div>
+  </section>
+
+  <!-- ============ RIGHT: SYSTEM ============ -->
+  <section class="side">
+    <div class="panel acct-panel">
+      <div class="panel-head"><h2>◈ ACCOUNT CORE</h2></div>
+      <div class="acct-grid">
+        <div class="stat"><label>BALANCE</label><div class="num neon" id="balance">1000.00</div></div>
+        <div class="stat"><label>P/L TODAY</label><div class="num" id="daily">+0.00</div></div>
+        <div class="stat"><label>WIN RATE</label><div class="num" id="winrate">0%</div></div>
+        <div class="stat"><label>TRADES</label><div class="num" id="trades">0</div></div>
+        <div class="stat"><label>EDGE · BREAKEVEN</label><div class="num" id="edge-ev">—</div></div>
+        <div class="stat"><label>CAL GAP</label><div class="num" id="cal-gap">—</div></div>
+      </div>
+      <div class="meters">
+        <div class="meter"><label>DRAWDOWN</label>
+          <div class="bar"><div id="dd-bar" class="fill magenta" style="width:0%"></div></div>
+          <span id="dd-val">0.0%</span></div>
+        <div class="meter"><label>DAILY LOSS</label>
+          <div class="bar"><div id="dl-bar" class="fill yellow" style="width:0%"></div></div>
+          <span id="dl-val">0.0%</span></div>
+        <div class="meter"><label>EXPOSURE</label>
+          <div class="bar"><div id="exp-bar" class="fill cyan" style="width:0%"></div></div>
+          <span id="exp-val">0/3</span></div>
+      </div>
+    </div>
+
+    <div class="panel posture-panel">
+      <div class="panel-head"><h2>◈ SURVIVOR LADDER</h2></div>
+      <div class="ladder" id="ladder">
+        <div class="rung" data-p="ATTACK">ATTACK</div>
+        <div class="rung" data-p="NORMAL">NORMAL</div>
+        <div class="rung" data-p="GUARD">GUARD</div>
+        <div class="rung" data-p="DEFENSE">DEFENSE</div>
+        <div class="rung" data-p="LOCKDOWN">LOCKDOWN</div>
+      </div>
+    </div>
+
+    <div class="panel controls">
+      <div class="panel-head"><h2>◈ FIRE CONTROL</h2></div>
+      <div class="recovery-status" id="recovery-status" role="status" aria-live="polite">RECOVERY · checking…</div>
+      <div class="btn-row">
+        <button class="btn green" id="btn-arm" title="Arms LIVE trading (real orders)">ARM LIVE ▶</button>
+        <button class="btn cyan" id="btn-disarm">DISARM</button>
+        <button class="btn red glitchy" id="btn-kill">KILL ✖</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn call" id="btn-call">▲ CALL</button>
+        <button class="btn put" id="btn-put">▼ PUT</button>
+      </div>
+      <div class="btn-row">
+        <button class="btn sm yellow" id="btn-news">NEWS FLAG</button>
+        <button class="btn sm magenta" id="btn-lock">LOCKDOWN</button>
+        <button class="btn sm" id="btn-clear">CLEAR</button>
+      </div>
+    </div>
+
+    <div class="panel deck-panel">
+      <div class="panel-head"><h2>◈ STRATEGY DECK</h2><span class="mini" id="deck-count">—</span></div>
+      <div class="mini" id="deck-bias" style="padding:0 6px 3px;opacity:.7">—</div>
+      <div id="deck-body" style="max-height:170px;overflow-y:auto;font-size:11px;"></div>
+    </div>
+
+    <div class="panel risklab-panel">
+      <div class="panel-head"><h2>◈ RISK LAB // MONTE CARLO</h2>
+        <button class="btn sm cyan" id="btn-mc">RUN</button>
+      </div>
+      <canvas id="mc-chart" width="300" height="130"></canvas>
+      <div class="mc-stats">
+        <span>VERDICT: <b id="mc-verdict">—</b></span>
+        <span>P05 <b id="mc-p05">—</b></span>
+        <span>P50 <b id="mc-p50">—</b></span>
+        <span>P95 <b id="mc-p95">—</b></span>
+        <span>RUIN <b id="mc-ruin">—</b></span>
+      </div>
+      <div class="mini" id="mc-source">no runs yet</div>
+      <div class="mini" id="honesty">no ledger yet</div>
+      <div class="mini" id="decay">decay watch idle</div>
+      <label class="mini" style="cursor:pointer"><input type="checkbox" id="mc-posterior"> posterior mode</label>
+    </div>
+
+    <div class="panel equity-panel">
+      <div class="panel-head"><h2>◈ EQUITY TRACE</h2><span class="mini" id="cluster-mini">clusters —</span></div>
+      <canvas id="equity-chart" width="300" height="110"></canvas>
+    </div>
+  </section>
+
+  <!-- ============ BOTTOM LEFT: OPEN POSITIONS ============ -->
+  <section class="panel positions-panel">
+    <div class="panel-head"><h2>◈ OPEN POSITIONS</h2><span class="mini" id="pos-count">0 open</span></div>
+    <table class="blotter">
+      <thead><tr><th>STRAT</th><th>ASSET</th><th>SIDE</th><th>STAKE</th><th>STRIKE</th><th>MARK</th><th>ITM</th><th>LEFT</th><th></th></tr></thead>
+      <tbody id="pos-body"></tbody>
+    </table>
+  </section>
+
+  <!-- ============ BOTTOM LEFT: BLOTTER ============ -->
+  <section class="panel blotter-panel">
+    <div class="panel-head"><h2>◈ TRADE BLOTTER</h2><span class="mini" id="blotter-count">0 settled</span></div>
+    <table class="blotter">
+      <thead><tr><th>TS</th><th>ASSET</th><th>SIDE</th><th>STAKE</th><th>STRIKE</th><th>EXP</th><th>RESULT</th><th>P/L</th></tr></thead>
+      <tbody id="blotter-body"></tbody>
+    </table>
+  </section>
+
+  <!-- ============ BOTTOM RIGHT: CONSOLE ============ -->
+  <section class="panel console-panel">
+    <div class="panel-head"><h2>◈ SYSTEM CONSOLE</h2><span class="mini" id="vetoes">vetoes 0</span></div>
+    <div class="console" id="console"></div>
+  </section>
+
+  <!-- ============ INTEL STRIP: NEWS + ALERTS ============ -->
+  <section class="panel intel-panel">
+    <div class="panel-head"><h2>◈ NEWS GRID</h2><span class="mini" id="blackout-flag">no blackout</span></div>
+    <div class="intel-row">
+      <div class="cal-list" id="cal-list"></div>
+      <div class="alert-ticker" id="alert-ticker"><span class="dim">alerts idle…</span></div>
+    </div>
+  </section>
+</main>
+
+<footer class="statusline">
+  <span id="engine-state">STATE: BOOT</span>
+  <span id="regime-detail">—</span>
+  <span class="warn">LIVE ONLY · REAL ORDER FLOW · NO SYSTEM SURVIVES EVERY MARKET · SEE DISCLAIMER</span>
+  <span id="fps">SSE: connecting…</span>
+  <span class="repair-link" id="pair-open" role="button" tabindex="0"
+        title="Re-pair the venue session with Chrome">⚑ RE-PAIR VENUE</span>
+</footer>
+
+<!-- ============ VENUE PAIRING: shown until a session exists ============ -->
+<div class="pair-veil" id="pair-veil" hidden>
+  <div class="pair-card">
+    <div class="pair-banner">╔══════════════════════════════════════╗<br>║ VENUE SESSION REQUIRED&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;║<br>╚══════════════════════════════════════╝</div>
+    <h2>CYBERTRADE // NEON PROTOCOL — PAIR THE VENUE</h2>
+    <p class="pair-lede">
+      This build trades <b>LIVE</b> at Quotex and needs a venue session before
+      anything can boot. Pair one with Chrome: sign in and solve the CAPTCHA
+      yourself — this terminal only reads the <code>sessionid</code> cookie
+      Chrome hands back over localhost DevTools.
+    </p>
+
+    <div class="pair-status" id="pair-status">checking…</div>
+
+    <div class="pair-form">
+      <fieldset class="pair-purse">
+        <legend>WHICH PURSE?</legend>
+        <label><input type="radio" name="purse" value="practice">
+          PRACTICE BALANCE — real orders, demo money</label>
+        <label><input type="radio" name="purse" value="real">
+          REAL MONEY — real orders, real balance</label>
+      </fieldset>
+
+      <div class="pair-knobs">
+        <label>profile dir <input id="pair-profile" value="data/chrome-profile" spellcheck="false"></label>
+        <label>cdp port <input id="pair-port" value="9333" inputmode="numeric"></label>
+        <label>wait seconds <input id="pair-timeout" value="240" inputmode="numeric"></label>
+      </div>
+    </div>
+
+    <div class="pair-actions">
+      <button class="pair-btn primary" id="pair-start">⚑ CHROME LOGIN</button>
+      <button class="pair-btn" id="pair-cancel" disabled>✕ CANCEL</button>
+    </div>
+
+    <p class="pair-warn">
+      ⚠ Unofficial integration. Automation may violate Quotex's Terms of Service.
+      LIVE ONLY build — every order is real. See DISCLAIMER.md.
+    </p>
+  </div>
+</div>
+
+<script src="/static/js/charts.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>
