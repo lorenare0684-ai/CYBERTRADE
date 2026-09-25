@@ -1,6 +1,6 @@
 """Live asset catalog: server-synced payouts, tradability, and asset kinds.
 
-The venue publishes its instrument list over the ``instrument`` socket event;
+The venue publishes its instrument list over the ``instruments/list`` event;
 between syncs the static :data:`cybertrade.constants.ASSET_CATALOG` keeps
 payouts honest while a session is still connecting.
 """

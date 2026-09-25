@@ -19,7 +19,7 @@ import time
 from typing import Callable, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..exceptions import NetworkError, ProtocolError
+from ..exceptions import NetworkError, ProtocolError, RecvTimeoutError
 
 log = logging.getLogger("cybertrade.websocket")
 
@@ -283,7 +283,9 @@ class WebSocketConnection:
                 try:
                     chunk = self.sock.recv(_RECV_CHUNK)
                 except socket.timeout as exc:
-                    raise NetworkError("recv timeout") from exc
+                    # Quiet wire, not a dead one: the caller (socket
+                    # client's watchdog) decides dead-or-alive.
+                    raise RecvTimeoutError("recv timeout") from exc
                 except OSError as exc:
                     self.closed = True
                     raise NetworkError(f"recv failed: {exc}") from exc

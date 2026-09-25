@@ -42,7 +42,7 @@ from typing import Callable, Deque, Dict, Optional
 # Frame classes → minimum spacing (seconds) between sends of that class.
 CLASS_GAPS = {
     "order": 0.350,     # trades + sell-backs: human click cadence
-    "history": 0.120,   # candleHistory / instruments: chart-refresh cadence
+    "history": 0.120,   # history/load / instruments: chart-refresh cadence
     "poll": 0.120,      # balance / portfolio pulls share the history gate
     "frame": 0.040,     # everything else (subscribe, change_balance, …)
 }
@@ -51,6 +51,7 @@ CLASS_GAPS = {
 SESSION_MARKERS = (
     "invalid session",
     "session expired",
+    "authorization/reject",
     "unauthorized",
     "not authorized",
     "access denied",

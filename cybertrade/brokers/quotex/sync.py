@@ -1,7 +1,7 @@
 """History warm-start: pull venue candles into local books before trading.
 
 Live strategies need indicator warmup before the first decision.  The
-``candleHistory`` round-trip fills :class:`QuotexAPI`'s cache; these helpers
+``history/load`` round-trip fills :class:`QuotexAPI`'s cache; these helpers
 convert that cache into the engine's series books.  Everything is
 failure-tolerant — a slow venue delays warmup, it never blocks boot forever.
 """

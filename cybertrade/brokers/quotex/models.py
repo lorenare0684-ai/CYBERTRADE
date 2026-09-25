@@ -18,19 +18,30 @@ class QXBalance:
     demo: bool = True
 
     @classmethod
-    def from_payload(cls, payload: Any) -> "QXBalance":
+    def from_payload(cls, payload: Any, demo: bool = True) -> "QXBalance":
         if isinstance(payload, (int, float)):
             return cls(balance=float(payload))
         if isinstance(payload, (list, tuple)) and payload and isinstance(payload[0], (int, float)):
             return cls(balance=float(payload[0]))
         data = payload if isinstance(payload, dict) else {}
-        kind = str(dig(data, "data.accountType", dig(data, "accountType", "PRACTICE")))
+        if "demoBalance" in data or "liveBalance" in data:
+            # the venue's own push shape — pick the active purse
+            balance = float(data.get("demoBalance" if demo else "liveBalance") or 0.0)
+            kind = "PRACTICE" if demo else "REAL"
+        else:
+            kind = str(dig(data, "data.accountType", dig(data, "accountType", "PRACTICE")))
+            balance = float(dig(data, "data.balance", dig(data, "balance", 0.0)) or 0.0)
+            demo = kind.upper() != "REAL"
+        user_id = str(
+            dig(data, "userId", dig(data, "user_id",
+                dig(data, "data.userId", dig(data, "id", "")))) or ""
+        )
         return cls(
             account_type=kind,
-            balance=float(dig(data, "data.balance", dig(data, "balance", 0.0)) or 0.0),
+            balance=balance,
             currency=str(dig(data, "data.currency", dig(data, "currency", "USD"))),
-            user_id=str(dig(data, "data.userId", dig(data, "userId", ""))),
-            demo=kind.upper() != "REAL",
+            user_id=user_id,
+            demo=demo,
         )
 
 
@@ -94,14 +105,18 @@ class QXCandle:
                 volume=float(payload[5]) if len(payload) > 5 else 0.0,
             )
         data = payload if isinstance(payload, dict) else {}
+        ts = dig(data, "time", dig(data, "t",
+              dig(data, "timestamp", dig(data, "index", dig(data, "ts", 0)))))
         return cls(
             asset=asset,
-            open_ts=int(dig(data, "time", dig(data, "t", 0))),
+            open_ts=int(ts or 0),
             open=float(dig(data, "open", dig(data, "o", 0.0))),
             high=float(dig(data, "high", dig(data, "h", 0.0))),
             low=float(dig(data, "low", dig(data, "l", 0.0))),
             close=float(dig(data, "close", dig(data, "c", 0.0))),
-            timeframe_seconds=int(dig(data, "timeframe", tf) or tf),
+            timeframe_seconds=int(
+                dig(data, "timeframe", dig(data, "period", dig(data, "tf", tf))) or tf
+            ),
             volume=float(dig(data, "volume", dig(data, "v", 0.0)) or 0.0),
         )
 

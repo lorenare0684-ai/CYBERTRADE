@@ -52,10 +52,11 @@ Login robustness notes (all implemented, all covered by tests):
   instead of blaming the password.
 - **Pasted frames** — `set_ssid` unwraps a copied
   `42["authorization",{"session":"…",…}]` frame down to the token.
-- **Explicit rejection** — a venue `invalid session` / `unauthorized` error
-  during authorization raises `BrokerAuthError` immediately (re-pair hint
-  included) instead of proceeding as a fake-live login; the first data
-  event counts as implicit authorization so healthy connects return fast.
+- **Explicit rejection** — `authorization/reject` (or an `invalid session` /
+  `unauthorized` error) during authorization raises `BrokerAuthError`
+  immediately (re-pair hint included) instead of proceeding as a fake-live
+  login; `s_authorization` (or the first data event) counts as
+  authorization so healthy connects return fast.
 - **Pairing capture** — Chrome pairing keeps *every* venue cookie
   (`sessionid` first, CF clearance included) for the websocket handshake,
   accepts all venue front doors (`qxbroker.com` / `quotex.com` /
@@ -82,14 +83,17 @@ Socket.IO packet grammar (`<type>[namespace,][ack-id,]<json>`):
 | `2`  | event (e.g. `42["name",{...}]`) |
 | `3`  | ack |
 | `4`  | error (e.g. `44{"message":"..."}`) |
+| `5`/`6` | binary event / ack: `451-["name",{"_placeholder":true,"num":0}]`, then the JSON payload as raw binary frame(s) |
 
 ## 4. Authentication frame (confirmed shape)
 
 ```json
-42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0}]
+42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0,"isFastHistory":true}]
 ```
 
-`isDemo: 1` selects the **PRACTICE** purse, `0` the REAL purse.
+`isDemo: 1` selects the **PRACTICE** purse, `0` the REAL purse.  The venue
+confirms with an `s_authorization` event and refuses with
+`authorization/reject` (fail fast, re-pair — never retry).
 
 ## 5. Trading frames
 
@@ -123,48 +127,79 @@ Socket.IO packet grammar (`<type>[namespace,][ack-id,]<json>`):
 42["sellOption",{"id":"<orderId>"}>
 ```
 
-### Balance & purse switching
+### Purse switching (balances arrive pushed — there is no balance query)
 
 ```json
-42["balance",{}]
-42["changeBalance",{"accountType":"PRACTICE"}]   // or "REAL"
+42["account/change",{"demo":1,"tournamentId":0}]   // demo:0 = REAL purse
 ```
 
-### Market data
+### Session bootstrap (what the trade tab sends on every open)
 
 ```json
-42["candleHistory",{"asset":"EURUSD_otc","timeframe":60,"count":200,"requestId":"..."}]
-42["subscribeCandle",{"asset":"EURUSD_otc","timeframe":60}]
-42["unsubscribeCandle",{"asset":"EURUSD_otc","timeframe":60}]
+42["indicator/list"]
+42["drawing/load"]
+42["pending/list"]
+42["chart_notification/get"]
+42["instruments/get"]
+```
+
+### Application heartbeat (~every 5s — the venue expects it)
+
+```json
+42["tick"]
+```
+
+### Market data — the subscribe trio + history
+
+```json
+42["instruments/update",{"asset":"EURUSD_otc","period":60}]
+42["chart_notification/get",{"asset":"EURUSD_otc","version":"1.0.0"}]
+42["depth/follow","EURUSD_otc"]
+42["history/load",{"asset":"EURUSD_otc","index":7,"time":1700000000,"offset":12000,"period":60}]
+42["instruments/unsubscribe",{"asset":"EURUSD_otc"}]
+42["depth/unfollow","EURUSD_otc"]
 42["portfolio",{}]
 ```
+
+`history/load`: `time` = window end (epoch seconds), `offset` = lookback in
+*seconds* (`count × period`), `index` echoes back for correlation.  Any one
+of the subscribe trio alone leaves the wire silent — all three, every time.
+Older community docs named `subscribeCandle` / `candleHistory` /
+`changeBalance` / `instrument` frames; the live venue never answers them.
 
 ## 6. Server → client events (parsed defensively)
 
 | Event | Payload (community shapes) |
 |-------|----------------------------|
-| `candleHistory` / `candles` | `{"asset":..., "candles":[{t,o,h,l,c}\| [t,o,c,h,l] ...]}` |
-| `tick` / `quote` | `{"asset","price","ts"}` or `{"s","p","t"}` |
-| `balance` / `balanceUpdate` | `{"balance":..., "accountType":"PRACTICE"}` |
+| `candles` (legacy tolerance) | `{"asset":..., "candles":[{t,o,h,l,c}\| [t,o,c,h,l] ...]}` |
+| `s_authorization` / `authorization/reject` | auth accepted / refused |
+| `instruments/list` (binary) | positional rows `[id, symbol, name, type, ?, payment, …, open@14, …, turbo@18, 24H/1M/5M@-10/-9/-8]` |
+| `history/load` / `history/list/v2` (binary) | `{asset, index, candles: [[ts, price, direction], …]}` — ticks, aggregated client-side into OHLC (forming bar dropped) |
+| `candle-generated` | `{asset, period, index, open, high, low, close}` — a closed bar |
+| bare quote batch (no event) | `[[asset, ts, price, direction], …]` |
+| `balance` | `{demoBalance, liveBalance, …}` — pick by active purse |
 | `order` / `orderResult` | `{"id","requestId","status","openPrice","closePrice","profit"}` |
 | `profit` | settlement PnL update |
 | `notification` / `error` | human-readable strings/dicts |
 
-All parsers live in `cybertrade/brokers/quotex/protocol.py` and accept both
-dict and list envelope variants (`QXCandle.from_payload` etc.).
+All parsers live in `cybertrade/brokers/quotex/protocol.py`.  Binary
+attachments (`451-` + raw frames, occasionally base64 `BFtb…`) are
+correlated with their placeholder in the socket client; legacy
+`candleHistory` / `tick`-event / dict shapes are still tolerated.
 
 ## 6b. Instrument catalog + history sync (implemented)
 
-- `42["instrument",{}]` requests the instrument listing; the reply event
-  (`instrument` / `instruments` / `assets_list` / `assetList` / `assets` /
-  `asset_list` — see `INSTRUMENT_EVENTS`) is absorbed by
-  `protocol.parse_instruments`, which tolerates four community shapes:
+- `42["instruments/get"]` requests the instrument listing; the reply
+  (`instruments/list` first, then legacy `instrument` / `instruments` /
+  `assets_list` / `assetList` / `assets` / `asset_list` — see
+  `INSTRUMENT_EVENTS`) is absorbed by `protocol.parse_instruments`, which
+  reads the live positional rows (`[id, symbol, name, type, ?, payment, …,
+  open@14, …]`) and still tolerates four legacy community shapes:
   `{name: {…}}` mappings, `{asset|name|symbol, …}` rows, `[name, {…}]` pairs,
   and nested lists wrapping any of them.  Payouts accept `payout`/`profit` /
   `payoutPercent` (fraction or percent), open state `open`/`isOpen`/`active`,
   and asset class via `type`/`kind` into `AssetCatalog`
-  (`brokers/quotex/catalog.py`).  Reference clients confirm the venue rows
-  carry at least `{symbol, id}` (A11ksa/API-Quotex `update_assets_from_api`).
+  (`brokers/quotex/catalog.py`).
 - Detection runs three ways: the live feed requests the listing on start
   and on every reconnect; any quote for an unknown symbol registers it
   (kind inferred, payout static); and the engine adopts every listing row
@@ -176,19 +211,26 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
   that keeps payouts honest while a session is still connecting.  Boards
   show LIVE once a venue listing lands, STATIC before that.
 - `cybertrade quotex assets` prints the merged board grouped by asset class.
-- History warm-start: `candleHistory` fills `QuotexAPI`'s cache;
+- History warm-start: `history/load` fills `QuotexAPI`'s cache (tick rows
+  aggregated into OHLC, forming bar dropped);
   `brokers/quotex/sync.py` pushes it into `CandleSeries`/`HistoryBuffer`
   books (dupe-safe, failure-tolerant) so live strategies get indicator warmup
   exactly like the live feed does.
-- Ticks tolerate dict rows, bare price scalars, and `[asset, price, ts?]`
-  rows; balances tolerate scalar pushes.
+- Quotes arrive as bare `[[asset, ts, price, direction]]` batches; the
+  dispatcher also tolerates legacy dict rows, bare price scalars, and
+  `[asset, price, ts?]` rows.  Balances tolerate scalar pushes.
 
 ## 7. Known gaps / drift risks
 
 1. **Cloudflare** — headless `api/signin` may return an HTML challenge; fall
    back to browser-derived `ssid`.
-2. **Event renames** — `buyOption` → `orders/open` already happened once.
-   `cybertrade/brokers/quotex/constants.py` keeps aliases; override there.
+2. **Event renames** — `buyOption` → `orders/open` happened once, and the
+   whole camelCase market-data vocabulary (`subscribeCandle` /
+   `candleHistory` / `changeBalance`) turned out to be unanswered by the
+   live venue (Sep-2026 realignment to `instruments/update` /
+   `history/load` / `account/change`, proven against pyquotex master).
+   `cybertrade/brokers/quotex/constants.py` keeps the live names plus
+   legacy tolerance; override there.
 3. **Candle envelope** — at least three historical shapes exist; the parser
    absorbs `{"candles":[...]}`, `{"data":[...]}` and bare lists.
 4. **Settlement truth** — always reconcile final PnL from venue `orderResult`
@@ -262,8 +304,8 @@ none of which exist here by standing rule.
 | `ghost.Pacekeeper` | Every venue frame rides class gates: orders get jittered think-time (uniform 0.7–1.4 × `order_think_ms`), a hard `order_min_gap_ms`, and a sliding `max_orders_per_min` window; history/poll and generic frames get their own smaller gaps. A bot signature is *timing* — 12 orders/sec, metronomic think-time — so ours is deliberately sloppy. |
 | `ghost.parity_headers` | HTTP + WS handshakes carry the paired browser's truthful extras (UA, `Accept-Language`, no-cache). `Sec-WebSocket-Extensions` is **omitted, never faked** — advertising a capability we do not implement is itself a fingerprint. |
 | `ghost.reconnect_delay` | Exponential backoff (2s ×1.8, 60s cap) with ±20–25% jitter so reconnects never land on a fixed grid. |
-| `ghost.is_session_fault` | Venue errors meaning "session dead" (`invalid session`, `unauthorized`, `cloudflare`, `captcha`, …) set `session_stale`, log CRITICAL with a `cybertrade quotex login` re-pair hint, and emit `session_stale` — never blind retries. |
-| Subscriptions registry | `subscribeCandle` frames are remembered and replayed after *any* reconnect path (client-level `_try_reconnected` hook **or** supervisor-level `api.connect()`), so the chart stream restores itself. |
+| `ghost.is_session_fault` | Venue errors meaning "session dead" (`authorization/reject`, `invalid session`, `unauthorized`, `cloudflare`, `captcha`, …) set `session_stale`, log CRITICAL with a `cybertrade quotex login` re-pair hint, and emit `session_stale` — never blind retries. |
+| Subscriptions registry | The subscribe trio (`instruments/update` + `chart_notification/get` + `depth/follow`) is remembered and replayed after *any* reconnect path (client-level `_try_reconnected` hook **or** supervisor-level `api.connect()`), so the chart stream restores itself. A `42["tick"]` heartbeat every ~5s plus the post-auth bootstrap complete the browser-identical footprint. |
 | `sync.backfill_gaps` | The live feed fetches **only missing bars** (chart-like behaviour) instead of re-pulling full history on a fixed grid; reconnect events trigger an immediate gap sweep. |
 | `adapter.reconcile_venue` | Boot pulls the portfolio wire and adopts venue-open contracts (id + asset + plausible expiry) this process didn't place — crash restarts stay reconciled; metadata-less orphans are logged for manual review, never guessed. |
 

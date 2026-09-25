@@ -60,6 +60,16 @@ class NetworkError(CybertradeError):
     """Low-level network failure."""
 
 
+class RecvTimeoutError(NetworkError):
+    """A socket read timed out — the wire is quiet, not necessarily dead.
+
+    Raised only by the transport; the socket client's watchdog owns the
+    dead-or-alive decision (a quiet wire must never trigger a reconnect
+    by itself — Engine.IO pings legitimately arrive slower than the read
+    timeout on an idle-but-healthy connection).
+    """
+
+
 class OrderRejected(ExecutionError):
     """Broker refused an order."""
 

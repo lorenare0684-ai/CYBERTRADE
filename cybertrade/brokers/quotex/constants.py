@@ -22,33 +22,50 @@ ORIGIN = "https://qxbroker.com"
 REFERER = "https://qxbroker.com/en/trade"
 
 # Socket.IO event names ------------------------------------------------------
+# Provenance: live-broker captures mirrored by cleitonleonel/pyquotex
+# (master, Sep-2026 — offline replay tests pin these shapes) and
+# corroborated by zagmi/qxbroker + usmanch96/quotex-historical-data.
+# CamelCase "subscribeCandle"/"candleHistory"/"changeBalance" names from
+# older community docs are NOT answered by the venue — they are gone.
 EV_AUTHORIZATION = "authorization"
-# Alias kept so every layer spells the auth event one way — the socket
-# reader matches server acks against this (a misspelled attribute here once
-# killed the reader thread on the first venue frame).
-EV_AUTH_SUCCESS = EV_AUTHORIZATION
+EV_TICK = "tick"                                  # app heartbeat, ~every 5s
+EV_INDICATOR_LIST = "indicator/list"              # post-auth bootstrap…
+EV_DRAWING_LOAD = "drawing/load"
+EV_PENDING_LIST = "pending/list"
+EV_CHART_NOTIFICATION_GET = "chart_notification/get"
+EV_INSTRUMENTS_GET = "instruments/get"            # …request the listing
+EV_INSTRUMENTS_UPDATE = "instruments/update"      # realtime subscribe
+EV_INSTRUMENTS_UNSUBSCRIBE = "instruments/unsubscribe"
+EV_DEPTH_FOLLOW = "depth/follow"
+EV_DEPTH_UNFOLLOW = "depth/unfollow"
+EV_HISTORY_LOAD = "history/load"                  # candle history request
+EV_HISTORY_SUBSCRIBE_ALL = "history/subscribe_all"
+EV_ACCOUNT_CHANGE = "account/change"              # switch demo/real purse
 EV_ORDERS_OPEN = "orders/open"          # place a binary option
 EV_ORDER_OPEN_ALT = "buyOption"         # legacy name used by older clients
 EV_ORDERS_CANCEL = "orders/close"       # early sale / cancel window
 EV_SELL_OPTION = "sellOption"
-EV_BALANCE = "balance"
-EV_CHANGE_BALANCE = "changeBalance"     # switch demo/real purse
-EV_CANDLE_HISTORY = "candleHistory"
-EV_CANDLE = "candle"
-EV_SUBSCRIBE_CANDLE = "subscribeCandle"
-EV_UNSUBSCRIBE_CANDLE = "unsubscribeCandle"
-EV_INSTRUMENT = "instrument"
 EV_PORTFOLIO = "portfolio"
 EV_PROFIT = "profit"
 EV_NOTIFICATION = "notification"
 EV_USER_DATA = "userData"
 
 # Known server → client events (parsed defensively)
+SV_S_AUTHORIZATION = "s_authorization"  # auth accepted (the real ack)
+SV_AUTH_REJECT = "authorization/reject"  # auth refused — re-pair, don't retry
+SV_AUTH_SUCCESS = SV_S_AUTHORIZATION
+SV_INSTRUMENTS_LIST = "instruments/list"  # positional rows, binary attachment
+SV_HISTORY_LOAD = "history/load"        # history reply (binary attachment)
+SV_HISTORY_LIST_V2 = "history/list/v2"  # pushed candle batches (binary)
+SV_CANDLE_GENERATED = "candle-generated"  # live closed-candle push
+SV_TRADER_HISTORY = "trader/history"
+SV_SENTIMENT = "sentiment"
+SV_QUOTES = "quotes"  # synthesized: bare [[asset, ts, price, dir]] batches
 SV_CANDLES = "candles"
-SV_CANDLE_HISTORY = "candleHistory"
-SV_CANDLE = "candle"
-SV_TICK = "tick"
-SV_BALANCE = "balance"
+SV_CANDLE_HISTORY = "candleHistory"  # legacy tolerance only
+SV_CANDLE = "candle"                 # legacy tolerance only
+SV_TICK = "tick"                     # legacy tolerance only
+SV_BALANCE = "balance"               # {demoBalance, liveBalance, …}
 SV_BALANCE_UPDATE = "balanceUpdate"
 SV_ORDER = "order"
 SV_ORDERS = "orders"
@@ -58,6 +75,7 @@ SV_ASSETS_LIST = "assets_list"
 # Every spelling the instrument listing has been seen under (community
 # clients disagree; the dispatcher accepts them all).
 INSTRUMENT_EVENTS = (
+    "instruments/list",
     "instrument",
     "instruments",
     "assets_list",
@@ -68,7 +86,6 @@ INSTRUMENT_EVENTS = (
 SV_PROFIT = "profit"
 SV_ERROR = "error"
 SV_NOTIFICATION = "notification"
-SV_AUTH_SUCCESS = "authorization"
 
 # Option types (optionType field on orders/open)
 OPTION_TYPE_DIGITAL = 1
@@ -105,21 +122,36 @@ __all__ = [
     "ORIGIN",
     "REFERER",
     "EV_AUTHORIZATION",
-    "EV_AUTH_SUCCESS",
+    "EV_TICK",
+    "EV_INDICATOR_LIST",
+    "EV_DRAWING_LOAD",
+    "EV_PENDING_LIST",
+    "EV_CHART_NOTIFICATION_GET",
+    "EV_INSTRUMENTS_GET",
+    "EV_INSTRUMENTS_UPDATE",
+    "EV_INSTRUMENTS_UNSUBSCRIBE",
+    "EV_DEPTH_FOLLOW",
+    "EV_DEPTH_UNFOLLOW",
+    "EV_HISTORY_LOAD",
+    "EV_HISTORY_SUBSCRIBE_ALL",
+    "EV_ACCOUNT_CHANGE",
     "EV_ORDERS_OPEN",
     "EV_ORDER_OPEN_ALT",
     "EV_ORDERS_CANCEL",
     "EV_SELL_OPTION",
-    "EV_BALANCE",
-    "EV_CHANGE_BALANCE",
-    "EV_CANDLE_HISTORY",
-    "EV_CANDLE",
-    "EV_SUBSCRIBE_CANDLE",
-    "EV_UNSUBSCRIBE_CANDLE",
-    "EV_INSTRUMENT",
     "EV_PORTFOLIO",
     "EV_PROFIT",
     "EV_NOTIFICATION",
+    "SV_S_AUTHORIZATION",
+    "SV_AUTH_REJECT",
+    "SV_AUTH_SUCCESS",
+    "SV_INSTRUMENTS_LIST",
+    "SV_HISTORY_LOAD",
+    "SV_HISTORY_LIST_V2",
+    "SV_CANDLE_GENERATED",
+    "SV_TRADER_HISTORY",
+    "SV_SENTIMENT",
+    "SV_QUOTES",
     "OPTION_TYPE_DIGITAL",
     "OPTION_TYPE_BINARY",
     "ACCOUNT_DEMO",

@@ -195,8 +195,9 @@ class TestApiGhostBehaviour(unittest.TestCase):
         api.socket.sent.clear()
         api._on_reconnected()
         wires = "".join(api.socket.sent)
-        self.assertEqual(wires.count("subscribeCandle"), 2)
-        self.assertIn("balance", wires)
+        self.assertEqual(wires.count("instruments/update"), 2)
+        self.assertEqual(wires.count("depth/follow"), 2)
+        self.assertIn("instruments/get", wires)  # bootstrap replays too
         self.assertIn("reconnected", events)
         self.assertEqual(api.stats()["subscriptions"], 2)
 

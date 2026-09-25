@@ -35,19 +35,26 @@ from .client import QuotexSocket
 from .ghost import Pacekeeper, is_session_fault, parity_headers
 from .models import QXAsset, QXBalance, QXCandle, QXOrderRequest, QXOrderResult, QXSession
 from .protocol import (
-    build_balance,
     build_candle_history,
     build_change_balance,
+    build_chart_notification,
+    build_depth_follow,
+    build_depth_unfollow,
+    build_drawing_load,
+    build_indicator_list,
     build_instruments,
     build_order,
+    build_pending_list,
     build_portfolio,
     build_sell_option,
     build_subscribe_candles,
+    build_unsubscribe_candles,
     make_request_id,
     parse_balance,
     parse_candles,
     parse_order_result,
     parse_portfolio,
+    parse_quotes,
     parse_tick,
 )
 
@@ -184,6 +191,7 @@ class QuotexAPI:
         self._tick_handlers: List[Callable[[Tick], None]] = []
         # Phase-30: replayable candle subscriptions + session health.
         self._subs: Dict[Tuple[str, int], None] = {}
+        self._hist_tf: Dict[str, int] = {}
         self._session_stale = False
         # Set by the dispatcher on the first balance push — the cheapest
         # proof that the venue accepted the session (login verification
@@ -341,9 +349,9 @@ class QuotexAPI:
             )
         # Supervisor heals call api.connect() directly — replay here too so
         # either reconnect path restores the chart stream.
-        self._replay_subscriptions()
         self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
-        self.request_balance()
+        self._bootstrap_session()
+        self._replay_subscriptions()
         return True
 
     def wait_for_balance(self, timeout: float = 6.0) -> bool:
@@ -363,15 +371,45 @@ class QuotexAPI:
 
     # -- market data -------------------------------------------------------
     def subscribe(self, asset: str, timeframe_seconds: int = 60) -> None:
+        """Stream an asset: the venue needs the full subscribe trio.
+
+        ``instruments/update`` alone leaves the wire silent — the trade
+        tab always follows it with ``chart_notification/get`` and
+        ``depth/follow``, so we send all three, every time.
+        """
         self._subs[(asset, int(timeframe_seconds))] = None
         self._send(build_subscribe_candles(asset, timeframe_seconds), kind="frame")
+        self._send(build_chart_notification(asset), kind="frame")
+        self._send(build_depth_follow(asset), kind="frame")
+
+    def unsubscribe(self, asset: str, timeframe_seconds: int = 60) -> None:
+        self._subs.pop((asset, int(timeframe_seconds)), None)
+        try:
+            self._send(build_unsubscribe_candles(asset, timeframe_seconds), kind="frame")
+            self._send(build_depth_unfollow(asset), kind="frame")
+        except Exception as exc:  # noqa: BLE001 — unsubscribe is courtesy
+            log.debug("unsubscribe failed %s: %s", asset, exc)
+
+    def _bootstrap_session(self) -> None:
+        """Post-auth bootstrap: what the trade tab sends on every open."""
+        for label, wire in (
+            ("indicator/list", build_indicator_list()),
+            ("drawing/load", build_drawing_load()),
+            ("pending/list", build_pending_list()),
+            ("chart_notification/get", build_chart_notification()),
+            ("instruments/get", build_instruments()),
+        ):
+            try:
+                self._send(wire, kind="frame")
+            except Exception as exc:  # noqa: BLE001 — bootstrap is best-effort
+                log.debug("bootstrap %s failed: %s", label, exc)
 
     def _replay_subscriptions(self) -> int:
         """Re-send every candle subscription after a reconnect (Phase-30)."""
         sent = 0
         for asset, tf in list(self._subs.keys()):
             try:
-                self._send(build_subscribe_candles(asset, tf), kind="frame")
+                self.subscribe(asset, tf)
                 sent += 1
             except Exception as exc:  # noqa: BLE001
                 log.warning("resubscribe failed %s@%ss: %s", asset, tf, exc)
@@ -380,12 +418,12 @@ class QuotexAPI:
         return sent
 
     def _on_reconnected(self) -> None:
-        """Client-level reconnect hook: restore stream + session heartbeat."""
+        """Client-level reconnect hook: restore stream + session bootstrap."""
         try:
-            self._replay_subscriptions()
-            self.request_balance()
+            sent = self._replay_subscriptions()
+            self._bootstrap_session()
             self._emit("reconnected", self.stats())
-            log.info("venue wire restored — subscriptions replayed")
+            log.info("venue wire restored — replayed %d subscriptions", sent)
         except Exception as exc:  # noqa: BLE001
             log.warning("post-reconnect restore failed: %s", exc)
 
@@ -395,6 +433,12 @@ class QuotexAPI:
         key = (asset, timeframe_seconds)
         with self._lock:
             self._candles.setdefault(key, [])
+        # History only flows for subscribed assets (the chart subscribes
+        # before it ever asks), so make sure the trio went out first. The
+        # reply carries no timeframe, so remember what we asked for.
+        if key not in self._subs:
+            self.subscribe(asset, timeframe_seconds)
+        self._hist_tf[asset] = int(timeframe_seconds)
         self._send(build_candle_history(asset, timeframe_seconds, count), kind="history")
         deadline = time.time() + wait
         while time.time() < deadline:
@@ -428,7 +472,12 @@ class QuotexAPI:
 
     # -- account -----------------------------------------------------------
     def request_balance(self) -> QXBalance:
-        self._send(build_balance(), kind="poll")
+        """Freshest known balance — the venue pushes it, there is no query.
+
+        (Older community docs named a ``balance`` request frame; the live
+        venue never answered it. Balance pushes arrive after auth and
+        after every ``account/change``.)
+        """
         return self.balance
 
     def change_balance(self, account_type: str = C.ACCOUNT_DEMO) -> None:
@@ -508,49 +557,87 @@ class QuotexAPI:
             raise BrokerConnectionError("socket not connected")
         self.socket.send(wire)
 
+    def _handle_tick(self, asset: str, price: float, ts: int) -> None:
+        """One quote into the tick pipeline (books, discovery, handlers)."""
+        tick = Tick(asset=asset, price=price,
+                    ts=ts / 1000.0 if ts > 1e11 else float(ts))
+        discovered = None
+        with self._lock:
+            self._last_tick[asset] = tick
+            if asset not in self.assets and self.catalog.get(asset) is None:
+                # Quote-driven discovery: the venue sometimes streams
+                # quotes for assets its listing never named.  A bare
+                # sighting still joins the catalog (kind inferred,
+                # payout static) so the boards show everything alive.
+                from .catalog import infer_kind
+                from .models import QXAsset
+
+                discovered = QXAsset(
+                    name=asset, asset_id=asset,
+                    payout=self.catalog.payout_for(asset),
+                    open=True,
+                    is_otc=asset.endswith("_otc"),
+                    kind=infer_kind(asset))
+                self.assets[asset] = discovered
+                self.catalog.upsert(discovered)
+        if discovered is not None:
+            self._emit("instruments", [discovered])
+        for fn in list(self._tick_handlers):
+            try:
+                fn(tick)
+            except Exception:  # noqa: BLE001
+                pass
+        self._emit("tick", tick)
+
+    def _handle_live_candle(self, payload: Any) -> None:
+        """A ``candle-generated`` push: a closed bar, plus its closing tick."""
+        if not isinstance(payload, dict):
+            return
+        asset = str(payload.get("asset") or "")
+        if not asset:
+            return
+        tf = int(payload.get("period") or self._hist_tf.get(asset, 0) or 60)
+        qc = QXCandle.from_payload(asset, payload, tf)
+        if qc.open > 0 and qc.close > 0:
+            self._ingest_candle(qc)
+        if qc.close > 0:
+            try:
+                ts = int(qc.open_ts)
+            except (TypeError, ValueError):
+                ts = 0
+            self._handle_tick(asset, qc.close, ts)
+
     def _on_socket_event(self, name: str, args: List[Any]) -> None:
         """Central dispatcher — tolerant of unknown/renamed venue events."""
-        if name in (C.SV_TICK, "quotes", "quote", C.SV_CANDLE):
+        if name == C.SV_QUOTES:
+            for asset, price, ts in parse_quotes(args[0] if args else []):
+                self._handle_tick(asset, price, ts)
+        elif name == C.SV_CANDLE_GENERATED:
+            self._handle_live_candle(args[0] if args else {})
+        elif name == C.SV_S_AUTHORIZATION:
+            log.info("venue authorized the session")
+            self._emit("authorized", {})
+        elif name in (C.SV_TICK, "quote", C.SV_CANDLE):
             asset, price, ts = parse_tick(args)
             if asset and price > 0:
-                tick = Tick(asset=asset, price=price, ts=ts / 1000.0 if ts > 1e11 else float(ts))
-                discovered = None
-                with self._lock:
-                    self._last_tick[asset] = tick
-                    if asset not in self.assets and self.catalog.get(asset) is None:
-                        # Quote-driven discovery: the venue sometimes streams
-                        # quotes for assets its listing never named.  A bare
-                        # sighting still joins the catalog (kind inferred,
-                        # payout static) so the boards show everything alive.
-                        from .catalog import infer_kind
-                        from .models import QXAsset
+                self._handle_tick(asset, price, ts)
 
-                        discovered = QXAsset(
-                            name=asset, asset_id=asset,
-                            payout=self.catalog.payout_for(asset),
-                            open=True,
-                            is_otc=asset.endswith("_otc"),
-                            kind=infer_kind(asset))
-                        self.assets[asset] = discovered
-                        self.catalog.upsert(discovered)
-                if discovered is not None:
-                    self._emit("instruments", [discovered])
-                for fn in list(self._tick_handlers):
-                    try:
-                        fn(tick)
-                    except Exception:  # noqa: BLE001
-                        pass
-                self._emit("tick", tick)
-
-        elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES):
+        elif name in (C.SV_CANDLE_HISTORY, C.SV_CANDLES, C.SV_HISTORY_LOAD,
+                      C.SV_HISTORY_LIST_V2):
             asset = str(dig(args[0] if args else {}, "asset", "")) if args else ""
-            qlist = parse_candles(asset, args)
+            tf = self._hist_tf.get(asset, 60) if asset else 60
+            qlist = parse_candles(asset, args, tf)
             for qc in qlist:
                 self._ingest_candle(qc)
 
         elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
-            self.balance = parse_balance(args)
+            self.balance = parse_balance(args, demo=self.demo)
             self._balance_seen.set()
+            if self.balance.user_id and not self.session.user_id:
+                # A paired session carries no identity of its own — adopt
+                # the venue-confirmed account id for continuity scoping.
+                self.session.user_id = self.balance.user_id
+                log.info("venue confirmed account %s", self.balance.user_id)
             self._emit("balance", self.balance)
 
         elif name in C.INSTRUMENT_EVENTS:
@@ -582,7 +669,7 @@ class QuotexAPI:
                             self._orders[key] = row
                 self._emit("portfolio", rows)
 
-        elif name in (C.SV_ERROR, "error"):
+        elif name in (C.SV_ERROR, "error", C.SV_AUTH_REJECT):
             from .protocol import parse_error
 
             msg = parse_error(args)
