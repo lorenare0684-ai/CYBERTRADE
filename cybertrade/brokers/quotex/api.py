@@ -794,12 +794,17 @@ class QuotexAPI:
 
     def _on_socket_event(self, name: str, args: List[Any]) -> None:
         """Central dispatcher — tolerant of unknown/renamed venue events."""
-        if name == C.SV_QUOTES:
+        if name in C.QUOTE_EVENTS:
             rows = list(parse_quotes(args[0] if args else []))
             if rows:
                 self._note_data(name)
             for asset, price, ts in rows:
                 self._handle_tick(asset, price, ts)
+        elif name == C.SV_DEPTH_CHANGE:
+            # order-book depth for a followed asset — proof the venue
+            # streams to us, though not a price
+            self._note_data(name)
+            self._emit("depth", args[0] if args else [])
         elif name == C.SV_CANDLE_GENERATED:
             self._note_data(name)
             self._handle_live_candle(args[0] if args else {})

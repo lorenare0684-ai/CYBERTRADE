@@ -67,6 +67,9 @@ SV_CANDLE_GENERATED = "candle-generated"  # live closed-candle push
 SV_TRADER_HISTORY = "trader/history"
 SV_SENTIMENT = "sentiment"
 SV_QUOTES = "quotes"  # synthesized: bare [[asset, ts, price, dir]] batches
+SV_QUOTES_STREAM = "quotes/stream"  # live: 451-["quotes/stream"] + [[asset, ts, price, dir]]
+SV_DEPTH_CHANGE = "depth/change"    # live: 451-["depth/change"] + [[asset, depth]]
+QUOTE_EVENTS = (SV_QUOTES, SV_QUOTES_STREAM)
 SV_CANDLES = "candles"
 SV_CANDLE_HISTORY = "candleHistory"  # legacy tolerance only
 SV_CANDLE = "candle"                 # legacy tolerance only
@@ -183,6 +186,9 @@ __all__ = [
     "SV_TRADER_HISTORY",
     "SV_SENTIMENT",
     "SV_QUOTES",
+    "SV_QUOTES_STREAM",
+    "SV_DEPTH_CHANGE",
+    "QUOTE_EVENTS",
     "SV_S_ORDERS_OPEN",
     "SV_ORDERS_OPENED",
     "SV_S_ORDERS_CLOSE",

@@ -28,7 +28,6 @@ from ...exceptions import (
 from ...network.socketio import (
     EngineIOSession,
     SocketPacket,
-    encode_connect,
     encode_pong,
 )
 from ...network.websocket import OP_BINARY, WebSocketConnection
@@ -51,10 +50,24 @@ EventHandler = Callable[[str, List[Any]], None]
 _MISS: Any = object()
 
 
+_EIO_TYPE_BYTES = frozenset(range(0, 7))  # engine.io packet types 0..6
+
+
 def _decode_binary_json(payload: bytes) -> Any:
-    """Best-effort JSON from a binary frame (raw or base64-wrapped)."""
+    """JSON from an Engine.IO v3 binary attachment (raw or base64-wrapped).
+
+    Over websocket, Engine.IO v3 prefixes every binary frame with a single
+    packet-type byte (``0x04`` = message) before the Socket.IO attachment,
+    so the wire carries ``\x04[["EURGBP",…]]`` / ``\x04{"liveBalance":…}``.
+    That byte must be stripped before parsing — with it in place every
+    attachment (quotes, instruments, balance) fails to decode, and the
+    session looks authorized-but-starving.
+    """
+    raw = bytes(payload)
+    if raw[:1] and raw[0] in _EIO_TYPE_BYTES and raw[1:2] in (b"[", b"{", b'"'):
+        raw = raw[1:]
     try:
-        text = bytes(payload).decode("utf-8")
+        text = raw.decode("utf-8")
     except ValueError:
         return _MISS
     obj = loads(text, default=_MISS)
@@ -63,10 +76,10 @@ def _decode_binary_json(payload: bytes) -> Any:
     # Some transports base64 the attachment ("BFtb…" == "\\x04[[…" — a
     # quote batch; "\\x04{" would be a dict payload instead).
     try:
-        raw = base64.b64decode(text.strip())
-        if raw[:1] == b"\x04":
-            raw = raw[1:]
-        return loads(raw.decode("utf-8"), default=_MISS)
+        b64 = base64.b64decode(text.strip(), validate=True)
+        if b64[:1] and b64[0] in _EIO_TYPE_BYTES:
+            b64 = b64[1:]
+        return loads(b64.decode("utf-8"), default=_MISS)
     except Exception:  # noqa: BLE001 — undecodable is routine
         return _MISS
 
@@ -173,7 +186,10 @@ class QuotexSocket:
             time.sleep(0.02)
         if not self.eio.sid:
             raise BrokerConnectionError("engine.io handshake timeout")
-        self._raw_send(encode_connect())
+        # No ``40`` from us: with EIO=3 the server auto-connects the
+        # default namespace (socket.io-client v2 and pyquotex never send
+        # it); a client CONNECT adds a *second* server-side socket on the
+        # same transport — a structural difference from the trade tab.
         self._connected.set()
         if authorize:
             self.authorize()
@@ -361,8 +377,8 @@ class QuotexSocket:
                 need = is_placeholder(args)
                 if need is not None:
                     if self._pending_bin is not None:
-                        log.debug("drop stale binary placeholder %s",
-                                  self._pending_bin.get("event"))
+                        self._note_drop("stale binary placeholder",
+                                        str(self._pending_bin.get("event")))
                     self._pending_bin = {"event": name or "binary",
                                          "need": need, "got": []}
                     continue
@@ -423,7 +439,8 @@ class QuotexSocket:
         """Route a binary websocket frame (Socket.IO attachments)."""
         obj = _decode_binary_json(payload)
         if obj is _MISS:
-            log.debug("drop undecodable binary frame (%d bytes)", len(payload))
+            self._note_drop("undecodable binary attachment",
+                            f"{len(payload)}B {bytes(payload[:48])!r}")
             return
         pend = self._pending_bin
         if pend is not None:
@@ -586,7 +603,6 @@ class QuotexSocket:
                     time.sleep(0.02)
                 if not self.eio.sid:
                     continue
-                self._raw_send(encode_connect())
                 self.authorize(timeout=5.0)
                 self._connected.set()
                 self.was_connected = True

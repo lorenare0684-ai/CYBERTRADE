@@ -229,7 +229,8 @@ Older community docs named `subscribeCandle` / `candleHistory` /
 | `instruments/list` (binary) | positional rows `[id, symbol, name, type, ?, payment, …, open@14, …, turbo@18, 24H/1M/5M@-10/-9/-8]` |
 | `history/load` / `history/list/v2` (binary) | `{asset, index, candles: [[ts, price, direction], …]}` — ticks, aggregated client-side into OHLC (forming bar dropped) |
 | `candle-generated` | `{asset, period, index, open, high, low, close}` — a closed bar |
-| bare quote batch (no event) | `[[asset, ts, price, direction], …]` |
+| `quotes/stream` (binary) | `[[asset, ts, price, direction], …]` — the live quote push (bare batches without an event name are tolerated too) |
+| `depth/change` (binary) | `[[asset, depth]]` — book depth for a followed asset (counts as "venue streams to us") |
 | `balance` | `{demoBalance, liveBalance, …}` — pick by active purse |
 | `s_orders/open` / `orders/opened` (binary) | order **ack**: `{id (ticket), requestId, asset, amount, command, openPrice, percentProfit, closeTimestamp, …}` |
 | `deals` / `orders/closed` / `s_orders/close` (binary) | **settlement** rows `{id, profit, closePrice, …}` — sign of `profit` is the verdict |
@@ -238,8 +239,17 @@ Older community docs named `subscribeCandle` / `candleHistory` /
 | `notification` / `error` | human-readable strings/dicts |
 
 All parsers live in `cybertrade/brokers/quotex/protocol.py`.  Binary
-attachments (`451-` + raw frames, occasionally base64 `BFtb…`) are
-correlated with their placeholder in the socket client; legacy
+attachments (`451-` placeholder + a websocket **binary** frame) are
+correlated with their placeholder in the socket client.  **Engine.IO v3
+prefixes every binary frame with the packet-type byte `0x04`** — the
+attachment on the wire is `\x04[["EURGBP",…]]`, and the decoder strips
+that byte (raw or base64 `BFtb…`) before parsing.  Missing that strip
+made every attachment undecodable and the session look
+"authorized but starving" (Sep-2026 live capture).  Undecodable
+attachments and stale placeholders now warn (sampled) instead of
+vanishing at debug level.  The client sends **no `40`** after the
+handshake: with `EIO=3` the server auto-connects `/` (browser and
+pyquotex parity); legacy
 `candleHistory` / `tick`-event / dict shapes are still tolerated.
 
 ## 6b. Instrument catalog + history sync (implemented)
