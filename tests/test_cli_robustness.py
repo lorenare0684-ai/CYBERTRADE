@@ -658,3 +658,43 @@ class TestCookieHandoff(unittest.TestCase):
             qx_session_path="")
         _live_api(cfg, api_factory=factory)
         self.assertEqual(seen, {"ssid": "S", "cookies": "a=b"})
+
+
+class TestAutoSniff(unittest.TestCase):
+    """Adoption starves → the tab wire is captured automatically."""
+
+    def test_report_wraps_runner_output(self):
+        from cybertrade.cli import _auto_sniff_report
+
+        out = _auto_sniff_report(9333, 1.0,
+                                 runner=lambda p, s: "S2C quote batch")
+        self.assertIn("AUTO-DIAGNOSIS", out)
+        self.assertIn("S2C quote batch", out)
+
+    def test_report_never_raises(self):
+        from cybertrade.cli import _auto_sniff_report
+
+        def boom(port, seconds):
+            raise RuntimeError("no trade tab")
+
+        out = _auto_sniff_report(9333, 1.0, runner=boom)
+        self.assertIn("AUTO-DIAGNOSIS", out)
+        self.assertIn("tab wire unavailable (no trade tab)", out)
+
+    def test_controller_retains_port(self):
+        from types import SimpleNamespace
+
+        import cybertrade.web.pairing as wp
+
+        real = wp.run_pairing
+        wp.run_pairing = lambda **kw: None
+        try:
+            ctl = wp.PairingController(
+                SimpleNamespace(qx_session_path=""),
+                on_ready=lambda s, p, c="": None)
+            self.assertEqual(ctl._port, 9333)
+            started = ctl.start("data/chrome-profile", 9444, 240, True)
+            self.assertTrue(started["ok"], started)
+            self.assertEqual(ctl._port, 9444)
+        finally:
+            wp.run_pairing = real

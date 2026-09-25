@@ -201,10 +201,8 @@ def _verify_session_data(api, timeout: float = 10.0) -> None:
     from .exceptions import BrokerConnectionError
 
     raise BrokerConnectionError(
-        f"venue accepted the session but sent no market data in "
-        f"{timeout:.0f}s — stale session (pair again), slow venue "
-        f"(wait and retry), or wire trouble (run "
-        f"`cybertrade quotex status` and report the stream line)"
+        "venue accepted the session but sent no market data in "
+        f"{timeout:.0f}s"
     )
 
 
@@ -238,6 +236,25 @@ def _needs_rebuild(engine) -> bool:
         return True
     fault = getattr(getattr(engine, "continuity", None), "fault", "") or ""
     return BOOTSTRAP_HOLD in fault
+
+
+def _auto_sniff_report(port: int, seconds: float = 10.0,
+                         runner=None) -> str:
+    """Capture the trade tab's wire after a starve (best-effort).
+
+    Runs when a fresh adoption starves with the pairing Chrome still up:
+    the report this returns is the ground truth the Python wire gets
+    diffed against.  Never raises — diagnosis must not break serving.
+    """
+    from .brokers.quotex.sniff import sniff_and_report
+
+    runner = runner or sniff_and_report
+    head = ("  ── AUTO-DIAGNOSIS: trade-tab wire "
+            "(paste this whole block) ──")
+    try:
+        return head + "\n" + runner(port, seconds)
+    except Exception as exc:  # noqa: BLE001 — diagnosis never breaks serving
+        return head + f"\n  tab wire unavailable ({exc})"
 
 
 def _arm_or_hold(engine) -> bool:
@@ -481,7 +498,8 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
                       exc)
             log.debug("boot failure", exc_info=True)
             print(f"  ▸ engine failed to boot ({exc})")
-            print("  ▸ pair a venue session from the web terminal\n")
+            print("  ▸ pair a venue session from the web terminal — "
+                  "the wire diagnosis runs automatically once one lands\n")
         else:
             hub.engine = engine
             print(f"  ▸ mode         : LIVE VENUE CANDLES · "
@@ -492,6 +510,7 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
             if args.auto and _arm_or_hold(engine):
                 print("  ▸ engine ARMED (LIVE — real order flow)\n")
 
+        auto_sniffed = False
         while True:
             time.sleep(1.0)
             if not pending:
@@ -520,13 +539,21 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
                     _reseat_session(engine, ssid, cookies)
                     print("  ▸ venue session re-paired in place\n")
             except Exception as exc:  # noqa: BLE001 — a bad cookie must not kill the terminal
-                log.error("session adoption failed (%s) — pair again", exc)
+                log.error("session adoption failed (%s)", exc)
                 log.debug("adoption failure", exc_info=True)
-                print(f"  ▸ session adoption failed ({exc}) — pair again\n")
+                print(f"  ▸ session adoption failed ({exc})")
                 try:
                     hub.pairing.note_error(str(exc) or exc.__class__.__name__)
                 except Exception:  # noqa: BLE001 — the veil is best-effort
                     pass
+                if not auto_sniffed and "no market data" in str(exc):
+                    # The pairing Chrome is up with the trade tab open RIGHT
+                    # NOW — capture what the working tab does differently
+                    # before the moment passes. Once per process; the loop
+                    # never depends on it.
+                    auto_sniffed = True
+                    port = getattr(hub.pairing, "_port", 9333) or 9333
+                    print(_auto_sniff_report(int(port)) + "\n")
     except KeyboardInterrupt:
         print("\n  shutting down…")
     finally:

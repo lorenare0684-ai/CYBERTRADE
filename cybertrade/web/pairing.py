@@ -74,6 +74,7 @@ class PairingController:
         self._thread: Optional[threading.Thread] = None
         self._started = 0.0
         self._profile = ""
+        self._port = 9333        # DevTools port of the current/past attempt
         self._epoch = 0          # bumped on start/cancel: stale results die
 
     # -- queries ------------------------------------------------------------
@@ -165,6 +166,7 @@ class PairingController:
             self._ssid = ""
             self._purse = purse
             self._profile = values["profile"]
+            self._port = values["port"]
             self._started = time.time()
             self._epoch += 1
             epoch = self._epoch
