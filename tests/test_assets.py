@@ -358,5 +358,161 @@ class TestCliAssets(unittest.TestCase):
         self.assertIn("static floor", buf.getvalue())
 
 
+class TestAssetsBoard(unittest.TestCase):
+    ROWS = [
+        {"name": "EURUSD_otc", "kind": "forex_otc", "payout": 0.85,
+         "open": True, "price": 1.08521},
+        {"name": "XAUUSD", "kind": "metal", "payout": 0.90,
+         "open": False, "price": None},
+        {"name": "BTCUSD_otc", "kind": "crypto_otc", "payout": 0.80,
+         "open": True, "price": 67210.5},
+    ]
+
+    def _panel(self):
+        picked = []
+        with fake_tk():
+            import tkinter as tk
+
+            from cybertrade.gui.panels import AssetsPanel
+            from cybertrade.gui.theme import Theme
+
+            root = tk.Tk()
+            panel = AssetsPanel(root, Theme("neon_abyss"), picked.append)
+            return panel, picked
+
+    def _state(self, rows=None, **kw):
+        st = {"asset": "EURUSD_otc",
+              "watch": ["EURUSD_otc", "BTCUSD_otc"],
+              "catalog": {"rows": list(self.ROWS if rows is None else rows),
+                          "live": True}}
+        st.update(kw)
+        return st
+
+    def _head_text(self, panel):
+        texts = [c[1]["text"] for c in panel.head.calls
+                 if c[0] == "config" and "text" in c[1]]
+        return texts[-1] if texts else ""
+
+    def test_rows_show_name_payout_flag_price(self):
+        panel, _ = self._panel()
+        panel.update_state(self._state())
+        self.assertEqual(len(panel.board.items), 3)
+        first, second, third = panel.board.items
+        self.assertIn("EURUSD_otc", first)
+        self.assertIn("85%", first)
+        self.assertIn("OPEN", first)
+        self.assertIn("1.08521", first)
+        self.assertIn("SHUT", second)
+        self.assertIn("90%", second)
+        self.assertIn("67210.50000", third)
+        # marks: active ▸, tracked ●, idle ·
+        self.assertTrue(first.startswith("▸"))
+        self.assertTrue(second.startswith("·"))
+        self.assertTrue(third.startswith("●"))
+
+    def test_header_counts_and_live(self):
+        panel, _ = self._panel()
+        panel.update_state(self._state())
+        self.assertIn("3/3 shown", self._head_text(panel))
+        self.assertIn("2 open", self._head_text(panel))
+        self.assertIn("LIVE", self._head_text(panel))
+
+    def test_search_narrows_the_board(self):
+        panel, _ = self._panel()
+        panel.search_var.set("btc")
+        panel.update_state(self._state())
+        self.assertEqual(len(panel.board.items), 1)
+        self.assertIn("BTCUSD_otc", panel.board.items[0])
+        self.assertIn("1/3 shown", self._head_text(panel))
+
+    def test_kind_filter_and_menu(self):
+        panel, _ = self._panel()
+        panel.update_state(self._state())
+        menu = panel.kind_menu["menu"]
+        labels = [c[1] for c in menu.calls if c[0] == "add_command"]
+        self.assertEqual(labels, ["ALL", "crypto_otc", "forex_otc", "metal"])
+        panel.kind_var.set("metal")
+        panel.update_state(self._state())
+        self.assertEqual(len(panel.board.items), 1)
+        self.assertIn("XAUUSD", panel.board.items[0])
+
+    def test_click_selects_asset_for_trade_tab(self):
+        panel, picked = self._panel()
+        panel.update_state(self._state())
+        panel.board.selection_set(2)
+        panel._on_pick()
+        self.assertEqual(picked, ["BTCUSD_otc"])
+        infos = [c[1]["text"] for c in panel.info.calls
+                 if c[0] == "config" and "text" in c[1]]
+        self.assertTrue(infos)
+        self.assertIn("BTCUSD_otc", infos[-1])
+        self.assertIn("crypto_otc", infos[-1])
+        self.assertIn("80%", infos[-1])
+
+    def test_selection_survives_price_rebuild(self):
+        panel, picked = self._panel()
+        panel.update_state(self._state())
+        panel.board.selection_set(1)
+        rows = [dict(r) for r in self.ROWS]
+        rows[1]["price"] = 2380.12345
+        panel.update_state(self._state(rows=rows))
+        self.assertEqual(panel.board.curselection(), (1,))
+        self.assertIn("2380.12345", panel.board.items[1])
+        self.assertEqual(picked, [])  # rebuilds never re-fire selection
+
+    def test_no_rebuild_when_nothing_changed(self):
+        panel, _ = self._panel()
+        state = self._state()
+        panel.update_state(state)
+        panel.board.calls.clear()
+        panel.update_state(state)
+        kinds = [c for c in panel.board.calls if c[0] in ("delete", "insert")]
+        self.assertEqual(kinds, [])
+
+    def test_empty_catalog(self):
+        panel, _ = self._panel()
+        panel.update_state(self._state(rows=[]))
+        self.assertEqual(panel.board.items, [])
+        self.assertIn("0/0 shown", self._head_text(panel))
+
+
+class TestWebBoardContract(unittest.TestCase):
+    """No browser here — pin the board's markup/JS/CSS wiring by content."""
+
+    def _static(self, name):
+        import os
+
+        import cybertrade
+
+        base = os.path.join(os.path.dirname(cybertrade.__file__),
+                            "web", "static")
+        with open(os.path.join(base, name), encoding="utf-8") as fh:
+            return fh.read()
+
+    def test_markup_has_board_controls(self):
+        html = self._static("index.html")
+        for ident in ("asset-board", "asset-search", "asset-kind",
+                      "catalog-meta"):
+            self.assertIn(f'id="{ident}"', html)
+        self.assertNotIn("asset-pick", html)  # dropdown replaced by the board
+
+    def test_js_renders_rows_and_charts_on_click(self):
+        js = self._static("js/app.js")
+        self.assertIn('getElementById("asset-board")', js.replace("$(\"", "getElementById(\""))
+        self.assertIn("boardEls", js)
+        self.assertIn("watchAsset(r.name)", js)
+        self.assertIn("renderCatalog(lastState, true)", js)
+        # venue-controlled names go through textContent, never innerHTML
+        self.assertIn("nm.textContent = r.name", js)
+        for snippet in ("board.innerHTML = \"\";", "kindPick.innerHTML = \"\";"):
+            self.assertIn(snippet, js)
+
+    def test_css_styles_the_board(self):
+        css = self._static("css/cyber.css")
+        for cls in (".asset-board", ".ab-row", ".ab-empty", ".neon-input",
+                    ".ab-row .st.open", ".ab-row .px.up"):
+            self.assertIn(cls, css)
+
+
 if __name__ == "__main__":
     unittest.main()

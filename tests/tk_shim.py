@@ -132,6 +132,19 @@ class _Widget:
     def bbox(self, *args: Any) -> Optional[tuple]:
         return (0, 0, 10, 10)
 
+    # -- scrolling (Scrollbar <-> Listbox/Canvas wiring) ---------------------
+    def set(self, *args: Any) -> None:
+        self.calls.append(("set", args))
+
+    def yview(self, *args: Any) -> None:
+        self.calls.append(("yview", args))
+
+    def xview(self, *args: Any) -> None:
+        self.calls.append(("xview", args))
+
+    def see(self, *args: Any) -> None:
+        self.calls.append(("see", args))
+
     # -- toplevel behaviour ------------------------------------------------
     def title(self, text: str = "") -> None:
         self.kwargs["title"] = text
@@ -239,13 +252,72 @@ class _MessageBox:
 MESSAGEBOX = _MessageBox()
 
 
+class _Listbox(_Widget):
+    """A Listbox that really stores rows + selection (asset board tests)."""
+
+    def __init__(self, master=None, *args: Any, **kwargs: Any) -> None:
+        super().__init__(master, *args, **kwargs)
+        self.items: List[str] = []
+        self.selected: tuple = ()
+
+    def _idx(self, index: Any, default: int = 0) -> int:
+        if isinstance(index, str):
+            return len(self.items) if index.lower() == "end" else default
+        try:
+            return max(0, int(index))
+        except (TypeError, ValueError):
+            return default
+
+    def insert(self, index: Any, *items: Any) -> None:
+        self.calls.append(("insert", index, items))
+        at = self._idx(index, len(self.items))
+        for i, item in enumerate(items):
+            self.items.insert(at + i, str(item))
+
+    def delete(self, first: Any, last: Any = None) -> None:
+        self.calls.append(("delete", first, last))
+        start = self._idx(first, 0)
+        if last is None:
+            del self.items[start:start + 1]
+        else:
+            end = self._idx(last, len(self.items))
+            del self.items[start:end if isinstance(last, str) else end + 1]
+
+    def get(self, first: Any, last: Any = None) -> Any:
+        start = self._idx(first, 0)
+        if last is None:
+            return self.items[start]
+        end = self._idx(last, len(self.items))
+        return tuple(self.items[start:end if isinstance(last, str) else end + 1])
+
+    def curselection(self) -> tuple:
+        return self.selected
+
+    def selection_set(self, first: Any, last: Any = None) -> None:
+        start = self._idx(first, 0)
+        end = self._idx(last, start) if last is not None else start
+        if isinstance(last, str):
+            end = max(start, end - 1)
+        self.selected = tuple(range(start, end + 1))
+
+    def selection_clear(self, first: Any = None, last: Any = None) -> None:
+        self.selected = ()
+
+    def size(self) -> int:
+        return len(self.items)
+
+    def activate(self, index: Any) -> None:
+        self.calls.append(("activate", index))
+
+
 def _build_module() -> types.ModuleType:
     tk = types.ModuleType("tkinter")
     for name in ("Frame", "Tk", "Toplevel", "Canvas", "Label", "Entry",
-                 "Radiobutton", "Button", "Checkbutton", "Text", "Listbox",
+                 "Radiobutton", "Button", "Checkbutton", "Text",
                  "Scrollbar", "Menu", "PanedWindow", "Scale", "Spinbox",
                  "Message", "OptionMenu"):
         setattr(tk, name, type(name, (_Widget,), {}))
+    tk.Listbox = _Listbox
     tk.Misc = _Widget
     tk.Widget = _Widget
     tk.StringVar = _Var
