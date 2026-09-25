@@ -496,3 +496,45 @@ class TestNeedsRebuild(unittest.TestCase):
         broker = SimpleNamespace(open_positions=boom)
         engine = self._engine(degraded="0 candles", broker=broker)
         self.assertFalse(_needs_rebuild(engine))
+
+
+class TestLiveApiBoot(unittest.TestCase):
+    """_live_api: ensure the purse, and never strand a socket."""
+
+    def _cfg(self):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(broker=SimpleNamespace(ssid="S"),
+                               qx_session_path="")
+
+    def _stub(self, data=True):
+        from types import SimpleNamespace
+
+        calls = []
+        return SimpleNamespace(
+            set_ssid=lambda s, c="": calls.append("ssid"),
+            connect=lambda: calls.append("connect") or True,
+            subscribe=lambda a, t: None,
+            request_instruments=lambda: None,
+            wait_for_data=lambda timeout=0: data,
+            ensure_purse=lambda: calls.append("ensure") or True,
+            close=lambda: calls.append("close"),
+            calls=calls,
+        )
+
+    def test_boot_verifies_then_ensures(self):
+        from cybertrade.cli import _live_api
+
+        stub = self._stub(data=True)
+        self.assertIs(_live_api(self._cfg(), api_factory=lambda: stub), stub)
+        self.assertEqual(stub.calls, ["ssid", "connect", "ensure"])
+
+    def test_failed_boot_closes_the_api(self):
+        from cybertrade.cli import _live_api
+        from cybertrade.exceptions import BrokerConnectionError
+
+        stub = self._stub(data=False)
+        with self.assertRaises(BrokerConnectionError):
+            _live_api(self._cfg(), api_factory=lambda: stub)
+        self.assertIn("close", stub.calls)
+        self.assertNotIn("ensure", stub.calls)

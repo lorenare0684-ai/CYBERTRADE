@@ -88,7 +88,7 @@ Socket.IO packet grammar (`<type>[namespace,][ack-id,]<json>`):
 ## 4. Authentication frame (confirmed shape)
 
 ```json
-42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0,"isFastHistory":true}]
+42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0}]
 ```
 
 `isDemo: 1` selects the **PRACTICE** purse, `0` the REAL purse.  The venue
@@ -127,11 +127,20 @@ confirms with an `s_authorization` event and refuses with
 42["sellOption",{"id":"<orderId>"}>
 ```
 
-### Purse switching (balances arrive pushed — there is no balance query)
+### Purse switching (deferred past data verification)
 
 ```json
 42["account/change",{"demo":1,"tournamentId":0}]   // demo:0 = REAL purse
 ```
+
+Balances arrive pushed — there is no balance query.  The auth frame's
+`isDemo` already selects the purse (all pyquotex ever sends on
+connect), so `connect()` sends no switch: an `account/change` inside
+the connect burst is the one structural difference behind starving
+wires.  Boot calls `ensure_purse()` after data is proven, waits for
+the `s_account/change` ack, and re-proves the stream — a switch that
+starves the wire fails loudly there, before any order can touch the
+wrong money.
 
 ### Session bootstrap (what the trade tab sends on every open)
 

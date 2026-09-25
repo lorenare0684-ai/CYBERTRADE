@@ -153,7 +153,21 @@ def _live_api(cfg: AppConfig, api_factory=None):
             "log in and solve the CAPTCHA once), or set QX_SSID / --ssid"
         )
     api.connect()
-    _verify_session_data(api)
+    try:
+        _verify_session_data(api)
+        ensure = getattr(api, "ensure_purse", None)
+        if callable(ensure):
+            ensure()
+    except Exception:
+        # A failed boot must not strand a live socket behind it (its
+        # reader/pumper threads would haunt the process).
+        try:
+            closer = getattr(api, "close", None)
+            if callable(closer):
+                closer()
+        except Exception:  # noqa: BLE001 — teardown is best-effort
+            pass
+        raise
     return api
 
 
@@ -182,8 +196,9 @@ def _verify_session_data(api, timeout: float = 10.0) -> None:
 
     raise BrokerConnectionError(
         f"venue accepted the session but sent no market data in "
-        f"{timeout:.0f}s — the session is probably stale (pair again "
-        f"from the terminal), or the venue is slow (wait and retry)"
+        f"{timeout:.0f}s — stale session (pair again), slow venue "
+        f"(wait and retry), or wire trouble (run "
+        f"`cybertrade quotex status` and report the stream line)"
     )
 
 
@@ -455,7 +470,9 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
         except Exception as exc:  # noqa: BLE001 — a bad session must not kill the terminal
             if not _session_trouble(exc):
                 raise
-            log.exception("engine failed to boot — serving the pairing screen")
+            log.error("engine failed to boot (%s) — serving the pairing screen",
+                      exc)
+            log.debug("boot failure", exc_info=True)
             print(f"  ▸ engine failed to boot ({exc})")
             print("  ▸ pair a venue session from the web terminal\n")
         else:
@@ -496,7 +513,8 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
                     _reseat_session(engine, ssid)
                     print("  ▸ venue session re-paired in place\n")
             except Exception as exc:  # noqa: BLE001 — a bad cookie must not kill the terminal
-                log.exception("session adoption failed")
+                log.error("session adoption failed (%s) — pair again", exc)
+                log.debug("adoption failure", exc_info=True)
                 print(f"  ▸ session adoption failed ({exc}) — pair again\n")
                 try:
                     hub.pairing.note_error(str(exc) or exc.__class__.__name__)
@@ -543,7 +561,9 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
         except Exception as exc:  # noqa: BLE001 — pairing covers venue trouble
             if not _session_trouble(exc):
                 raise
-            log.exception("engine failed to boot — opening the pairing window")
+            log.error("engine failed to boot (%s) — opening the pairing window",
+                      exc)
+            log.debug("boot failure", exc_info=True)
             notice = str(exc) or exc.__class__.__name__
             print(f"  engine failed to boot ({notice})")
         else:
@@ -643,6 +663,8 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     cfg = _load_config(args)
     if getattr(args, "action", "") == "login":
         return cmd_quotex_login(args, cfg)
+    if getattr(args, "action", "") == "sniff":
+        return cmd_quotex_sniff(args, cfg)
     if getattr(args, "ssid", ""):
         cfg.broker.ssid = args.ssid  # session-only: never written to disk
     try:
@@ -695,6 +717,31 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     )
     print(f"  warmed {total} candles across {len(cfg.strategy.universe)} assets")
     return 0 if total else 1
+
+
+def cmd_quotex_sniff(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """Record what the working trade tab actually says on its wire.
+
+    Needs the paired Chrome running with a visible tab (start pairing
+    first): this only observes the tab the operator already opened, so
+    there is nothing to log into and no session to configure.  The
+    report — message order, timing, exact Socket.IO strings — is the
+    ground truth a starving Python wire gets diffed against.
+    """
+    from .brokers.quotex.sniff import sniff_and_report
+
+    port = int(getattr(args, "cdp_port", 9333))
+    seconds = float(getattr(args, "seconds", 20.0) or 20.0)
+    print(f"  listening to the trade tab for {seconds:.0f}s "
+          f"(DevTools port {port})…")
+    print("  (the paired Chrome must be running with the trade page open — "
+          "start pairing first)")
+    try:
+        print(sniff_and_report(port, seconds))
+    except Exception as exc:  # noqa: BLE001 — sniff trouble is a CLI error
+        print(f"  sniff failed ({exc})")
+        return 1
+    return 0
 
 
 def cmd_quotex_assets(api) -> int:
@@ -1223,8 +1270,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the I UNDERSTAND confirmation")
     r.set_defaults(func=cmd_run)
 
-    qx = sub.add_parser("quotex", help="venue session: login / status / warm / assets")
-    qx.add_argument("action", choices=["status", "warm", "login", "assets"])
+    qx = sub.add_parser("quotex",
+                        help="venue session: login / status / warm / assets / sniff")
+    qx.add_argument("action", choices=["status", "warm", "login", "assets", "sniff"])
+    qx.add_argument("--seconds", type=float, default=20.0,
+                    help="capture window for sniff")
     qx.add_argument("--ssid", default="",
                     help="session cookie (session-only, never stored)")
     qx.add_argument("--bars", type=int, default=250,

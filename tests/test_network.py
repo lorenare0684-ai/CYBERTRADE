@@ -168,8 +168,7 @@ class TestQuotexProtocol(unittest.TestCase):
         wire = protocol.build_authorization("SID", is_demo=True)
         self.assertEqual(
             wire,
-            '42["authorization",{"session":"SID","isDemo":1,"tournamentId":0,'
-            '"isFastHistory":true}]',
+            '42["authorization",{"session":"SID","isDemo":1,"tournamentId":0}]',
         )
 
     def test_order_wire_modern(self):

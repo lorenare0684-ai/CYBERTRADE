@@ -69,12 +69,14 @@ def is_session_fault(message: str) -> bool:
     return any(marker in msg for marker in SESSION_MARKERS)
 
 
-def parity_headers(user_agent: str, origin: str = "") -> Dict[str, str]:
+def parity_headers(user_agent: str, origin: str = "",
+                   referer: str = "") -> Dict[str, str]:
     """Browser-parity extras for HTTP and WS handshakes.
 
     Truthful headers only: locale and cache intent that match a real
-    English trade tab. Compression/extensions are omitted (we do not
-    implement them), never advertised.
+    English trade tab, plus the Origin/Referer a real upgrade carries.
+    Compression/extensions are omitted (we do not implement them),
+    never advertised.
     """
     headers = {
         "User-Agent": user_agent,
@@ -84,6 +86,8 @@ def parity_headers(user_agent: str, origin: str = "") -> Dict[str, str]:
     }
     if origin:
         headers["Origin"] = origin
+    if referer:
+        headers["Referer"] = referer
     return headers
 
 

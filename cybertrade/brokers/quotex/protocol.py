@@ -29,9 +29,10 @@ def make_request_id() -> str:
 def build_authorization(ssid: str, is_demo: bool = True, tournament_id: int = 0) -> str:
     """Authenticate the socket with the website session id.
 
-    Confirmed shape (community docs / stable_api):
-        42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0,
-                            "isFastHistory":true}]
+    Byte-identical to pyquotex master (some community forks add an
+    ``isFastHistory`` field; the reference client does not send it, and
+    the venue never asks for it):
+        42["authorization",{"session":"<ssid>","isDemo":1,"tournamentId":0}]
     """
     return encode_event(
         C.EV_AUTHORIZATION,
@@ -39,7 +40,6 @@ def build_authorization(ssid: str, is_demo: bool = True, tournament_id: int = 0)
             "session": ssid,
             "isDemo": 1 if is_demo else 0,
             "tournamentId": tournament_id,
-            "isFastHistory": True,
         },
     )
 

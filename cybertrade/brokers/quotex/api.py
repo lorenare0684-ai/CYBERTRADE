@@ -202,6 +202,8 @@ class QuotexAPI:
         # data-starved session — boot fails fast to the pairing screen
         # instead of warming up on 90 seconds of silence.
         self._data_seen = threading.Event()
+        # Set by the dispatcher on the venue's ``s_account/change`` ack.
+        self._purse_confirmed = threading.Event()
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -355,7 +357,10 @@ class QuotexAPI:
             )
         # Supervisor heals call api.connect() directly — replay here too so
         # either reconnect path restores the chart stream.
-        self.change_balance(C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL)
+        # NOTE: no account/change here.  The auth frame's isDemo already
+        # selects the purse (all pyquotex ever sends on connect); a switch
+        # inside the connect burst is the one structural difference behind
+        # starving wires.  Boot calls ensure_purse() after data is proven.
         self._bootstrap_session()
         log.info("session bootstrap sent "
                  "(indicator/drawing/pending/chart/instruments)")
@@ -506,6 +511,42 @@ class QuotexAPI:
         self.demo = account_type.upper() != C.ACCOUNT_REAL
         self._send(build_change_balance(account_type), kind="frame")
 
+    def ensure_purse(self, timeout: float = 5.0, reverify: float = 8.0) -> bool:
+        """Select the configured purse — deferred past data verification.
+
+        Runs at boot after the wire has proven it carries data: sends the
+        ``account/change`` the connect burst skips, waits for the venue's
+        ``s_account/change`` ack, then proves data STILL flows.  A switch
+        that starves the wire raises here — loudly, before any order can
+        touch the wrong money (or nothing at all).  Mid-run re-seats do
+        NOT call this: the fresh wire re-auths with the same isDemo, and
+        a no-op switch on a live book adds risk without safety.
+        """
+        want = C.ACCOUNT_DEMO if self.demo else C.ACCOUNT_REAL
+        self._purse_confirmed.clear()
+        self.change_balance(want)
+        if self.socket is not None and not self._purse_confirmed.wait(timeout):
+            log.warning("purse switch unconfirmed after %.0fs — proceeding",
+                        timeout)
+        else:
+            log.info("purse confirmed: %s", want)
+        # The switch must not cost the stream: re-poke, require fresh data.
+        self._data_seen.clear()
+        try:
+            self.subscribe("EURUSD_otc", 60)
+        except Exception:  # noqa: BLE001 — the wait below is the verdict
+            pass
+        try:
+            self.request_instruments()
+        except Exception:  # noqa: BLE001
+            pass
+        if self.wait_for_data(timeout=reverify):
+            return True
+        raise BrokerConnectionError(
+            "venue stopped sending data after the purse switch — "
+            "reconnect and retry; if it persists the wire needs attention"
+        )
+
     def account_snapshot(self) -> AccountSnapshot:
         return AccountSnapshot(
             balance=self.balance.balance,
@@ -646,6 +687,8 @@ class QuotexAPI:
         elif name == C.SV_S_ACCOUNT_CHANGE or (
                 isinstance(name, str) and name.startswith("s_")):
             log.info("venue confirm: %s", name)
+            if name == C.SV_S_ACCOUNT_CHANGE:
+                self._purse_confirmed.set()
         elif name in (C.SV_TICK, "quote", C.SV_CANDLE):
             asset, price, ts = parse_tick(args)
             if asset and price > 0:

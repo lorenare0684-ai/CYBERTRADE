@@ -191,7 +191,10 @@ class QuotexSocket:
         # Origin rides the dedicated parameter (the transport writes it
         # once); headers carry UA + locale + no-cache only — we never
         # advertise websocket extensions we do not implement.
-        headers = parity_headers(self.user_agent)
+        # Referer truthfully names the page this session was paired on —
+        # browsers (and pyquotex) send it on the WS upgrade.
+        headers = parity_headers(self.user_agent,
+                                 referer=f"{self.origin}/en/trade")
         conn = WebSocketConnection(
             self.ws_url,
             headers=headers,

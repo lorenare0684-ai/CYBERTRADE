@@ -47,7 +47,8 @@ class TestWireBuilders(unittest.TestCase):
         self.assertTrue(wire.startswith('42["authorization"'))
         self.assertIn('"session":"abc123ssid"', wire)
         self.assertIn('"isDemo":1', wire)
-        self.assertIn('"isFastHistory":true', wire)
+        # pyquotex-exact: no isFastHistory — unknown fields stay out.
+        self.assertNotIn('isFastHistory', wire)
 
     def test_order_shape_legacy_and_new(self):
         req = QXOrderRequest(
@@ -842,6 +843,147 @@ class TestApiMarketData(unittest.TestCase):
         # first three sampled + one "counting silently" = 4 records
         self.assertEqual(len(logs.records), 4)
         self.assertEqual(sock.stats()["drops"], {"unroutable binary": 6})
+
+    def test_dispatcher_sets_purse_confirmed(self):
+        api = self._api()
+        self.assertFalse(api._purse_confirmed.is_set())
+        api._on_socket_event("s_account/change", [])
+        self.assertTrue(api._purse_confirmed.is_set())
+
+    def test_ensure_purse_confirms_and_reverifies(self):
+        import threading
+
+        api = self._api()
+        threading.Timer(0.02, api._purse_confirmed.set).start()
+        threading.Timer(0.05, api._data_seen.set).start()
+        self.assertTrue(api.ensure_purse(timeout=2.0, reverify=2.0))
+        wires = "\n".join(api.socket.sent)
+        self.assertIn('"account/change"', wires)
+        self.assertIn('"instruments/get"', wires)
+
+    def test_ensure_purse_fails_when_switch_starves(self):
+        import threading
+
+        from cybertrade.exceptions import BrokerConnectionError
+
+        api = self._api()
+        threading.Timer(0.02, api._purse_confirmed.set).start()
+        with self.assertRaises(BrokerConnectionError) as ctx:
+            api.ensure_purse(timeout=1.0, reverify=0.05)
+        self.assertIn("after the purse switch", str(ctx.exception))
+
+    def test_connect_tail_sends_no_purse_switch(self):
+        # The connect burst must stay pyquotex-identical: auth (at the
+        # socket layer) + bootstrap + replays, no account/change —
+        # ensure_purse owns that, after data is proven.
+        api = self._api()
+        api._bootstrap_session()
+        api._replay_subscriptions()
+        self.assertNotIn("account/change", "\n".join(api.socket.sent))
+
+
+class TestSniff(unittest.TestCase):
+    def _ws_frame(self, method, payload, opcode=1, t=0.5):
+        return {"t": t, "method": method,
+                "params": {"response": {"opcode": opcode,
+                                        "payloadData": payload}}}
+
+    def test_empty_capture_reports_plainly(self):
+        from cybertrade.brokers.quotex.sniff import summarize
+
+        report = summarize([])
+        self.assertIn("no websocket or HTTP traffic", report)
+
+    def test_report_groups_and_counts(self):
+        from cybertrade.brokers.quotex.sniff import summarize
+
+        batch = '[["EURUSD",1700000000,1.08,1],["EURUSD",1700000001,1.09,1]]'
+        frames = [
+            {"t": 0.0, "method": "Network.webSocketCreated",
+             "params": {"url": "wss://ws2.qxbroker.com/socket.io/?EIO=3"}},
+            self._ws_frame("Network.webSocketFrameSent",
+                           '42["authorization",{"session":"S"}]', t=0.1),
+            self._ws_frame("Network.webSocketFrameReceived",
+                           '42["s_authorization",{}]', t=0.2),
+            self._ws_frame("Network.webSocketFrameReceived", batch, t=0.3),
+            self._ws_frame("Network.webSocketFrameReceived",
+                           '451-["history/load",{"_placeholder":true}]', t=0.4),
+            {"t": 0.5, "method": "Network.requestWillBeSent",
+             "params": {"request": {"method": "GET",
+                                    "url": "https://qxbroker.com/api/x"}}},
+        ]
+        report = summarize(frames)
+        self.assertIn('C2S event "authorization"', report)
+        self.assertIn('S2C event "s_authorization"', report)
+        self.assertIn("S2C quote batch (2 rows)", report)
+        self.assertIn("S2C binary placeholder", report)
+        self.assertIn("GET https://qxbroker.com/api/x", report)
+        self.assertIn("socket open wss://ws2.qxbroker.com", report)
+
+    def test_binary_payloads_decode(self):
+        import base64
+
+        from cybertrade.brokers.quotex.sniff import _payload
+
+        blob = base64.b64encode(b'[["A",1,2.0,1]]').decode()
+        out = _payload({"response": {"opcode": 2, "payloadData": blob}})
+        self.assertIn('"A"', out)
+
+    def test_sniff_needs_a_page_target(self):
+        from cybertrade.brokers.quotex.sniff import sniff_frames
+
+        with self.assertRaises(RuntimeError) as ctx:
+            sniff_frames(9333, duration=0.01,
+                         fetch=lambda *a, **k: [])
+        self.assertIn("no trade tab", str(ctx.exception))
+
+    def test_collect_loop_reads_until_deadline(self):
+        import json
+
+        from cybertrade.brokers.quotex.sniff import sniff_frames
+
+        events = [
+            json.dumps({"method": "Network.webSocketFrameSent",
+                        "params": {"response": {"opcode": 1,
+                                                "payloadData": '42["tick"]'}}}),
+            json.dumps({"method": "Network.someNoise", "params": {}}),
+        ]
+
+        class FakeWS:
+            def __init__(self, url, **kw):
+                self.sent = []
+
+            def connect(self):
+                pass
+
+            def send(self, data):
+                self.sent.append(data)
+
+            def recv_text(self):
+                if events:
+                    return events.pop(0)
+                raise TimeoutError("read timeout")
+
+            def close(self):
+                pass
+
+        made = []
+
+        def factory(url, **kw):
+            ws = FakeWS(url, **kw)
+            made.append(ws)
+            return ws
+
+        out = sniff_frames(
+            9333, duration=0.05,
+            fetch=lambda url, timeout=0: (
+                [{"type": "page", "url": "https://qxbroker.com/en/trade",
+                  "webSocketDebuggerUrl": "ws://127.0.0.1:9333/devtools/x"}]
+                if url.endswith("/json/list") else {}),
+            ws_factory=factory)
+        self.assertEqual(len(out), 1)  # noise filtered, frame kept
+        self.assertEqual(out[0]["method"], "Network.webSocketFrameSent")
+        self.assertTrue(made[0].sent)  # Network.enable went out
 
 
 if __name__ == "__main__":
