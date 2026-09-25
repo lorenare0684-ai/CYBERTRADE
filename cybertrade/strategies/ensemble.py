@@ -279,6 +279,13 @@ class AllWeatherEnsemble(Strategy):
         data["decay_ward"] = sorted(self.quarantined_votes)
         data["weights"] = dict(self._weights)
         data["scores"] = {k: round(v, 3) for k, v in self._scores.items()}
+        # What the survivor's posture is currently leaning on, and how many
+        # votes per candle are blended. Both change trading behaviour, so an
+        # operator reading the HUD should be able to see them rather than
+        # having to infer them from the config file.
+        data["family_weights"] = {k: round(v, 3)
+                                  for k, v in sorted(self.family_weights.items())}
+        data["max_votes"] = self.max_votes
         return data
 
 

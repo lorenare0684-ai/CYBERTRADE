@@ -134,6 +134,23 @@ function render(state) {
       const dc = $("deck-count");
       if (dc) dc.textContent = `${live}/${stDeck.members.length} live`;
     }
+    // Posture bias + vote cap. These change trading behaviour every candle, so
+    // they update on every poll rather than only when the member list does.
+    const db = $("deck-bias");
+    if (db) {
+      const fw = stDeck.family_weights || {};
+      const names = Object.keys(fw);
+      let txt = names.length
+        ? "posture bias · " + names
+            .map((f) => `${f} ×${Number(fw[f]).toFixed(2)}`).join(" · ")
+        : "posture bias · none (flat weighting)";
+      if (stDeck.max_votes > 0) {
+        txt += ` · cap ${stDeck.max_votes} vote${stDeck.max_votes === 1 ? "" : "s"}/candle`;
+      }
+      db.textContent = txt;
+      db.title = "survivor.regime_rotation pushes the posture table into the "
+        + "ensemble blend; strategy.max_signals_per_candle caps votes per candle";
+    }
   }
 
   // meters

@@ -737,3 +737,44 @@ class TestThePostureTableReachesTheEnsemble(unittest.TestCase):
         vote2 = Signal(asset="EURUSD", side=Side.CALL, confidence=0.8,
                        strategy="rsi_stretch", timeframe_seconds=60)
         self.assertEqual(e._family_weight(vote2), 2.0)
+
+
+class TestTheHudCanSeeTheBias(unittest.TestCase):
+    """The posture bias and the vote cap change trading behaviour every
+    candle, so the web terminal must be able to show them rather than leaving
+    the operator to infer them from the config file."""
+
+    def test_describe_exposes_the_bias_and_the_cap(self):
+        e = AllWeatherEnsemble(members=build_universe()[:3], max_votes=4)
+        e.set_family_weights({"meanrev": 1.1, "pattern": 0.5})
+        d = e.describe()
+        self.assertEqual(d["family_weights"], {"meanrev": 1.1, "pattern": 0.5})
+        self.assertEqual(d["max_votes"], 4)
+
+    def test_a_flat_blend_is_reported_as_empty_not_missing(self):
+        e = AllWeatherEnsemble(members=build_universe()[:3])
+        d = e.describe()
+        self.assertEqual(d["family_weights"], {})
+        self.assertEqual(d["max_votes"], 0)
+
+    def test_the_state_payload_carries_it(self):
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from cybertrade.web.server import EngineHub
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=300),
+                            broker=VenueStub())
+        eng.arm()
+        for _ in range(6):
+            eng.feed.advance()
+            eng.cycle()
+        state = EngineHub(eng, cfg).state()
+        eng.shutdown()
+        deck = state["snapshot"]["strategies"]
+        self.assertIn("family_weights", deck)
+        self.assertIn("max_votes", deck)
+        # the running engine must have pushed a real posture bias by now
+        self.assertTrue(deck["family_weights"],
+                        "no posture bias reached the HUD payload")
