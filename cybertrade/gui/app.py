@@ -302,9 +302,16 @@ class CybertradeApp(tk.Tk):
         self.boot.destroy()
 
     # -- bridge to engine ---------------------------------------------------
-    def _command(self, body: Dict[str, Any]) -> None:
+    def _command(self, body: Dict[str, Any]) -> Any:
         cmd = body.get("cmd")
         engine = self.engine
+        if cmd == "candles":
+            # Read-only chart query — answers inline, never touches the LEDs.
+            asset = str(body.get("asset") or "")
+            try:
+                return {"candles": engine.candles_for(asset)}
+            except Exception:  # noqa: BLE001
+                return {"candles": []}
         try:
             if cmd == "arm":
                 engine.arm()

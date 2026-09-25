@@ -47,7 +47,12 @@ class QXAsset:
     @classmethod
     def from_payload(cls, name: str, payload: Any) -> "QXAsset":
         data = payload if isinstance(payload, dict) else {}
-        payout_raw = dig(data, "payout", dig(data, "profit", 85)) or 85
+        payout_raw = (
+            dig(data, "payout", dig(data, "profit",
+                dig(data, "payoutPercent",
+                    dig(data, "profitPercent",
+                        dig(data, "payout_percent", 85))))) or 85
+        )
         payout = float(payout_raw)
         if payout > 1:
             payout = payout / 100.0
@@ -55,7 +60,9 @@ class QXAsset:
             name=name,
             asset_id=str(dig(data, "id", dig(data, "assetId", name))),
             payout=payout,
-            open=bool(dig(data, "open", dig(data, "isOpen", True))),
+            open=bool(dig(data, "open", dig(data, "isOpen",
+                dig(data, "active", dig(data, "isActive",
+                    dig(data, "is_active", True)))))),
             is_otc=name.endswith("_otc") or bool(dig(data, "isOTC", False)),
             kind=str(dig(data, "kind", dig(data, "type", "")) or ""),
         )

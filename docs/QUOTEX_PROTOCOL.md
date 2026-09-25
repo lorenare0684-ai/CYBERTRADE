@@ -156,15 +156,26 @@ dict and list envelope variants (`QXCandle.from_payload` etc.).
 ## 6b. Instrument catalog + history sync (implemented)
 
 - `42["instrument",{}]` requests the instrument listing; the reply event
-  (`instrument` / `instruments` / `assets`) is absorbed by
+  (`instrument` / `instruments` / `assets_list` / `assetList` / `assets` /
+  `asset_list` — see `INSTRUMENT_EVENTS`) is absorbed by
   `protocol.parse_instruments`, which tolerates four community shapes:
   `{name: {…}}` mappings, `{asset|name|symbol, …}` rows, `[name, {…}]` pairs,
-  and nested lists wrapping any of them.  Payouts accept `payout`/`profit`
-  (fraction or percent), open state `open`/`isOpen`, and asset class via
-  `type`/`kind` into `AssetCatalog` (`brokers/quotex/catalog.py`).
+  and nested lists wrapping any of them.  Payouts accept `payout`/`profit` /
+  `payoutPercent` (fraction or percent), open state `open`/`isOpen`/`active`,
+  and asset class via `type`/`kind` into `AssetCatalog`
+  (`brokers/quotex/catalog.py`).  Reference clients confirm the venue rows
+  carry at least `{symbol, id}` (A11ksa/API-Quotex `update_assets_from_api`).
+- Detection runs three ways: the live feed requests the listing on start
+  and on every reconnect; any quote for an unknown symbol registers it
+  (kind inferred, payout static); and the engine adopts every listing row
+  into the running universe (book + detector + subscription).  Anything the
+  static table missed still appears the moment the venue names it.
 - `payout_for()` consults the live catalog first, then
-  `cybertrade.constants.ASSET_CATALOG` (offline fallback while a
-  session is still connecting).
+  `cybertrade.constants.ASSET_CATALOG` — a ~200-symbol static floor (forex +
+  OTC, crypto, metals, energy, indices, stock OTCs, incl. verified venue ids)
+  that keeps payouts honest while a session is still connecting.  Boards
+  show LIVE once a venue listing lands, STATIC before that.
+- `cybertrade quotex assets` prints the merged board grouped by asset class.
 - History warm-start: `candleHistory` fills `QuotexAPI`'s cache;
   `brokers/quotex/sync.py` pushes it into `CandleSeries`/`HistoryBuffer`
   books (dupe-safe, failure-tolerant) so live strategies get indicator warmup

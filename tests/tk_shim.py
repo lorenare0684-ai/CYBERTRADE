@@ -36,6 +36,21 @@ class _Widget:
         if master is not None and hasattr(master, "children"):
             master.children.append(self)
 
+    # -- option / menu-style access ----------------------------------------
+    def __getitem__(self, key: str) -> Any:
+        if key not in self.kwargs:
+            self.kwargs[key] = _Widget(self)
+        return self.kwargs[key]
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        self.kwargs[key] = value
+
+    def add_command(self, *args: Any, **kwargs: Any) -> None:
+        self.calls.append(("add_command", kwargs.get("label", "")))
+
+    def index(self, *args: Any) -> int:
+        return len([c for c in self.calls if c[0] == "add_command"])
+
     # -- geometry / lifecycle ---------------------------------------------
     def grid(self, *args: Any, **kwargs: Any) -> None:
         self.calls.append(("grid", args, kwargs))
@@ -109,7 +124,7 @@ class _Widget:
         return 6
 
     def delete(self, *args: Any) -> None:
-        pass
+        self.calls = [c for c in self.calls if c[0] != "add_command"]
 
     def itemconfigure(self, *args: Any, **kwargs: Any) -> None:
         pass

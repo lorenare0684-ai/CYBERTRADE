@@ -191,8 +191,20 @@ class TraderPanel(tk.Frame):
         row.pack(fill="x", padx=6, pady=4)
         self.asset_var = tk.StringVar(value="EURUSD_otc")
         tk.Label(row, text="ASSET", bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL).pack(side="left")
-        tk.Entry(row, textvariable=self.asset_var, width=14, font=MONO,
-                 bg="#0a0c18", fg=theme["text"], insertbackground=theme["cyan"]).pack(side="left", padx=6)
+        from ..constants import DEFAULT_ASSETS
+
+        self.asset_menu = tk.OptionMenu(row, self.asset_var, *DEFAULT_ASSETS)
+        self.asset_menu.config(bg="#0a0c18", fg=theme["text"], font=MONO,
+                               width=14, highlightthickness=0)
+        try:
+            self.asset_menu["menu"].config(bg="#0a0c18", fg=theme["text"],
+                                           font=MONO)
+        except Exception:  # noqa: BLE001 — headless shim has no menu theme
+            pass
+        self.asset_menu.pack(side="left", padx=6)
+        self._menu_names = tuple(DEFAULT_ASSETS)
+        self._charted = ""
+        self._updates = 0
         self.stake_var = tk.StringVar(value="5")
         tk.Label(row, text="STAKE", bg=theme["bg"], fg=theme["dim"], font=MONO_SMALL).pack(side="left")
         tk.Entry(row, textvariable=self.stake_var, width=6, font=MONO,
@@ -247,18 +259,58 @@ class TraderPanel(tk.Frame):
             "expiry": int(self.expiry_var.get() or 60),
         })
 
+    def _rebuild_menu(self, names: List[str]) -> None:
+        """Refresh the asset dropdown when the venue catalog changes."""
+        try:
+            menu = self.asset_menu["menu"]
+            menu.delete(0, "end")
+            for name in names:
+                menu.add_command(label=name,
+                                 command=lambda v=name: self.asset_var.set(v))
+        except Exception:  # noqa: BLE001 — a stale menu never breaks trading
+            pass
+        self._menu_names = tuple(names)
+
+    def _fetch_candles(self, asset: str) -> List[Dict[str, Any]]:
+        """On-demand chart payload for assets outside the snapshot window."""
+        try:
+            res = self.command_cb({"cmd": "candles", "asset": asset})
+        except Exception:  # noqa: BLE001
+            return []
+        if isinstance(res, dict):
+            return list(res.get("candles") or [])
+        return []
+
     def update_state(self, state: Dict[str, Any]) -> None:
-        assets = state.get("assets", [])
-        asset = self.asset_var.get() if self.asset_var.get() in assets else (assets[0] if assets else "")
+        catalog = (state.get("catalog") or {}).get("rows", [])
+        names = [r.get("name", "") for r in catalog if r.get("name")]
+        pool = names or list(state.get("assets", []))
+        if names and tuple(names) != self._menu_names:
+            self._rebuild_menu(names)
+        current = self.asset_var.get()
+        asset = current if current in pool else (pool[0] if pool else "")
+        self._updates += 1
         candles = (state.get("candles") or {}).get(asset, [])
+        if not candles and asset and (asset != self._charted
+                                      or self._updates % 30 == 0):
+            candles = self._fetch_candles(asset)
+        self._charted = asset
         self.chart.set_data(
             [{"o": c["o"], "h": c["h"], "l": c["l"], "c": c["c"]} for c in candles[-160:]],
             asset=asset,
         )
+        info = ""
+        for row in catalog:
+            if row.get("name") == asset:
+                payout = float(row.get("payout") or 0.0) * 100.0
+                flag = "OPEN" if row.get("open") else "SHUT"
+                info = f" · {asset} {payout:.0f}% {flag}"
+                break
         health = state.get("health", {})
         self.status.config(
             text=f"◈ {health.get('engine_state', '?').upper()} · posture {health.get('posture', '-')} · "
                  f"signals {health.get('signals_total', 0)} · vetoes {health.get('vetoes', 0)}"
+                 f"{info}"
         )
 
 

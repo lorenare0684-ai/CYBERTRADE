@@ -27,7 +27,7 @@ import logging
 import os
 import sys
 import time
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from . import __version__
 from .compat import (
@@ -530,6 +530,8 @@ def cmd_quotex(args: argparse.Namespace) -> int:
         for asset in cfg.strategy.universe[:3]:
             print(f"  payout {asset}: {api.payout_for(asset, 60):.2f}")
         return 0
+    if args.action == "assets":
+        return cmd_quotex_assets(api)
     from .brokers.quotex.sync import warm_universe
 
     total = warm_universe(
@@ -539,6 +541,51 @@ def cmd_quotex(args: argparse.Namespace) -> int:
     )
     print(f"  warmed {total} candles across {len(cfg.strategy.universe)} assets")
     return 0 if total else 1
+
+
+def cmd_quotex_assets(api) -> int:
+    """Print every known Quotex asset with live payout/open flags.
+
+    Requests a fresh instrument listing first; whatever the venue confirms
+    within a few seconds is marked LIVE, the rest is the static floor.
+    """
+    import time as _time
+
+    try:
+        api.request_instruments()
+    except Exception:  # noqa: BLE001 — static floor still prints
+        pass
+    cat = getattr(api, "catalog", None)
+    before = float(getattr(cat, "synced_at", 0.0) or 0.0)
+    deadline = _time.time() + 6.0
+    while _time.time() < deadline:
+        now_sync = float(getattr(cat, "synced_at", 0.0) or 0.0)
+        if now_sync > before:
+            break
+        _time.sleep(0.25)
+    rows = list(cat.to_list()) if cat is not None else []
+    live = before > 0.0 or (cat is not None
+                            and float(getattr(cat, "synced_at", 0.0) or 0.0) > 0.0)
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        groups.setdefault(str(row.get("kind") or "unknown"), []).append(row)
+    print(f"  assets: {len(rows)} ({'LIVE venue listing' if live else 'static floor — venue listing not received'})")
+    last_price = getattr(api, "last_price", None)
+    for kind in sorted(groups):
+        print(f"  [{kind}] ({len(groups[kind])})")
+        for row in groups[kind]:
+            px = None
+            if callable(last_price):
+                try:
+                    px = last_price(row["name"])
+                except Exception:  # noqa: BLE001
+                    px = None
+            flag = "OPEN" if row.get("open") else "SHUT"
+            ident = f" id={row['id']}" if row.get("id") not in ("", row["name"]) else ""
+            price = f" @ {px}" if px else ""
+            print(f"    {row['name']:<14} {float(row.get('payout') or 0.0) * 100:>5.1f}%"
+                  f" {flag:<4}{ident}{price}")
+    return 0
 
 
 def cmd_quotex_login(args: argparse.Namespace, cfg: AppConfig) -> int:
@@ -1022,8 +1069,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the I UNDERSTAND confirmation")
     r.set_defaults(func=cmd_run)
 
-    qx = sub.add_parser("quotex", help="venue session: login / status / warm")
-    qx.add_argument("action", choices=["status", "warm", "login"])
+    qx = sub.add_parser("quotex", help="venue session: login / status / warm / assets")
+    qx.add_argument("action", choices=["status", "warm", "login", "assets"])
     qx.add_argument("--ssid", default="",
                     help="session cookie (session-only, never stored)")
     qx.add_argument("--bars", type=int, default=250,

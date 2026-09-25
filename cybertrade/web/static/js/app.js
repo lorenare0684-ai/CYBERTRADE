@@ -5,6 +5,7 @@ const chart = new NeonChart("chart");
 let currentAsset = null;
 let lastState = null;
 let sseTries = 0;
+let chartCache = {}; // candles for watched assets outside the state window
 
 /* ---------- helpers ---------- */
 const $ = (id) => document.getElementById(id);
@@ -186,9 +187,10 @@ function render(state) {
     if (!currentAsset && state.assets && state.assets.length) currentAsset = state.assets[0];
     refreshTabs();
   }
+  renderCatalog(state);
 
   // chart
-  const candles = (state.candles || {})[currentAsset] || [];
+  const candles = (state.candles || {})[currentAsset] || chartCache[currentAsset] || [];
   if (candles.length) {
     chart.setData(candles.map((c) => ({ o: c.o, h: c.h, l: c.l, c: c.c })));
     const last = candles[candles.length - 1];
@@ -242,6 +244,57 @@ function refreshTabs() {
   document.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.dataset.asset === currentAsset);
   });
+}
+
+/* ---------- asset catalog: every Quotex instrument, one click to chart ---------- */
+function renderCatalog(state) {
+  const pick = $("asset-pick");
+  if (!pick) return;
+  if (!pick.onchange) pick.onchange = () => watchAsset(pick.value);
+  const cat = state.catalog || { rows: [] };
+  const rows = cat.rows || [];
+  const sig = rows.length + ":" + rows.map((r) => r.name).join(",");
+  if (pick.dataset.sig !== sig) {
+    pick.dataset.sig = sig;
+    const groups = {};
+    rows.forEach((r) => {
+      const k = r.kind || "unknown";
+      (groups[k] = groups[k] || []).push(r);
+    });
+    pick.innerHTML = "";
+    Object.keys(groups).sort().forEach((k) => {
+      const og = document.createElement("optgroup");
+      og.label = k.toUpperCase().replace("_", " ");
+      groups[k].forEach((r) => {
+        const o = document.createElement("option");
+        o.value = r.name;
+        o.textContent = `${r.name} · ${Math.round((r.payout || 0) * 100)}%` +
+          (r.open ? "" : " · SHUT");
+        og.appendChild(o);
+      });
+      pick.appendChild(og);
+    });
+  }
+  if (currentAsset) pick.value = currentAsset;
+  const meta = $("catalog-meta");
+  if (meta) meta.textContent = `${rows.length} assets · ${cat.live ? "LIVE" : "STATIC"}`;
+}
+
+async function watchAsset(name) {
+  if (!name) return;
+  const res = await cmd({ cmd: "watch", asset: name });
+  if (res && res.candles && res.candles.length) {
+    chartCache[name] = res.candles;
+  } else {
+    try {
+      const r = await fetch("/api/candles?asset=" + encodeURIComponent(name) + "&limit=180");
+      const j = await r.json();
+      if (j.candles && j.candles.length) chartCache[name] = j.candles;
+    } catch (e) { /* keep whatever the chart already shows */ }
+  }
+  currentAsset = name;
+  refreshTabs();
+  if (lastState) render(lastState);
 }
 
 /* ---------- Phase-2: intel (calendar / alerts / clusters) ---------- */

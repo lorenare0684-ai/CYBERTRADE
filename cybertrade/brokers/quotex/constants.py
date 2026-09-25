@@ -54,6 +54,17 @@ SV_ORDER = "order"
 SV_ORDERS = "orders"
 SV_ORDER_RESULT = "orderResult"
 SV_PORTFOLIO = "portfolio"
+SV_ASSETS_LIST = "assets_list"
+# Every spelling the instrument listing has been seen under (community
+# clients disagree; the dispatcher accepts them all).
+INSTRUMENT_EVENTS = (
+    "instrument",
+    "instruments",
+    "assets_list",
+    "assetList",
+    "assets",
+    "asset_list",
+)
 SV_PROFIT = "profit"
 SV_ERROR = "error"
 SV_NOTIFICATION = "notification"

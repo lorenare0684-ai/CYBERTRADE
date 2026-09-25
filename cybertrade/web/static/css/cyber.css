@@ -229,6 +229,9 @@ html, body {
   background: rgba(3,4,10,.8); color: #00fff9; border: 1px solid rgba(0,255,249,.3);
   font-family: inherit; font-size: 10px; letter-spacing: 1px; padding: 2px 4px;
 }
+.catalog-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; font-size: 10px; color: var(--dim); letter-spacing: 1px; }
+.catalog-row .neon-select { max-width: 260px; }
+#catalog-meta { opacity: .75; }
 /* stack blotter & console in one row via subgrid substitute */
 .blotter-panel { grid-column: 1; grid-row: 2; width: 58%; float: left; }
 .console-panel { grid-column: 1; grid-row: 2; width: calc(42% - 12px); margin-left: 58%; display: flex; }

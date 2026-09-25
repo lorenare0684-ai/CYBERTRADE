@@ -514,8 +514,27 @@ class QuotexAPI:
             asset, price, ts = parse_tick(args)
             if asset and price > 0:
                 tick = Tick(asset=asset, price=price, ts=ts / 1000.0 if ts > 1e11 else float(ts))
+                discovered = None
                 with self._lock:
                     self._last_tick[asset] = tick
+                    if asset not in self.assets and self.catalog.get(asset) is None:
+                        # Quote-driven discovery: the venue sometimes streams
+                        # quotes for assets its listing never named.  A bare
+                        # sighting still joins the catalog (kind inferred,
+                        # payout static) so the boards show everything alive.
+                        from .catalog import infer_kind
+                        from .models import QXAsset
+
+                        discovered = QXAsset(
+                            name=asset, asset_id=asset,
+                            payout=self.catalog.payout_for(asset),
+                            open=True,
+                            is_otc=asset.endswith("_otc"),
+                            kind=infer_kind(asset))
+                        self.assets[asset] = discovered
+                        self.catalog.upsert(discovered)
+                if discovered is not None:
+                    self._emit("instruments", [discovered])
                 for fn in list(self._tick_handlers):
                     try:
                         fn(tick)
@@ -534,7 +553,7 @@ class QuotexAPI:
             self._balance_seen.set()
             self._emit("balance", self.balance)
 
-        elif name in (C.EV_INSTRUMENT, "instruments", "assets", "asset_list"):
+        elif name in C.INSTRUMENT_EVENTS:
             from .protocol import parse_instruments
 
             listing = parse_instruments(args)
