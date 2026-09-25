@@ -58,9 +58,14 @@ class PairingController:
 
     def __init__(self, config: AppConfig,
                  on_ready: Callable[[str, bool, str], None],
-                 probe: Optional[Callable[[], bool]] = None) -> None:
+                 probe: Optional[Callable[[], bool]] = None,
+                 adopted: Optional[Callable[[], bool]] = None) -> None:
         self.config = config
         self.on_ready = on_ready
+        # "has the terminal picked the captured session up yet?" -- while
+        # an engine is still booting on it, a second pairing would race the
+        # first for the state lock.  Defaults to the probe.
+        self.adopted = adopted
         # "is a working session in hand right now?" -- the saved file is only
         # half the story: --ssid and QX_SSID never touch the disk, and a
         # running engine may hold a cookie no file describes.
@@ -76,6 +81,7 @@ class PairingController:
         self._profile = ""
         self._port = 9333        # DevTools port of the current/past attempt
         self._epoch = 0          # bumped on start/cancel: stale results die
+        self._ready_at = 0.0     # when the last cookie landed (adoption guard)
 
     # -- queries ------------------------------------------------------------
     def state(self) -> str:
@@ -137,6 +143,24 @@ class PairingController:
         out["active"] = live
         return out
 
+    ADOPT_GRACE = 180.0  # seconds a captured session may take to go live
+
+    def _adopting_locked(self) -> bool:
+        """True while a captured session is still booting the engine.
+
+        Caller holds the lock.  A boot that never goes live must not wedge
+        the button forever, so the guard lapses after ``ADOPT_GRACE``.
+        """
+        if self._state != READY or (self.probe is None and self.adopted is None):
+            return False
+        check = self.adopted or self._active
+        try:
+            if check():
+                return False
+        except Exception:  # noqa: BLE001 - a probe must never block pairing
+            return False
+        return (time.time() - self._ready_at) < self.ADOPT_GRACE
+
     def _active(self) -> bool:
         if self.probe is not None:
             try:
@@ -160,6 +184,11 @@ class PairingController:
             if self._state in (LAUNCHING, WAITING):
                 return {"ok": False, "error":
                         "a pairing is already running — finish it or cancel"}
+            if self._adopting_locked():
+                return {"ok": False, "error":
+                        "the terminal is still starting on the last session "
+                        "(history warm-up, up to a minute) — wait for it; a "
+                        "second boot would fight the first over the state lock"}
             self._message = ("launching Chrome — log in and solve the "
                              "CAPTCHA in the window that opens")
             self._error = ""
@@ -263,6 +292,7 @@ class PairingController:
             return
         with self._lock:
             self._state = READY
+            self._ready_at = time.time()
             self._ssid = ssid
             self._message = "session captured — the terminal is live"
 

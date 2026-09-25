@@ -76,6 +76,11 @@ SV_CANDLE = "candle"                 # legacy tolerance only
 SV_TICK = "tick"                     # legacy tolerance only
 SV_BALANCE = "balance"               # {demoBalance, liveBalance, …}
 SV_BALANCE_UPDATE = "balanceUpdate"
+SV_S_BALANCE_LIST = "s_balance/list"  # live (Sep-2026): purse balances after auth / account change
+SV_SETTINGS_LIST = "settings/list"    # live: profile settings {id/uid, nickname, demoBalance, liveBalance, …}
+BALANCE_EVENTS = (SV_BALANCE, SV_BALANCE_UPDATE, SV_S_BALANCE_LIST)
+SV_ORDERS_OPENED_LIST = "orders/opened/list"  # live: open contracts snapshot after auth
+SV_ORDERS_CLOSED_LIST = "orders/closed/list"  # live: recent settled contracts snapshot
 SV_ORDER = "order"
 SV_ORDERS = "orders"
 SV_ORDER_RESULT = "orderResult"
@@ -89,8 +94,9 @@ SV_S_ORDERS_CLOSE = "s_orders/close"
 SV_ORDERS_CLOSED = "orders/closed"
 SV_ORDERS_CLOSE = "orders/close"
 SV_DEALS = "deals"
-ORDER_OPEN_EVENTS = (SV_S_ORDERS_OPEN, "orders/open", SV_ORDERS_OPENED)
-ORDER_CLOSE_EVENTS = (SV_S_ORDERS_CLOSE, SV_ORDERS_CLOSE, SV_ORDERS_CLOSED, SV_DEALS)
+ORDER_OPEN_EVENTS = (SV_S_ORDERS_OPEN, "orders/open", SV_ORDERS_OPENED, SV_ORDERS_OPENED_LIST)
+ORDER_CLOSE_EVENTS = (SV_S_ORDERS_CLOSE, SV_ORDERS_CLOSE, SV_ORDERS_CLOSED, SV_DEALS,
+                      SV_ORDERS_CLOSED_LIST)
 SV_PORTFOLIO = "portfolio"
 SV_ASSETS_LIST = "assets_list"
 # Every spelling the instrument listing has been seen under (community
@@ -189,6 +195,11 @@ __all__ = [
     "SV_QUOTES_STREAM",
     "SV_DEPTH_CHANGE",
     "QUOTE_EVENTS",
+    "SV_S_BALANCE_LIST",
+    "SV_SETTINGS_LIST",
+    "BALANCE_EVENTS",
+    "SV_ORDERS_OPENED_LIST",
+    "SV_ORDERS_CLOSED_LIST",
     "SV_S_ORDERS_OPEN",
     "SV_ORDERS_OPENED",
     "SV_S_ORDERS_CLOSE",

@@ -173,11 +173,13 @@ function render(state) {
     r.classList.toggle("active", r.dataset.p === posture);
   });
 
-  // asset tabs
+  // watch strip: the assets on the live feed (the full catalog lives in the ☰ menu)
   const tabs = $("asset-tabs");
-  if (tabs.childElementCount !== (state.assets || []).length) {
+  const strip = (state.assets || []).slice(0, 8);
+  if (tabs.dataset.sig !== strip.join(",")) {
+    tabs.dataset.sig = strip.join(",");
     tabs.innerHTML = "";
-    (state.assets || []).forEach((a) => {
+    strip.forEach((a) => {
       const b = document.createElement("button");
       b.className = "tab"; b.textContent = a.replace("_otc", "");
       b.onclick = () => { currentAsset = a; refreshTabs(); render(lastState); };
@@ -250,7 +252,34 @@ function refreshTabs() {
    Rows rebuild only when the shown set changes; each poll just refreshes
    the payout / OPEN-SHUT / price cells in place (no flicker, no scroll jump). */
 const boardEls = new Map(); // name -> {row, mark, pay, st, px, last}
+function setupAssetMenu() {
+  const btn = $("asset-menu-btn");
+  const pop = $("asset-menu-pop");
+  if (!btn || !pop || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
+  const open = (on) => {
+    pop.hidden = !on;
+    btn.setAttribute("aria-expanded", on ? "true" : "false");
+    if (on) {
+      const s = $("asset-search");
+      if (s) { s.focus(); s.select(); }
+      const act = pop.querySelector(".ab-row.active");
+      if (act) act.scrollIntoView({ block: "center" });
+    }
+  };
+  btn.addEventListener("click", (e) => { e.stopPropagation(); open(pop.hidden); });
+  document.addEventListener("click", (e) => {
+    if (!pop.hidden && !pop.contains(e.target) && e.target !== btn) open(false);
+  });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !pop.hidden) open(false); });
+  pop.addEventListener("click", (e) => {
+    const row = e.target.closest(".ab-row");
+    if (row) open(false);
+  });
+}
+
 function renderCatalog(state, refilter) {
+  setupAssetMenu();
   const board = $("asset-board");
   if (!board) return;
   st = state || lastState || {};

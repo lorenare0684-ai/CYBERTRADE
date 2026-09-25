@@ -217,6 +217,7 @@ class QuotexAPI:
         self._data_seen = threading.Event()
         # Set by the dispatcher on the venue's ``s_account/change`` ack.
         self._purse_confirmed = threading.Event()
+        self._shape_logged: set = set()
 
     # -- website session ---------------------------------------------------
     def login(self, email: str, password: str, is_demo: Optional[bool] = None) -> QXSession:
@@ -824,6 +825,28 @@ class QuotexAPI:
         elif name in C.ORDER_CLOSE_EVENTS:
             self._note_data(name)
             self._absorb_orders(name, args, closed=True)
+        elif name in C.BALANCE_EVENTS or name == C.SV_SETTINGS_LIST:
+            parsed = parse_balance(args, demo=self.demo)
+            if name == C.SV_SETTINGS_LIST and parsed.balance <= 0 and self.balance.balance > 0:
+                # the profile may carry stale/zero purse numbers — keep the
+                # live balance, still harvest the identity below
+                parsed.balance = self.balance.balance
+            if not parsed.user_id and self.balance.user_id:
+                parsed.user_id = self.balance.user_id
+            if name not in self._shape_logged:
+                self._shape_logged.add(name)
+                log.info("venue %s shape: %.200s", name, repr(args)[:200])
+            self.balance = parsed
+            if parsed.balance > 0 or name != C.SV_SETTINGS_LIST:
+                self._balance_seen.set()
+                self._note_data(name)
+            if self.balance.user_id and not self.session.user_id:
+                # A paired session carries no identity of its own — adopt
+                # the venue-confirmed account id for continuity scoping.
+                self.session.user_id = self.balance.user_id
+                log.info("venue confirmed account %s", self.balance.user_id)
+            self._emit("balance", self.balance)
+
         elif name == C.SV_S_ACCOUNT_CHANGE or (
                 isinstance(name, str) and name.startswith("s_")):
             log.info("venue confirm: %s", name)
@@ -844,17 +867,6 @@ class QuotexAPI:
                 self._note_data(name)
             for qc in qlist:
                 self._ingest_candle(qc)
-
-        elif name in (C.SV_BALANCE, C.SV_BALANCE_UPDATE):
-            self.balance = parse_balance(args, demo=self.demo)
-            self._balance_seen.set()
-            self._note_data(name)
-            if self.balance.user_id and not self.session.user_id:
-                # A paired session carries no identity of its own — adopt
-                # the venue-confirmed account id for continuity scoping.
-                self.session.user_id = self.balance.user_id
-                log.info("venue confirmed account %s", self.balance.user_id)
-            self._emit("balance", self.balance)
 
         elif name in C.INSTRUMENT_EVENTS:
             from .protocol import parse_instruments

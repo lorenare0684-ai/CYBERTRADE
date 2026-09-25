@@ -149,3 +149,46 @@ class TestNoClientConnectPacket(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLiveBalanceEvents(unittest.TestCase):
+    """``s_balance/list`` / ``settings/list`` (live Sep-2026) carry the purse
+    balance and the account id — they used to fall into the generic
+    ``s_*`` confirm branch, booting the engine with balance 0 and no user id
+    (RECOVERY HOLD)."""
+
+    def _api(self):
+        return QuotexAPI(pace=Pacekeeper(enabled=False))
+
+    def test_s_balance_list_dict(self):
+        api = self._api()
+        api._on_socket_event("s_balance/list", [{"liveBalance": 0, "demoBalance": 10000, "uid": 42}])
+        self.assertAlmostEqual(api.balance.balance, 10000)
+        self.assertEqual(api.session.user_id, "42")
+        self.assertTrue(api._balance_seen.is_set())
+
+    def test_s_balance_list_rows_pick_active_purse(self):
+        api = self._api()
+        api._on_socket_event("s_balance/list", [[{"isDemo": 0, "balance": 3.5},
+                                                 {"isDemo": 1, "balance": 9950.5}]])
+        self.assertAlmostEqual(api.balance.balance, 9950.5)
+        api.demo = False
+        api._on_socket_event("s_balance/list", [[{"isDemo": 0, "balance": 3.5},
+                                                 {"isDemo": 1, "balance": 9950.5}]])
+        self.assertAlmostEqual(api.balance.balance, 3.5)
+
+    def test_settings_list_profile_gives_identity(self):
+        api = self._api()
+        api._on_socket_event("settings/list", [{"data": {"id": 777, "nickname": "n",
+                                                          "demoBalance": 500, "liveBalance": 0,
+                                                          "currencyCode": "USD"}}])
+        self.assertEqual(api.session.user_id, "777")
+        self.assertAlmostEqual(api.balance.balance, 500)
+
+    def test_orders_lists_fold_into_state(self):
+        api = self._api()
+        api._on_socket_event("orders/opened/list", [[{"id": 1, "asset": "EURUSD_otc", "amount": 5, "profit": 4}]])
+        api._on_socket_event("orders/closed/list", [[{"id": 2, "asset": "EURUSD_otc", "amount": 5, "profit": -5}]])
+        self.assertEqual(api.order_result("1").status, "open")
+        self.assertEqual(api.order_result("2").status, "loss")
+        self.assertEqual(api.account_snapshot().open_positions, 1)

@@ -31,15 +31,24 @@
   <section class="panel chart-panel">
     <div class="panel-head">
       <span class="corner tl"></span><span class="corner tr"></span>
-      <h2>◈ MARKET // <span id="chart-asset">---</span></h2>
-      <div class="tabs" id="asset-tabs"></div>
-      <div class="catalog-row">
-        <input id="asset-search" class="neon-input" placeholder="filter assets…" autocomplete="off"
-               title="Type to narrow the board" />
-        <select id="asset-kind" class="neon-select" title="Filter by asset kind"></select>
-        <span class="mini" id="catalog-meta">—</span>
+      <div class="market-bar">
+        <div class="asset-menu" id="asset-menu">
+          <button type="button" id="asset-menu-btn" class="menu-btn" aria-haspopup="true" aria-expanded="false"
+                  title="Choose an asset to chart and trade">
+            <span class="bars"><i></i><i></i><i></i></span>
+          </button>
+          <div class="menu-pop" id="asset-menu-pop" role="menu" hidden>
+            <div class="menu-head">
+              <input id="asset-search" class="menu-search" placeholder="Filter assets…" autocomplete="off" />
+              <select id="asset-kind" class="menu-kind" title="Filter by asset kind"></select>
+            </div>
+            <div id="asset-board" class="asset-board" title="Every Quotex asset — click one to chart and trade it"></div>
+            <div class="menu-foot mini" id="catalog-meta">—</div>
+          </div>
+        </div>
+        <h2>◈ MARKET // <span id="chart-asset">---</span></h2>
+        <div class="watch-strip" id="asset-tabs" title="Assets on the live feed"></div>
       </div>
-      <div id="asset-board" class="asset-board" title="Every Quotex asset — click one to chart and trade it"></div>
     </div>
     <div class="chart-wrap">
       <canvas id="chart" width="880" height="380"></canvas>

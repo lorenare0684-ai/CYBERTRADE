@@ -24,6 +24,13 @@ class QXBalance:
         if isinstance(payload, (list, tuple)) and payload and isinstance(payload[0], (int, float)):
             return cls(balance=float(payload[0]))
         data = payload if isinstance(payload, dict) else {}
+        if isinstance(payload, (list, tuple)):
+            # live ``s_balance/list``: rows per purse — pick the active one
+            rows = [r for r in payload if isinstance(r, dict)]
+            data = _pick_purse_row(rows, demo) or {}
+        if isinstance(data.get("data"), dict) and not (
+                "demoBalance" in data or "liveBalance" in data or "balance" in data):
+            data = data["data"]  # settings/list wraps the profile in "data"
         if "demoBalance" in data or "liveBalance" in data:
             # the venue's own push shape — pick the active purse
             balance = float(data.get("demoBalance" if demo else "liveBalance") or 0.0)
@@ -36,6 +43,9 @@ class QXBalance:
             dig(data, "uid", dig(data, "userId", dig(data, "user_id",
                 dig(data, "data.userId", dig(data, "id", ""))))) or ""
         )
+        if user_id and not user_id.isdigit() and user_id == str(data.get("id", "")) \
+                and not any(k in data for k in ("nickname", "uid", "userId", "currencyCode")):
+            user_id = ""  # an "id" on a non-profile row is not an account id
         return cls(
             account_type=kind,
             balance=balance,
@@ -43,6 +53,33 @@ class QXBalance:
             user_id=user_id,
             demo=demo,
         )
+
+
+def _pick_purse_row(rows: List[Dict[str, Any]], demo: bool) -> Optional[Dict[str, Any]]:
+    """Choose the active purse from a per-account balance list.
+
+    Rows carry ``isDemo`` / ``demo`` / ``type`` in various spellings; when
+    nothing marks them, a single row wins and otherwise the first does.
+    """
+    if not rows:
+        return None
+    want = 1 if demo else 0
+    for r in rows:
+        for key in ("isDemo", "demo", "is_demo"):
+            if key in r:
+                try:
+                    if int(bool(r[key])) == want:
+                        return r
+                except (TypeError, ValueError):
+                    pass
+                break
+        kind = str(r.get("type", r.get("accountType", ""))).upper()
+        if kind and ((kind in ("DEMO", "PRACTICE")) == bool(demo)):
+            return r
+    for r in rows:
+        if "demoBalance" in r or "liveBalance" in r:
+            return r
+    return rows[0]
 
 
 @dataclass

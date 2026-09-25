@@ -469,7 +469,8 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
     hub = EngineHub(None, cfg)
     hub.pairing = PairingController(
         cfg, _on_ready,
-        probe=lambda: _has_live_session(hub))
+        probe=lambda: _has_live_session(hub),
+        adopted=lambda: getattr(hub, "engine", None) is not None)
     web = WebTerminal(hub, host=host, port=port)
     try:
         web.start()
