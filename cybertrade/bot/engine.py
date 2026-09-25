@@ -25,7 +25,7 @@ from ..constants import EngineState, Side, Timeframe
 from ..data.feed import Feed, QuoteBook
 from ..data.models import Signal, TradeRecord
 from ..events import Topic, default_bus
-from ..exceptions import ConfigError, KillSwitchEngaged, RiskRejection
+from ..exceptions import ConfigError, FeedError, KillSwitchEngaged, RiskRejection
 from ..execution.oms import OrderManager
 from ..regime.detector import RegimeDetector, RegimeReading
 from ..risk.manager import RiskManager
@@ -165,6 +165,12 @@ class TradingEngine:
             log.exception("journal open failed — trade history will be in-memory only")
             self.journal = None
         self._journal_session = 0
+        # Degraded boot: the venue yielded zero candles (dead/slow session).
+        # The terminal stays alive and keeps retrying; trading is impossible
+        # anyway (no candles → no signals) and the engine stays DISARMED.
+        self.degraded = ""
+        self._rewarm_started = False
+        self._rewarm_busy = False
         self.supervisor: Optional[ReconnectSupervisor] = None
         self._decay_alerted: set = set()
         self.edge_rejects = 0
@@ -195,6 +201,52 @@ class TradingEngine:
         default_bus.publish(Topic.CONNECTION, {"event": kind, **payload},
                             source="network")
 
+    def _enter_degraded(self, reason: str) -> None:
+        """Boot without venue data — alive, DISARMED, retrying warmup."""
+        self.degraded = reason or "no venue data"
+        log.critical("degraded boot: %s — terminal stays up, retrying warmup",
+                     self.degraded)
+        self.health.note_message(f"NO VENUE DATA — {self.degraded} (retrying)")
+        if not self._rewarm_started:
+            self._rewarm_started = True
+            thread = threading.Thread(target=self._rewarm_loop, daemon=True,
+                                      name="engine-rewarm")
+            thread.start()
+
+    def _try_rewarm(self) -> bool:
+        """One synchronous warmup retry; True when data is flowing."""
+        warmer = getattr(self.feed, "warmup", None)
+        if not callable(warmer):
+            return False
+        try:
+            warmer()
+        except FeedError as exc:
+            log.debug("rewarm still dry: %s", exc)
+            return False
+        except Exception:  # noqa: BLE001 — a retry must never kill the loop
+            log.exception("rewarm attempt failed")
+            return False
+        self.degraded = ""
+        log.info("venue data flowing — terminal fully live")
+        self.health.note_message("venue data flowing — terminal fully live")
+        return True
+
+    def _rewarm_once(self) -> None:
+        """One guarded background retry (reconnect-triggered)."""
+        try:
+            self._try_rewarm()
+        finally:
+            with self._lock:
+                self._rewarm_busy = False
+
+    def _rewarm_loop(self) -> None:
+        """Background warmup until the first candles land (or shutdown)."""
+        # The first retry waits a full tick: warmup *just* failed, so an
+        # immediate second attempt would only hammer a struggling venue.
+        while not self._stop_event.wait(60.0):
+            if self._try_rewarm():
+                return
+
     def _on_venue_event(self, kind: str, payload: object) -> None:
         """Adopt newly detected venue assets into the running universe."""
         if kind == "instruments" and isinstance(payload, list):
@@ -202,6 +254,16 @@ class TradingEngine:
                 self._adopt_assets(payload)
             except Exception:  # noqa: BLE001 — discovery never breaks trading
                 log.exception("venue asset adoption failed")
+        elif kind == "reconnected" and self.degraded:
+            # A restored wire may carry the history warmup missed — retry
+            # now instead of waiting for the next 60s tick.
+            with self._lock:
+                if self._rewarm_busy:
+                    return
+                self._rewarm_busy = True
+            thread = threading.Thread(target=self._rewarm_once, daemon=True,
+                                      name="engine-rewarm-now")
+            thread.start()
 
     def _adopt_assets(self, listing: Sequence[Any]) -> int:
         adopted = 0
@@ -415,7 +477,13 @@ class TradingEngine:
         self._restore_calibration()
         self._restore_operator_state()
         if hasattr(self.feed, "warmup"):
-            self.feed.warmup()
+            try:
+                self.feed.warmup()
+            except FeedError as exc:
+                # A blind terminal must not die: killing the process here
+                # takes the web server and the pairing screen with it, so a
+                # dead session becomes unrecoverable without a restart.
+                self._enter_degraded(str(exc))
         self.broker.connect()
         # live venue wiring: stream quotes into the same pipeline as the feed
         # and pull the instrument catalog (no-ops for a broker with no api).
@@ -1042,6 +1110,7 @@ class TradingEngine:
             "assets": list(self.feed.assets),
             "candles": self._snapshot_candles(limit=120),
             "catalog": self.catalog_block(),
+            "degraded": self.degraded,
         }
 
     def _snapshot_candles(self, limit: int = 120) -> Dict[str, List[Dict[str, Any]]]:

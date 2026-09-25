@@ -585,6 +585,12 @@ function pairRender(s) {
     pairSay(msg + wait, "busy");
     return;
   }
+  if (st === "adopting") {
+    // Cookie landed, engine still booting: stay on the veil, keep polling.
+    // Reporting "ready" here would flap the veil until the engine attaches.
+    pairSay(msg || "session captured — starting the terminal…", "busy");
+    return;
+  }
   // idle
   pairSay(msg || "no venue session yet — pair one below", "");
 }

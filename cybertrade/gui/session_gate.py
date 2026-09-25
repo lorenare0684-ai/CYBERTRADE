@@ -45,12 +45,14 @@ class SessionGate(tk.Tk):
         theme: Optional[Theme] = None,
         on_ready: Optional[Callable[[str, bool], None]] = None,
         on_cancel: Optional[Callable[[], None]] = None,
+        notice: str = "",
     ) -> None:
         super().__init__()
         self.config = config
         self.theme = theme or Theme(getattr(config.display, "theme", "neon_abyss"))
         self.on_ready = on_ready
         self.on_cancel = on_cancel
+        self.notice = notice
         self._pairing = False
 
         t = self.theme
@@ -237,6 +239,11 @@ class SessionGate(tk.Tk):
         self.cancel_btn.set_color(self.theme["red"])
 
     def _refresh_status(self) -> None:
+        if self.notice:
+            # A failed engine boot lands back here: the reason is the only
+            # thing the operator needs to see before pairing again.
+            self._say(f"last attempt failed: {self.notice}", "red")
+            return
         path = getattr(self.config, "qx_session_path", "")
         if session_status(path) == "no session yet":
             self._say("no venue session yet — pair one below", "yellow")
@@ -245,9 +252,10 @@ class SessionGate(tk.Tk):
                       "it — pair again below", "yellow")
 
 
-def run_gate(config, on_ready, on_cancel=None) -> None:
+def run_gate(config, on_ready, on_cancel=None, notice: str = "") -> None:
     """Open the pre-flight pairing window and block until it closes."""
-    gate = SessionGate(config, on_ready=on_ready, on_cancel=on_cancel)
+    gate = SessionGate(config, on_ready=on_ready, on_cancel=on_cancel,
+                       notice=notice)
     gate.mainloop()
 
 

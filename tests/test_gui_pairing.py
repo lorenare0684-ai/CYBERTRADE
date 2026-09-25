@@ -539,6 +539,13 @@ class TestSessionGate(unittest.TestCase):
         self.assertIn("CHROME LOGIN", self.gate.login_btn.label)
         self.assertEqual(self.gate.purse.get(), "")
 
+    def test_a_failed_boot_lands_back_here_with_the_reason(self):
+        """The desktop retry loop re-opens the gate showing why it failed."""
+        gate = self.gate_mod.SessionGate(self.cfg, notice="venue unreachable")
+        self.addCleanup(gate.destroy)
+        self.assertIn("last attempt failed", gate.status._label)
+        self.assertIn("venue unreachable", gate.status._label)
+
     def test_a_cli_purse_carries_into_the_window(self):
         """--demo/--real is an explicit choice, so the gate must not re-ask."""
         for flag, expected in ((True, "practice"), (False, "real")):
@@ -643,7 +650,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
 
         calls = {}
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             calls["gate"] = True
             on_ready("QX.paired", True)          # operator pairs successfully
 
@@ -688,7 +695,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
         import cybertrade.cli as cli
         gate_mod, gui_pkg = self.gate_mod, self.gui_pkg
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             pass                                     # operator closes the window
 
         with mock.patch.object(cli, "_build_engine",
@@ -708,7 +715,7 @@ class TestGuiBootsWithoutASession(unittest.TestCase):
 
         captured = {}
 
-        def fake_gate(cfg, on_ready=None, on_cancel=None):
+        def fake_gate(cfg, on_ready=None, on_cancel=None, notice=""):
             captured["before"] = cfg.broker.ssid
             on_ready("QX.secret", True)
             captured["after"] = cfg.broker.ssid

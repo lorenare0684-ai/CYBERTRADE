@@ -41,10 +41,11 @@ log = logging.getLogger("cybertrade.web.pairing")
 IDLE = "idle"
 LAUNCHING = "launching"
 WAITING = "waiting"
+ADOPTING = "adopting"
 READY = "ready"
 FAILED = "failed"
 
-STATES = (IDLE, LAUNCHING, WAITING, READY, FAILED)
+STATES = (IDLE, LAUNCHING, WAITING, ADOPTING, READY, FAILED)
 
 
 class PairingController:
@@ -106,10 +107,21 @@ class PairingController:
             # session is live. Both keys must agree.
             saved = session_status(
                 getattr(self.config, "qx_session_path", ""))
+            # READY means the cookie landed — but the terminal is only live
+            # once the engine holds it.  Reporting "ready" during the
+            # minute-long engine boot makes the veil flap open/closed, so a
+            # captured-but-unadopted session reports "adopting" instead.
+            # (Without a probe there is no engine to wait for: ready as ever.)
+            reported = self._state
+            message = self._message
+            if self._state == READY and self.probe is not None and not live:
+                reported = ADOPTING
+                message = ("session captured — starting the terminal "
+                           "(first boot pulls history, up to a minute)…")
             out = {
-                "state": self._state,
-                "busy": self._state in (LAUNCHING, WAITING),
-                "message": self._message,
+                "state": reported,
+                "busy": (self._state in (LAUNCHING, WAITING) or reported == ADOPTING),
+                "message": message,
                 "error": self._error,
                 "ssid_present": bool(self._ssid),
                 "purse": self._purse,
@@ -198,6 +210,21 @@ class PairingController:
         log.warning("chrome pairing cancelled by the operator")
         return {"ok": True, **self.status()}
 
+    def note_error(self, message: str) -> Dict[str, Any]:
+        """Fail the attempt from the adopting thread (engine refused it).
+
+        The cookie landed but the terminal could not start on it — the veil
+        must say so with a way back (Start again), not spin forever.
+        """
+        with self._lock:
+            self._state = FAILED
+            self._error = message
+            self._message = f"pairing failed: {message}"
+            self._thread = None
+            self._epoch += 1
+        log.warning("pairing adopted badly: %s", message)
+        return {"ok": False, **self.status()}
+
     # -- worker callbacks (on the worker thread) ----------------------------
     def _live(self, epoch: int) -> bool:
         """False once the attempt was cancelled or superseded by a new one.
@@ -217,9 +244,9 @@ class PairingController:
         if not ssid:
             with self._lock:
                 self._state = FAILED
-                self._message = ("Chrome closed without a sessionid cookie — "
+                self._message = ("Chrome closed without a session cookie — "
                                  "start again")
-                self._error = "no sessionid cookie seen"
+                self._error = "no session cookie seen"
             return
         with self._lock:
             purse = self._purse
@@ -247,4 +274,4 @@ class PairingController:
 
 
 __all__ = ["PairingController", "STATES", "IDLE", "LAUNCHING", "WAITING",
-           "READY", "FAILED"]
+           "ADOPTING", "READY", "FAILED"]

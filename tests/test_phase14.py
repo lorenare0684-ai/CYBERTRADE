@@ -139,13 +139,31 @@ class TestBootWarm(unittest.TestCase):
         self.assertIn(MARKER + 2, ts)
         eng.shutdown()
 
-    def test_dead_venue_history_blocks_boot(self):
-        # the live build refuses to trade on an empty venue book
-        from cybertrade.data.feed import FeedError
+    def test_dead_venue_history_boots_degraded(self):
+        # a silent venue must not kill the terminal (and its pairing
+        # screen): the engine boots DISARMED, flags the outage, and keeps
+        # retrying warmup in the background.  Trading stays impossible —
+        # no candles means no signals — but re-pairing stays possible.
+        eng = self._boot_engine(FakeApi(fail=True))
+        try:
+            self.assertTrue(eng.degraded)
+            self.assertIn("0 candles", eng.degraded)
+            from cybertrade.constants import EngineState
 
-        with self.assertRaises((FeedError, ConfigError)) as ctx:
-            self._boot_engine(FakeApi(fail=True))
-        self.assertIn("warmup", str(ctx.exception).lower())
+            self.assertIs(eng.state, EngineState.DISARMED)
+        finally:
+            eng.shutdown()
+
+    def test_rewarm_recovers_when_the_venue_returns(self):
+        fake = FakeApi(fail=True)
+        eng = self._boot_engine(fake)
+        try:
+            self.assertTrue(eng.degraded)
+            fake.fail = False
+            self.assertTrue(eng._try_rewarm())
+            self.assertEqual(eng.degraded, "")
+        finally:
+            eng.shutdown()
 
 
 class TestQuotexCommand(unittest.TestCase):

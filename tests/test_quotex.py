@@ -167,6 +167,20 @@ class TestSync(unittest.TestCase):
         self.assertEqual(n, 10)
         self.assertEqual(len(series), 10)
 
+    def test_silent_warm_stays_below_info(self):
+        """A venue that answers nothing must not flood the console.
+
+        Every asset × timeframe logs one line per warmup; at INFO a dead
+        session buries the one line that matters (degraded boot).
+        """
+        class Silent:
+            def get_candles(self, *a, **kw):
+                return []
+
+        with self.assertNoLogs("cybertrade.qx.sync", level="INFO"):
+            self.assertEqual(
+                warm_asset(Silent(), "EURUSD_otc", bars=10, wait=0.01), 0)
+
 
 class TestApiDispatcherOffline(unittest.TestCase):
     def test_instruments_event_populates_catalog(self):

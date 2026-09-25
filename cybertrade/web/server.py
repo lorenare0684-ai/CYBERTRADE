@@ -16,6 +16,7 @@ import logging
 import mimetypes
 import os
 import queue
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -327,6 +328,24 @@ class EngineHub:
 
     def logs(self, limit: int = 200) -> List[dict]:
         return self._log_lines[-limit:]
+
+
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """Browsers abort idle keep-alive connections all the time.
+
+    Stock ``socketserver`` prints a full traceback for every one (Windows
+    reports it as ``ConnectionAbortedError`` 10053), which buries real
+    errors.  Dropped client connections are not errors — swallow exactly
+    those, and let everything else shout as before.
+    """
+
+    _QUIET = (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)
+
+    def handle_error(self, request, client_address) -> None:  # noqa: N802
+        _exc, value, _tb = sys.exc_info()
+        if isinstance(value, self._QUIET):
+            return
+        super().handle_error(request, client_address)
 
 
 class WebTerminal:
@@ -706,7 +725,7 @@ class WebTerminal:
 
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
-        self._httpd = ThreadingHTTPServer((self.host, self.port), self._handler_cls)
+        self._httpd = _QuietHTTPServer((self.host, self.port), self._handler_cls)
         self._httpd.daemon_threads = True
         self._thread = threading.Thread(
             target=self._httpd.serve_forever, daemon=True, name="web-terminal"

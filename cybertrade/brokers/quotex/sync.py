@@ -54,7 +54,11 @@ def warm_asset(
         log.warning("history warm failed %s@%ss: %s", asset, timeframe_seconds, exc)
         return 0
     added = qxcandles_into_series(candles, target)
-    log.info("warmed %s@%ss +%d candles", asset, timeframe_seconds, added)
+    if added:
+        log.info("warmed %s@%ss +%d candles", asset, timeframe_seconds, added)
+    else:
+        log.debug("warmed %s@%ss +0 candles (venue silent)", asset,
+                  timeframe_seconds)
     return added
 
 

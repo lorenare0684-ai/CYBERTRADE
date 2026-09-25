@@ -37,7 +37,7 @@ from .compat import (
 )
 from .shutdown import SAFETY_HOLD_EXIT
 from .config import AppConfig
-from .exceptions import ConfigError
+from .exceptions import BrokerError, ConfigError, FeedError, NetworkError
 from .logging_setup import setup_logging
 from .quant.binary import breakeven_winrate, edge_of, kelly_fraction_for, kelly_stake
 
@@ -265,6 +265,18 @@ def _missing_session(exc: Exception) -> bool:
     return "no quotex session" in str(exc).lower()
 
 
+def _session_trouble(exc: Exception) -> bool:
+    """True when an engine build failed for a re-pairable venue reason.
+
+    No session, a rejected session, an unreachable venue, or a silent one —
+    pairing again fixes all of them, so the terminals stay up and offer the
+    pairing screen instead of dying with a traceback.
+    """
+    if isinstance(exc, (BrokerError, NetworkError, FeedError, OSError)):
+        return True
+    return isinstance(exc, ConfigError) and _missing_session(exc)
+
+
 def _has_live_session(hub) -> bool:
     """True when the running engine holds a venue session right now.
 
@@ -355,14 +367,19 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
     try:
         try:
             engine = _build_engine(cfg, durable=True)
-        except ConfigError as exc:
-            if not _missing_session(exc):
+        except Exception as exc:  # noqa: BLE001 — a bad session must not kill the terminal
+            if not _session_trouble(exc):
                 raise
-            print("  ▸ no venue session yet — pair from the web terminal\n")
+            log.exception("engine failed to boot — serving the pairing screen")
+            print(f"  ▸ engine failed to boot ({exc})")
+            print("  ▸ pair a venue session from the web terminal\n")
         else:
             hub.engine = engine
             print(f"  ▸ mode         : LIVE VENUE CANDLES · "
                   f"purse {cfg.broker.purse_label}")
+            if getattr(engine, "degraded", ""):
+                print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
+                      "retrying in the background")
             if args.auto:
                 engine.arm()
                 print("  ▸ engine ARMED (LIVE — real order flow)\n")
@@ -373,17 +390,28 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
                 continue
             # a cookie landed on a worker thread: adopt it here, serially
             ssid = pending.pop(0)
-            if hub.engine is None:
-                engine = _build_engine(cfg, durable=True)
-                hub.engine = engine
-                print(f"  ▸ session paired — purse "
-                      f"{cfg.broker.purse_label}\n")
-                if args.auto:
-                    engine.arm()
-                    print("  ▸ engine ARMED (LIVE — real order flow)\n")
-            else:
-                _reseat_session(engine, ssid)
-                print("  ▸ venue session re-paired in place\n")
+            try:
+                if hub.engine is None:
+                    engine = _build_engine(cfg, durable=True)
+                    hub.engine = engine
+                    print(f"  ▸ session paired — purse "
+                          f"{cfg.broker.purse_label}\n")
+                    if getattr(engine, "degraded", ""):
+                        print(f"  ▸ NO VENUE DATA ({engine.degraded}) — "
+                              "retrying in the background")
+                    if args.auto:
+                        engine.arm()
+                        print("  ▸ engine ARMED (LIVE — real order flow)\n")
+                else:
+                    _reseat_session(engine, ssid)
+                    print("  ▸ venue session re-paired in place\n")
+            except Exception as exc:  # noqa: BLE001 — a bad cookie must not kill the terminal
+                log.exception("session adoption failed")
+                print(f"  ▸ session adoption failed ({exc}) — pair again\n")
+                try:
+                    hub.pairing.note_error(str(exc) or exc.__class__.__name__)
+                except Exception:  # noqa: BLE001 — the veil is best-effort
+                    pass
     except KeyboardInterrupt:
         print("\n  shutting down…")
     finally:
@@ -404,17 +432,33 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
     from .gui import GUI_AVAILABLE, run_app
 
     if not GUI_AVAILABLE:
-        print("tkinter unavailable — install python3-tk or use `python -m cybertrade web`",
+        if sys.platform == "win32":
+            hint = ("your Python has no tkinter — reinstall it with "
+                    "\"tcl/tk and IDLE\" checked, or run `conda install tk` "
+                    "in this environment")
+        else:
+            hint = "install python3-tk (Debian/Ubuntu) or the matching tk package"
+        print(f"  ✗ desktop GUI unavailable: {hint},", file=sys.stderr)
+        print("    or use the browser terminal instead: `python -m cybertrade web`",
               file=sys.stderr)
         return 2
-    try:
-        engine = _build_engine(cfg, durable=True)
-    except ConfigError as exc:
-        if not _missing_session(exc):
-            raise
-        print(f"  no venue session yet — opening the pairing window ({exc})")
-        from .gui.session_gate import run_gate
+    from .gui.session_gate import run_gate
 
+    notice = ""
+    while True:
+        # Any venue-side failure lands back in the pairing window (with the
+        # reason shown) instead of killing the process before it opens.
+        try:
+            engine = _build_engine(cfg, durable=True)
+        except Exception as exc:  # noqa: BLE001 — pairing covers venue trouble
+            if not _session_trouble(exc):
+                raise
+            log.exception("engine failed to boot — opening the pairing window")
+            notice = str(exc) or exc.__class__.__name__
+            print(f"  engine failed to boot ({notice})")
+        else:
+            break
+        print("  opening the pairing window — pair again or quit")
         ready = []
 
         def _on_ready(ssid: str, purse: bool) -> None:
@@ -422,10 +466,11 @@ def _run_gui(cfg: AppConfig, args: argparse.Namespace) -> int:
             cfg.broker.demo_account = purse
             ready.append(True)
 
-        run_gate(cfg, on_ready=_on_ready)
+        run_gate(cfg, on_ready=_on_ready, notice=notice)
         if not ready:
             return 1
-        engine = _build_engine(cfg, durable=True)
+    if getattr(engine, "degraded", ""):
+        print(f"  NO VENUE DATA ({engine.degraded}) — retrying in the background")
     try:
         run_app(engine, cfg)
     finally:
@@ -472,6 +517,12 @@ def cmd_run(args: argparse.Namespace) -> int:
             if not _confirm_live(args, cfg):
                 return 1
             engine = _build_engine(cfg, durable=True)
+            if getattr(engine, "degraded", ""):
+                # Headless has no pairing screen: a blind engine holds here
+                # instead of arming on an empty book.
+                print(f"  SAFETY HOLD — no venue data ({engine.degraded})",
+                      file=sys.stderr)
+                return SAFETY_HOLD_EXIT
             engine.arm()
             print("  engine ARMED (LIVE — real order flow) — ctrl+c to stop\n")
             while True:
