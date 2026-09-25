@@ -108,8 +108,8 @@ class TestPairingController(unittest.TestCase):
         self.cfg = _cfg(self.tmp.name)
         self.ready = []
         self.ctl = PairingController(self.cfg,
-                                    lambda ssid, purse: self.ready.append(
-                                        (ssid, purse)))
+                                    lambda ssid, purse, cookies="": self.ready.append(
+                                        (ssid, purse, cookies)))
         self._real = PairingController.start.__globals__["run_pairing"]
 
     def tearDown(self):
@@ -168,7 +168,7 @@ class TestPairingController(unittest.TestCase):
         # WAITING is set *before* the launch, so a worker that finishes first
         # is never clobbered by start()'s own bookkeeping
         self.assertEqual(self.ctl.state(), "ready")
-        self.assertEqual(self.ready, [("QX.x", False)])
+        self.assertEqual(self.ready, [("QX.x", False, "")])
 
     def test_a_synchronous_launcher_is_not_clobbered(self):
         """The bug this guards: start() used to overwrite the worker's READY."""
@@ -235,7 +235,7 @@ class TestPairingController(unittest.TestCase):
         self.assertEqual(self.ctl.state(), "ready")
         # the stale worker's result is dropped, the fresh one wins
         hold["on_done"]({"ssid": "QX.stale"})
-        self.assertEqual(self.ready, [("QX.new", True)])
+        self.assertEqual(self.ready, [("QX.new", True, "")])
 
     def test_a_live_terminal_does_not_claim_to_have_no_session(self):
         """The message an operator reads when opening RE-PAIR on a live engine."""
@@ -272,7 +272,7 @@ class TestPairingController(unittest.TestCase):
         from cybertrade.web.pairing import PairingController
 
         live = {"on": False}
-        ctl = PairingController(self.cfg, lambda s, p: None,
+        ctl = PairingController(self.cfg, lambda s, p, c="": None,
                                 probe=lambda: live["on"])
         ctl._done({"ssid": "QX.x"}, ctl._epoch)
         st = ctl.status()
@@ -406,9 +406,9 @@ class TestWebBootsWithoutASession(unittest.TestCase):
             self.built.append(cfg.broker.ssid)
             return _StubEngine()
 
-        def fake_reseat(engine, ssid):
+        def fake_reseat(engine, ssid, cookies=""):
             self.reseats.append(ssid)
-            return self._real_reseat(engine, ssid)
+            return self._real_reseat(engine, ssid, cookies)
 
         cli._build_engine = fake_build
         cli._reseat_session = fake_reseat

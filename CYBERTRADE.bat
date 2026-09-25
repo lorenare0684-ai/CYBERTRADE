@@ -112,8 +112,9 @@ echo  4 - Pair the Quotex session (FIRST RUN - opens Chrome, you solve the CAPTC
 echo  5 - Check / warm an existing session
 echo  6 - Run LIVE trading - headless - REAL ORDERS
 echo  7 - Sniff the trade tab wire (diagnostic, needs pairing Chrome open)
+echo  8 - TLS probe - stdlib vs Chrome handshake (diagnostic)
 echo.
-set /p CHOICE=Enter choice 1-7 [1]: 
+set /p CHOICE=Enter choice 1-8 [1]: 
 if "%CHOICE%"=="" set CHOICE=1
 
 if "%CHOICE%"=="1" goto :run_web
@@ -123,6 +124,7 @@ if "%CHOICE%"=="4" goto :run_login
 if "%CHOICE%"=="5" goto :run_session
 if "%CHOICE%"=="6" goto :run_live
 if "%CHOICE%"=="7" goto :run_sniff
+if "%CHOICE%"=="8" goto :run_tlsprobe
 if /I "%CHOICE%"=="W" goto :run_web
 if /I "%CHOICE%"=="WEB" goto :run_web
 if /I "%CHOICE%"=="G" goto :run_gui
@@ -197,6 +199,16 @@ echo   - Chrome not found - set CYBERTRADE_CHROME=C:\path\to\chrome.exe
 echo   - the window was closed before the login finished
 echo   - no sessionid cookie appeared within the wait budget
 echo Re-run option 4 to try again.
+pause
+goto :end
+
+:run_tlsprobe
+echo.
+echo Probing both TLS transports - 12 seconds per leg...
+echo Needs a paired session - run option 4 first if none exists.
+echo For the Chrome leg: pip install curl_cffi  (inside the env)
+echo.
+python -m cybertrade quotex tlsprobe --seconds 12
 pause
 goto :end
 

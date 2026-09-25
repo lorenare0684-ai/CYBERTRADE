@@ -51,13 +51,13 @@ STATES = (IDLE, LAUNCHING, WAITING, ADOPTING, READY, FAILED)
 class PairingController:
     """Drives one pairing attempt at a time for the browser terminal.
 
-    ``on_ready(ssid, purse)`` is called exactly once per successful pairing,
-    on the worker thread. The caller decides what "ready" means — build an
-    engine, or re-seat an existing one.
+    ``on_ready(ssid, purse, cookies)`` is called exactly once per
+    successful pairing, on the worker thread. The caller decides what
+    "ready" means — build an engine, or re-seat an existing one.
     """
 
     def __init__(self, config: AppConfig,
-                 on_ready: Callable[[str, bool], None],
+                 on_ready: Callable[[str, bool, str], None],
                  probe: Optional[Callable[[], bool]] = None) -> None:
         self.config = config
         self.on_ready = on_ready
@@ -251,7 +251,7 @@ class PairingController:
         with self._lock:
             purse = self._purse
         try:
-            self.on_ready(ssid, purse)
+            self.on_ready(ssid, purse, str(sess.get("cookies", "")))
         except Exception as exc:  # noqa: BLE001 — report, never crash a thread
             log.exception("pairing succeeded but the engine refused it")
             with self._lock:

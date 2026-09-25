@@ -538,3 +538,123 @@ class TestLiveApiBoot(unittest.TestCase):
             _live_api(self._cfg(), api_factory=lambda: stub)
         self.assertIn("close", stub.calls)
         self.assertNotIn("ensure", stub.calls)
+
+
+class TestResolveSession(unittest.TestCase):
+    """_resolve_session: cfg → env → paired file, cookies paired correctly."""
+
+    def _cfg(self, ssid="", cookies="", path=""):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            broker=SimpleNamespace(ssid=ssid, cookies=cookies),
+            qx_session_path=path)
+
+    def test_cfg_wins_with_its_cookies(self):
+        from cybertrade.cli import _resolve_session
+
+        ssid, cookies = _resolve_session(self._cfg("S", "a=b"))
+        self.assertEqual((ssid, cookies), ("S", "a=b"))
+
+    def test_env_fallback_is_cookieless(self):
+        import os
+        from unittest import mock
+
+        from cybertrade.cli import _resolve_session
+
+        with mock.patch.dict(os.environ, {"QX_SSID": "E"}):
+            ssid, cookies = _resolve_session(self._cfg())
+        self.assertEqual((ssid, cookies), ("E", ""))
+
+    def test_file_fallback(self):
+        import json
+        import tempfile
+
+        from cybertrade.cli import _resolve_session
+
+        with tempfile.NamedTemporaryFile("w", suffix=".json",
+                                         delete=False) as fh:
+            json.dump({"ssid": "F", "cookies": "x=y"}, fh)
+            path = fh.name
+        try:
+            ssid, cookies = _resolve_session(self._cfg(path=path))
+        finally:
+            import os
+
+            os.unlink(path)
+        self.assertEqual((ssid, cookies), ("F", "x=y"))
+
+    def test_nothing_resolves_empty(self):
+        import os
+        from unittest import mock
+
+        from cybertrade.cli import _resolve_session
+
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("QX_SSID", None)
+            self.assertEqual(_resolve_session(self._cfg()), ("", ""))
+
+
+class TestCookieHandoff(unittest.TestCase):
+    """Paired cookies must reach the handshake, never the disk."""
+
+    def test_config_blanks_cookies(self):
+        from cybertrade.config import AppConfig
+
+        cfg = AppConfig()
+        cfg.broker.cookies = "a=b"
+        self.assertEqual(cfg.to_dict()["broker"]["cookies"], "")
+
+    def test_controller_passes_cookies(self):
+        from types import SimpleNamespace
+
+        from cybertrade.web.pairing import PairingController
+
+        got = []
+        ctl = PairingController(
+            SimpleNamespace(qx_session_path=""),
+            on_ready=lambda s, p, c: got.append((s, p, c)))
+        ctl._done({"ssid": "S", "cookies": "a=b"}, ctl._epoch)
+        self.assertEqual(got, [("S", ctl._purse, "a=b")])
+
+    def test_reseat_carries_cookies(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from cybertrade.brokers.quotex.api import QuotexAPI
+        from cybertrade.brokers.quotex.ghost import Pacekeeper
+        from cybertrade.cli import _reseat_session
+
+        api = QuotexAPI(pace=Pacekeeper(enabled=False))
+        engine = SimpleNamespace(
+            feed=SimpleNamespace(api=api),
+            health=SimpleNamespace(note_message=lambda m: None))
+        with mock.patch.object(QuotexAPI, "connect", return_value=True), \
+                mock.patch("cybertrade.cli._verify_session_data",
+                           return_value=None):
+            _reseat_session(engine, "SID", "a=b")
+        self.assertEqual(api.session.ssid, "SID")
+        self.assertEqual(api.session.cookies, "a=b")
+
+    def test_live_api_forwards_cfg_cookies(self):
+        from types import SimpleNamespace
+
+        from cybertrade.cli import _live_api
+
+        seen = {}
+
+        def factory():
+            return SimpleNamespace(
+                set_ssid=lambda s, c="": seen.update(ssid=s, cookies=c),
+                connect=lambda: True,
+                subscribe=lambda a, t: None,
+                request_instruments=lambda: None,
+                wait_for_data=lambda timeout=0: True,
+                ensure_purse=lambda: True,
+                close=lambda: None)
+
+        cfg = SimpleNamespace(
+            broker=SimpleNamespace(ssid="S", cookies="a=b"),
+            qx_session_path="")
+        _live_api(cfg, api_factory=factory)
+        self.assertEqual(seen, {"ssid": "S", "cookies": "a=b"})

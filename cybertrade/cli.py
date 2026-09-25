@@ -121,20 +121,12 @@ def _qx_api(cfg: AppConfig, demo: Optional[bool] = None):
     )
 
 
-def _live_api(cfg: AppConfig, api_factory=None):
-    """Connected QuotexAPI for the live build — raises, never degrades.
-
-    Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
-    paired browser session (``quotex login``) → username/password login.
-    """
+def _resolve_session(cfg: AppConfig):
+    """ssid + cookies from cfg/env/paired file (no connect, no login)."""
     import os
 
-    if api_factory is None:
-        api_factory = lambda: _qx_api(cfg)  # noqa: E731
-
-    api = api_factory()
     ssid = cfg.broker.ssid or os.environ.get("QX_SSID", "")
-    cookies = ""
+    cookies = getattr(cfg.broker, "cookies", "") if cfg.broker.ssid else ""
     if not ssid:
         from .brokers.quotex.pairing import load_session
 
@@ -142,6 +134,20 @@ def _live_api(cfg: AppConfig, api_factory=None):
         if paired:
             ssid = paired.get("ssid", "")
             cookies = paired.get("cookies", "")
+    return ssid, cookies
+
+
+def _live_api(cfg: AppConfig, api_factory=None):
+    """Connected QuotexAPI for the live build — raises, never degrades.
+
+    Session sources: ``cfg.broker.ssid`` / ``--ssid`` → ``QX_SSID`` env →
+    paired browser session (``quotex login``) → username/password login.
+    """
+    if api_factory is None:
+        api_factory = lambda: _qx_api(cfg)  # noqa: E731
+
+    api = api_factory()
+    ssid, cookies = _resolve_session(cfg)
     if ssid:
         api.set_ssid(ssid, cookies)
     elif cfg.broker.username and cfg.broker.password:
@@ -396,7 +402,7 @@ def _has_live_session(hub) -> bool:
     return bool(ssid or getattr(api, "ssid", ""))
 
 
-def _reseat_session(engine, ssid: str) -> None:
+def _reseat_session(engine, ssid: str, cookies: str = "") -> None:
     """Re-seat a live engine on a fresh session, with no restart.
 
     The api is the only thing that holds the cookie, so a re-pair mid-run is
@@ -409,7 +415,7 @@ def _reseat_session(engine, ssid: str) -> None:
     if api is None:
         raise ConfigError("this engine has no venue api to re-seat")
     if isinstance(api, QuotexAPI):
-        api.set_ssid(ssid)
+        api.set_ssid(ssid, cookies)
     else:  # a stub in tests: exercise the seam without the venue protocol
         setattr(api, "ssid", ssid)
     if not api.connect():
@@ -435,11 +441,12 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
         port = _checked_port(args.port, cfg.display.web_port)
     pending: List[Any] = []
 
-    def _on_ready(ssid: str, purse: bool) -> None:
+    def _on_ready(ssid: str, purse: bool, cookies: str = "") -> None:
         """Runs on the pairing worker thread — queue, never touch the hub."""
         cfg.broker.ssid = ssid          # session-only, never on disk
+        cfg.broker.cookies = cookies    # same: the paired tab's jar
         cfg.broker.demo_account = purse
-        pending.append(ssid)
+        pending.append((ssid, cookies))
 
     hub = EngineHub(None, cfg)
     hub.pairing = PairingController(
@@ -490,7 +497,7 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
             if not pending:
                 continue
             # a cookie landed on a worker thread: adopt it here, serially
-            ssid = pending.pop(0)
+            ssid, cookies = pending.pop(0)
             try:
                 if hub.engine is None or _needs_rebuild(hub.engine):
                     fresh = _build_engine(cfg, durable=True)
@@ -510,7 +517,7 @@ def _run_web(cfg: AppConfig, args: argparse.Namespace,
                     if args.auto and _arm_or_hold(engine):
                         print("  ▸ engine ARMED (LIVE — real order flow)\n")
                 else:
-                    _reseat_session(engine, ssid)
+                    _reseat_session(engine, ssid, cookies)
                     print("  ▸ venue session re-paired in place\n")
             except Exception as exc:  # noqa: BLE001 — a bad cookie must not kill the terminal
                 log.error("session adoption failed (%s) — pair again", exc)
@@ -665,6 +672,8 @@ def cmd_quotex(args: argparse.Namespace) -> int:
         return cmd_quotex_login(args, cfg)
     if getattr(args, "action", "") == "sniff":
         return cmd_quotex_sniff(args, cfg)
+    if getattr(args, "action", "") == "tlsprobe":
+        return cmd_quotex_tlsprobe(args, cfg)
     if getattr(args, "ssid", ""):
         cfg.broker.ssid = args.ssid  # session-only: never written to disk
     try:
@@ -741,6 +750,34 @@ def cmd_quotex_sniff(args: argparse.Namespace, cfg: AppConfig) -> int:
     except Exception as exc:  # noqa: BLE001 — sniff trouble is a CLI error
         print(f"  sniff failed ({exc})")
         return 1
+    return 0
+
+
+def cmd_quotex_tlsprobe(args: argparse.Namespace, cfg: AppConfig) -> int:
+    """Decisive transport test: stdlib TLS vs Chrome TLS, same script.
+
+    Runs the connect burst both ways back-to-back and reports which leg
+    the venue streams to.  Needs a paired session (pair first); the
+    chrome leg additionally needs ``python -m pip install curl_cffi``.
+    """
+    from .brokers.quotex import constants as QXC
+    from .brokers.quotex.tlsprobe import run_probe
+
+    ssid, cookies = _resolve_session(cfg)
+    if not ssid:
+        print("  no venue session — pair first (option 4), then re-run")
+        return 1
+    demo = cfg.broker.demo_account if cfg.broker.demo_account is not None else True
+    seconds = float(getattr(args, "seconds", 12.0) or 12.0)
+    print(f"  probing both transports ({seconds:.0f}s per leg)…")
+    print(run_probe(
+        ssid, cookies,
+        ws_url=cfg.broker.ws_url or QXC.WS_URL,
+        origin=cfg.broker.http_base or QXC.HTTP_BASE,
+        user_agent=QXC.USER_AGENT,
+        is_demo=bool(demo),
+        seconds=seconds,
+    ))
     return 0
 
 
@@ -1270,11 +1307,12 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the I UNDERSTAND confirmation")
     r.set_defaults(func=cmd_run)
 
-    qx = sub.add_parser("quotex",
-                        help="venue session: login / status / warm / assets / sniff")
-    qx.add_argument("action", choices=["status", "warm", "login", "assets", "sniff"])
+    qx = sub.add_parser("quotex", help="venue session: login / status / warm / "
+                                       "assets / sniff / tlsprobe")
+    qx.add_argument("action", choices=["status", "warm", "login", "assets",
+                                       "sniff", "tlsprobe"])
     qx.add_argument("--seconds", type=float, default=20.0,
-                    help="capture window for sniff")
+                    help="capture window for sniff (per-leg window for tlsprobe)")
     qx.add_argument("--ssid", default="",
                     help="session cookie (session-only, never stored)")
     qx.add_argument("--bars", type=int, default=250,

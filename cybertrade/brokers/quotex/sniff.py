@@ -100,7 +100,7 @@ def _payload(params: Dict[str, Any]) -> str:
     return str(data)
 
 
-def _classify_s2c(payload: str) -> str:
+def classify_s2c(payload: str) -> str:
     text = payload.strip()
     if text.startswith("0{"):
         return "EIO open"
@@ -176,7 +176,7 @@ def summarize(frames: List[Dict[str, Any]]) -> str:
             c2s[label] = c2s.get(label, 0) + 1
             detail = payload[2:150] if payload.startswith("42[") else payload[:120]
         else:
-            label = f"S2C {_classify_s2c(payload)}"
+            label = f"S2C {classify_s2c(payload)}"
             s2c[label] = s2c.get(label, 0) + 1
             detail = payload[:150]
         if shown < 60:
@@ -203,4 +203,4 @@ def sniff_and_report(port: int, duration: float = 20.0,
     return summarize(sniff_frames(port, duration, fetch, ws_factory))
 
 
-__all__ = ["sniff_frames", "summarize", "sniff_and_report"]
+__all__ = ["sniff_frames", "summarize", "sniff_and_report", "classify_s2c"]

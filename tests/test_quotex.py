@@ -1008,5 +1008,129 @@ class TestSniff(unittest.TestCase):
         self.assertTrue(made[0].sent)  # Network.enable went out
 
 
+class TestTlsProbe(unittest.TestCase):
+    def test_script_order(self):
+        from cybertrade.brokers.quotex.tlsprobe import script_frames
+
+        wires = "\n".join(script_frames())
+        self.assertEqual(len(script_frames()), 9)
+        for name in ("indicator/list", "drawing/load", "pending/list",
+                     "chart_notification/get", "instruments/get",
+                     "instruments/update", "depth/follow", '"tick"'):
+            self.assertIn(name, wires)
+        self.assertLess(wires.index("instruments/get"),
+                        wires.index("instruments/update"))
+
+    def test_is_data_label(self):
+        from cybertrade.brokers.quotex.tlsprobe import is_data_label
+
+        for label in ("quote batch (3 rows)",
+                      'event "history/load"',
+                      'event "instruments/list"',
+                      'event "balance"',
+                      'event "candle-generated"',
+                      "bare dict {demoBalance,liveBalance}",
+                      "bare dict {asset,candles}"):
+            with self.subTest(label=label):
+                self.assertTrue(is_data_label(label))
+        for label in ('event "s_authorization"',
+                      "EIO open", "SIO connect", "EIO ping/pong",
+                      "bare dict {foo}", "(empty)"):
+            with self.subTest(label=label):
+                self.assertFalse(is_data_label(label))
+
+    def test_stdlib_leg_uses_fake_socket(self):
+        from cybertrade.brokers.quotex.tlsprobe import run_stdlib
+
+        sent = []
+
+        class FakeSock:
+            def __init__(self, ssid, **kw):
+                self.on_event = kw.get("on_event")
+
+            def connect(self, authorize=True):
+                self.on_event("s_authorization", [])
+
+            def send(self, wire):
+                sent.append(wire)
+
+            def disconnect(self):
+                self.on_event("quotes", [[[["A", 1, 2.0, 1]]]])
+
+        out = run_stdlib("S", "c=d", "ws://x", "https://x", "UA", True, 0.01,
+                         socket_factory=FakeSock)
+        self.assertTrue(out["connected"])
+        self.assertTrue(out["authorized"])
+        self.assertEqual(out["events"]["s_authorization"], 1)
+        self.assertEqual(out["events"]["quotes"], 1)
+        self.assertEqual(len(sent), 9)  # bootstrap + trio + tick
+        self.assertTrue(sent[-1].endswith('["tick"]'))
+
+    def test_chrome_leg_without_package(self):
+        try:
+            import curl_cffi  # noqa: F401
+        except ImportError:
+            pass
+        else:
+            self.skipTest("curl_cffi installed — live path untestable offline")
+        from cybertrade.brokers.quotex.tlsprobe import run_chrome
+
+        out = run_chrome("S", "", "ws://127.0.0.1:1/", "https://x", "UA",
+                         True, 0.01)
+        self.assertFalse(out["available"])
+        self.assertIn("curl_cffi", out["error"])
+
+    def test_verdicts(self):
+        from cybertrade.brokers.quotex.tlsprobe import run_probe
+
+        auth_only = {'event "s_authorization"': 1}
+        flowing = {"quote batch (2 rows)": 9}
+        cases = [
+            (flowing, flowing, True, "both legs stream"),
+            (auth_only, flowing, True, "TLS-GATED"),
+            (auth_only, auth_only, True, "both legs starved"),
+            (auth_only, {}, False, "install curl_cffi"),
+        ]
+        for std_events, chrome_events, available, needle in cases:
+            with self.subTest(needle=needle):
+                def factory(ssid, _ev=None, **kw):
+                    _ev = dict(std_events) if _ev is None else _ev
+                    class FakeSock:
+                        def connect(self, authorize=True):
+                            for name, n in _ev.items():
+                                for _ in range(n):
+                                    kw["on_event"](name, [])
+
+                        def send(self, wire):
+                            pass
+
+                        def disconnect(self):
+                            pass
+
+                    return FakeSock()
+
+                def chrome(*a, **k):
+                    return {"connected": True, "authorized": True,
+                            "events": dict(chrome_events), "error": "",
+                            "available": available}
+
+                report = run_probe("S", "", "ws://x", "https://x", "UA",
+                                   True, 0.01, socket_factory=factory,
+                                   chrome_runner=chrome)
+                self.assertIn("stdlib (python TLS)", report)
+                self.assertIn("chrome (curl_cffi)", report)
+                self.assertIn(needle, report)
+
+    def test_leg_report_data_line(self):
+        from cybertrade.brokers.quotex.tlsprobe import _leg_report
+
+        yes = {"connected": True, "authorized": True,
+               "events": {"quote batch (1 rows)": 1}, "error": ""}
+        no = {"connected": True, "authorized": True,
+              "events": {'event "s_authorization"': 1}, "error": ""}
+        self.assertIn("data      : YES", "\n".join(_leg_report("t", yes)))
+        self.assertIn("data      : NO", "\n".join(_leg_report("t", no)))
+
+
 if __name__ == "__main__":
     unittest.main()

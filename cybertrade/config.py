@@ -194,6 +194,7 @@ class BrokerConfig:
     username: str = ""
     password: str = ""                        # never serialized to disk
     ssid: str = ""                            # session cookie — never serialized to disk
+    cookies: str = ""                         # paired handshake cookies — never serialized
     demo_account: Optional[bool] = None       # None = not chosen yet (must be explicit)
     payout_default: float = 0.85
     latency_ms: int = 180
@@ -345,6 +346,7 @@ class AppConfig:
         if not include_secrets:
             data["broker"]["password"] = ""
             data["broker"]["ssid"] = ""
+            data["broker"]["cookies"] = ""
         return json.loads(json.dumps(data, default=_encode))
 
     @classmethod
