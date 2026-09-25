@@ -14,7 +14,7 @@ every market condition means trading less, not more.
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from ..constants import MarketRegime, Side, SignalStrength
 from ..data.models import Signal
@@ -42,6 +42,7 @@ class AllWeatherEnsemble(Strategy):
         win_rate_floor: float = 0.40,
         decay: float = 0.985,
         max_votes: int = 0,
+        family_weights: Optional[Mapping[str, float]] = None,
         **kw,
     ) -> None:
         self.members: List[Strategy] = list(members or [])
@@ -54,6 +55,9 @@ class AllWeatherEnsemble(Strategy):
         # 0 = no cap: the ensemble blends every member by design, and the
         # old default of 2 was never enforced at all.
         self.max_votes = max(0, int(max_votes))
+        # Posture -> strategy-family bias, pushed in by the engine from
+        # Survivor.strategy_filter(). Empty means "no bias".
+        self.family_weights: Dict[str, float] = dict(family_weights or {})
         self._weights: Dict[str, float] = {m.name: 1.0 for m in self.members}
         self._scores: Dict[str, float] = {m.name: 0.5 for m in self.members}
         self.quarantined_votes = set()  # Phase-25: decay ward (engine-synced)
@@ -89,8 +93,14 @@ class AllWeatherEnsemble(Strategy):
         if self.max_votes and len(votes) > self.max_votes:
             # strategy.max_signals_per_candle: blend the strongest N votes
             # rather than all of them. Strongest first, so the cap can only
-            # drop the weakest evidence, never the best.
-            votes = sorted(votes, key=lambda s: s.quality, reverse=True)
+            # drop the weakest evidence, never the best. Weighted the same way
+            # _blend and the "best" mode weight votes, so a vote the posture
+            # table leans on is not dropped for being from a dampened family.
+            votes = sorted(
+                votes,
+                key=lambda s: s.quality * self._effective_weight(ctx, s),
+                reverse=True,
+            )
             votes = votes[: self.max_votes]
 
         weighted = self._blend(ctx, votes)
@@ -173,15 +183,50 @@ class AllWeatherEnsemble(Strategy):
         if dominance < self.min_dominance:
             return None  # contested tape — wait for clarity
         winner = calls if side is Side.CALL else puts
-        avg_conf = sum(v.confidence for v in winner) / len(winner)
+        # Weighted mean, not a plain one. dominance is a ratio and so is
+        # invariant to scaling every vote alike, which left the posture bias
+        # able to flip the side but never to move the strength: on a
+        # single-sided tape it had no effect at all. A vote from a family the
+        # posture dampens has to count for less than one it leans on.
+        wsum = sum(self._effective_weight(ctx, v) for v in winner)
+        if wsum > 0:
+            avg_conf = sum(self._effective_weight(ctx, v) * v.confidence
+                           for v in winner) / wsum
+        else:
+            avg_conf = sum(v.confidence for v in winner) / len(winner)
         # corroboration discount: one voter must not mint its own consensus
         support = 0.8 + 0.1 * min(len(winner), 2)      # 1 vote -> 0.9, 2+ -> 1.0
         conf = clamp(avg_conf * (0.55 + 0.45 * dominance) * support, 0.0, 1.0)
         reasons = [f"{v.strategy}:{v.confidence:.2f}" for v in winner]
         return side, conf, reasons
 
+    def set_family_weights(self, weights: Optional[Mapping[str, float]]) -> None:
+        """Bias the blend by strategy family.
+
+        The engine calls this each cycle with the survivor's posture table, so
+        a GUARD tape leans on mean reversion and dampens pattern and trend
+        entries. An empty or None mapping removes the bias entirely.
+        """
+        clean: Dict[str, float] = {}
+        for family, mult in (weights or {}).items():
+            try:
+                value = float(mult)
+            except (TypeError, ValueError):
+                continue
+            if value > 0.0:
+                clean[str(family)] = value
+        self.family_weights = clean
+
+    def _family_weight(self, vote: Signal) -> float:
+        """The posture multiplier for the member that cast this vote."""
+        if not self.family_weights:
+            return 1.0
+        member = self._member(vote.strategy)
+        family = getattr(member, "family", "") if member else ""
+        return self.family_weights.get(family, 1.0)
+
     def _effective_weight(self, ctx: StrategyContext, vote: Signal) -> float:
-        base = self._weights.get(vote.strategy, 1.0)
+        base = self._weights.get(vote.strategy, 1.0) * self._family_weight(vote)
         member = self._member(vote.strategy)
         regime_fit = member.score_for_regime(ctx.regime.regime) if member else 0.5
         if self.mode == "regime_weighted":

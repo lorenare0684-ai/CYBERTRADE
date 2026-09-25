@@ -663,6 +663,17 @@ class TradingEngine:
         candles = self._candles_for(asset, self.ensemble.lookback)
         if len(candles) < self.ensemble.min_bars:
             return None
+        # survivor.regime_rotation: let the posture table bias the blend toward
+        # the strategy families that suit the tape. strategy_filter already
+        # returns no weights when the flag is off, and a disabled playbook
+        # biases nothing at all.
+        setter = getattr(self.ensemble, "set_family_weights", None)
+        if callable(setter):
+            weights: Dict[str, Any] = {}
+            if self.survivor.enabled:
+                posture = self.survivor.posture_for(reading)
+                weights = self.survivor.strategy_filter(posture).get("weights") or {}
+            setter(weights)
         ctx = StrategyContext(
             asset=asset,
             candles=candles,

@@ -613,3 +613,127 @@ class TestSurvivorEnabledActuallyEnables(unittest.TestCase):
         eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=60),
                             broker=VenueStub())
         self.assertTrue(eng.survivor.enabled)
+
+
+class TestThePostureTableReachesTheEnsemble(unittest.TestCase):
+    """survivor.strategy_filter() was defined and tested but never called by
+    the engine, so survivor.regime_rotation gated a table nothing read. This
+    wires the posture -> family bias into the blend."""
+
+    def _ctx(self, candles, regime=MarketRegime.RANGE, stress=0.1):
+        from cybertrade.strategies.base import StrategyContext
+        r = RegimeReading()
+        r.regime = regime
+        r.stress = stress
+        return StrategyContext(asset="EURUSD", candles=candles, regime=r,
+                               timeframe_seconds=60, expiry_seconds=60,
+                               payout=0.85, ts=1700000000.0, extra={})
+
+    def _ensemble(self):
+        return AllWeatherEnsemble(members=build_universe(),
+                                  mode="regime_weighted", min_confidence=0.0)
+
+    def _conf(self, weights, candles):
+        e = self._ensemble()
+        e.set_family_weights(weights)
+        sig = e.decide(self._ctx(candles))
+        return getattr(sig, "confidence", 0.0)
+
+    def test_the_engine_passes_the_posture_table_through(self):
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=300),
+                            broker=VenueStub())
+        eng.arm()
+        seen = set()
+        for _ in range(12):
+            eng.feed.advance()
+            eng.cycle()
+            seen.add(tuple(sorted(eng.ensemble.family_weights.items())))
+        eng.shutdown()
+        # at least one cycle must carry a real posture bias, not an empty map
+        self.assertTrue(any(w for w in seen), f"no posture bias reached the "
+                                              f"ensemble: {seen}")
+
+    def test_rotation_off_means_no_bias(self):
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        cfg.survivor.regime_rotation = False
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=300),
+                            broker=VenueStub())
+        eng.arm()
+        for _ in range(12):
+            eng.feed.advance()
+            eng.cycle()
+            self.assertEqual(eng.ensemble.family_weights, {})
+        eng.shutdown()
+
+    def test_a_disabled_playbook_biases_nothing(self):
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        cfg.survivor.enabled = False
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=300),
+                            broker=VenueStub())
+        eng.arm()
+        for _ in range(12):
+            eng.feed.advance()
+            eng.cycle()
+            self.assertEqual(eng.ensemble.family_weights, {})
+        eng.shutdown()
+
+    def test_the_bias_moves_the_confidence(self):
+        """Not just the side. dominance is a ratio and so is scale-invariant,
+        so the weighted mean is what makes a dampened family count for less."""
+        candles = generate_candles(n=120, start_price=1.0850)
+        base = self._conf({}, candles)
+        self.assertGreater(base, 0.0)
+        # find a family that actually voted, so the test cannot pass vacuously
+        e = self._ensemble()
+        e.set_family_weights({})
+        sig = e.decide(self._ctx(candles))
+        voted = {e._member(v["strategy"]).family
+                 for v in sig.meta["votes"] if e._member(v["strategy"])}
+        self.assertTrue(voted, "no votes to bias")
+        family = sorted(voted)[0]
+        up = self._conf({family: 3.0}, candles)
+        down = self._conf({family: 0.15}, candles)
+        self.assertNotAlmostEqual(up, base, places=6)
+        self.assertNotAlmostEqual(down, base, places=6)
+
+    def test_a_uniform_bias_leaves_the_decision_alone(self):
+        """Scaling every family alike must be a no-op: the blend is built from
+        ratios, so a uniform multiplier carries no information."""
+        candles = generate_candles(n=120, start_price=1.0850)
+        base = self._conf({}, candles)
+        uniform = self._conf({f: 0.1 for f in
+                              ("trend", "momentum", "breakout", "meanrev",
+                               "pattern", "volatility")}, candles)
+        self.assertAlmostEqual(uniform, base, places=6)
+
+    def test_hostile_weights_are_dropped_not_fatal(self):
+        e = self._ensemble()
+        e.set_family_weights({"meanrev": "abc", "trend": None,
+                              "pattern": -1.0, "momentum": 1.5})
+        self.assertEqual(e.family_weights, {"momentum": 1.5})
+        e.set_family_weights(None)
+        self.assertEqual(e.family_weights, {})
+
+    def test_an_unlisted_family_is_unbiased(self):
+        e = self._ensemble()
+        e.set_family_weights({"meanrev": 2.0})
+        from cybertrade.data.models import Signal
+        vote = Signal(asset="EURUSD", side=Side.CALL, confidence=0.8,
+                      strategy="ema_cross_trend", timeframe_seconds=60)
+        self.assertEqual(e._family_weight(vote), 1.0)
+        vote2 = Signal(asset="EURUSD", side=Side.CALL, confidence=0.8,
+                       strategy="rsi_stretch", timeframe_seconds=60)
+        self.assertEqual(e._family_weight(vote2), 2.0)

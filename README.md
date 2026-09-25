@@ -176,7 +176,7 @@ Every switch below actually takes effect — they were audited for it:
 | --- | --- |
 | `survivor.enabled` | `false` opens the defensive playbook: the posture vetoes, liquidity/spread/slippage limits, expiry and confidence caps and the trend filter all stop applying, and the terminal logs a `CRITICAL` line saying so. **Manual lockdown and news blackout still apply** — an emergency stop is not playbook tuning. |
 | `survivor.trend_filter` | in `BULL_TREND` a put is vetoed; in `BEAR_TREND` a long is vetoed. |
-| `survivor.regime_rotation` | gates the posture → strategy-family weighting table. |
+| `survivor.regime_rotation` | pushes the posture → strategy-family table into the ensemble blend, so a `GUARD` tape leans on mean reversion (×1.1) and dampens pattern (×0.5) and trend (×0.7). Off means no family bias. |
 | `risk.crisis_stake_scale` | multiplies the stake whenever the tape reads defensive. |
 | `risk.edge_gate` | `off` \| `scale` \| `hard` — what happens when the calibrated edge is below `risk.min_edge`. Negative EV is vetoed in all three modes. |
 | `strategy.enabled` / `.disabled` | the member list. `enabled: ["ensemble_all_weather"]` is the "run them all" sentinel. |
