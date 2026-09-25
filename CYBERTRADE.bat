@@ -206,7 +206,11 @@ goto :end
 echo.
 echo Probing both TLS transports - 12 seconds per leg...
 echo Needs a paired session - run option 4 first if none exists.
-echo For the Chrome leg: pip install curl_cffi  (inside the env)
+python -c "import curl_cffi" 2>nul
+if errorlevel 1 (
+    echo Installing curl_cffi for the Chrome leg...
+    python -m pip install curl_cffi
+)
 echo.
 python -m cybertrade quotex tlsprobe --seconds 12
 pause
