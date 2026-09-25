@@ -86,6 +86,11 @@ _REGIME_POSTURE = {
     MarketRegime.UNKNOWN: Posture.GUARD,
 }
 
+# What a disabled playbook reports for the expiry cap. It has to be the
+# permissive end, or the engine would keep clamping expiries to a posture the
+# operator just switched off.
+_PLAYBOOK_OFF_MAX_EXPIRY = 3600
+
 # Posture → (stake scale, confidence floor, max expiry, forbidden families)
 _POSTURE_TABLE: Dict[str, Dict[str, Any]] = {
     Posture.ATTACK: {
@@ -151,6 +156,17 @@ class Survivor:
         self._manual_lockdown = False
         self.lockdown_reason: str = ""
         self._history: List[str] = []
+        if not self.enabled:
+            # Running a live account with the defensive playbook off is a
+            # deliberate act, so say it out loud instead of letting a config
+            # line quietly remove the liquidity, spread, slippage, expiry and
+            # confidence vetoes. Manual lockdown and news blackout still work.
+            log.critical(
+                "SURVIVOR PLAYBOOK DISABLED by config — posture vetoes, "
+                "liquidity/spread/slippage limits, expiry and confidence caps "
+                "and the trend filter are all OFF. Manual lockdown and news "
+                "blackout still apply. Set survivor.enabled=true to restore."
+            )
 
     # -- manual overrides --------------------------------------------------
     def engage_lockdown(self, reason: str = "manual") -> None:
@@ -187,49 +203,72 @@ class Survivor:
         forbidden = set(table["forbidden"])
 
         # --- hard vetoes ---------------------------------------------------
+        # These two are not playbook tuning. A manual lockdown is an emergency
+        # stop an operator reaches for in a panic, and a news blackout is an
+        # explicit operator request; both survive survivor.enabled=False.
+        # Turning the playbook off must never turn off the emergency stop.
         if self._manual_lockdown:
             reasons.append("manual lockdown")
         if now < self._news_blackout_until:
             reasons.append("news blackout")
-        if liquidity < self.liquidity_floor:
-            reasons.append(f"liquidity {liquidity:.2f} below floor {self.liquidity_floor:.2f}")
-        if spread_mult > self.spread_limit_mult:
-            reasons.append(f"spread x{spread_mult:.1f} above limit x{self.spread_limit_mult:.1f}")
-        if expected_slippage_bps > self.max_slippage_bps:
-            reasons.append(
-                f"expected slippage {expected_slippage_bps:.1f}bps above limit "
-                f"{self.max_slippage_bps:.1f}bps"
-            )
-        if signal.expiry_seconds > table["max_expiry"]:
-            reasons.append(
-                f"expiry {signal.expiry_seconds}s exceeds posture cap {table['max_expiry']}s"
-            )
-        if signal.confidence < table["min_confidence"]:
-            reasons.append(
-                f"confidence {signal.confidence:.2f} below posture floor {table['min_confidence']:.2f}"
-            )
-        if strategy_family and strategy_family in forbidden:
-            reasons.append(f"family {strategy_family} forbidden in {posture}")
 
-        # do not fade the tail of an extreme move
-        if regime.regime in (MarketRegime.CRISIS, MarketRegime.GAP):
-            if strategy_family in {"meanrev", "pattern"}:
-                reasons.append("no knife-catching in crisis")
+        # --- the playbook itself -------------------------------------------
+        # survivor.enabled gates everything below: the posture table, the
+        # forbidden families, the crisis and trend filters. It was accepted
+        # and stored but never read, so survivor.enabled=false silently left
+        # every veto in place -- the flag lied in both directions.
+        if self.enabled:
+            if liquidity < self.liquidity_floor:
+                reasons.append(f"liquidity {liquidity:.2f} below floor {self.liquidity_floor:.2f}")
+            if spread_mult > self.spread_limit_mult:
+                reasons.append(f"spread x{spread_mult:.1f} above limit x{self.spread_limit_mult:.1f}")
+            if expected_slippage_bps > self.max_slippage_bps:
+                reasons.append(
+                    f"expected slippage {expected_slippage_bps:.1f}bps above limit "
+                    f"{self.max_slippage_bps:.1f}bps"
+                )
+            if signal.expiry_seconds > table["max_expiry"]:
+                reasons.append(
+                    f"expiry {signal.expiry_seconds}s exceeds posture cap {table['max_expiry']}s"
+                )
+            if signal.confidence < table["min_confidence"]:
+                reasons.append(
+                    f"confidence {signal.confidence:.2f} below posture floor {table['min_confidence']:.2f}"
+                )
+            if strategy_family and strategy_family in forbidden:
+                reasons.append(f"family {strategy_family} forbidden in {posture}")
 
-        # survivor.trend_filter: in a clear trend, do not trade against it.
-        # This is the playbook's own "bear_trend -- ride puts, forbid
-        # knife-catch longs", and the flag was accepted and ignored, so an
-        # operator who turned it on got counter-trend entries anyway.
-        if self.trend_filter and regime.is_trend:
-            if regime.regime is MarketRegime.BEAR_TREND and signal.side.is_long:
-                reasons.append("long into a bear trend — trend filter")
-            elif regime.regime is MarketRegime.BULL_TREND and not signal.side.is_long:
-                reasons.append("put into a bull trend — trend filter")
-        if posture == Posture.LOCKDOWN and not reasons:
-            reasons.append("posture is LOCKDOWN")
+            # do not fade the tail of an extreme move
+            if regime.regime in (MarketRegime.CRISIS, MarketRegime.GAP):
+                if strategy_family in {"meanrev", "pattern"}:
+                    reasons.append("no knife-catching in crisis")
 
-        allow = posture != Posture.LOCKDOWN and not reasons
-        stake_scale = table["stake_scale"] * risk_scale
+            # survivor.trend_filter: in a clear trend, do not trade against it.
+            # This is the playbook's own "bear_trend -- ride puts, forbid
+            # knife-catch longs", and the flag was accepted and ignored, so an
+            # operator who turned it on got counter-trend entries anyway.
+            if self.trend_filter and regime.is_trend:
+                if regime.regime is MarketRegime.BEAR_TREND and signal.side.is_long:
+                    reasons.append("long into a bear trend — trend filter")
+                elif regime.regime is MarketRegime.BULL_TREND and not signal.side.is_long:
+                    reasons.append("put into a bull trend — trend filter")
+            if posture == Posture.LOCKDOWN and not reasons:
+                reasons.append("posture is LOCKDOWN")
+
+        if self.enabled:
+            allow = posture != Posture.LOCKDOWN and not reasons
+            stake_scale = table["stake_scale"] * risk_scale
+        else:
+            # Playbook off. Nothing forbids a family, no posture caps the
+            # expiry or floors the confidence, and there is no table stake to
+            # scale -- so report the permissive end rather than pretending a
+            # posture still constrains the trade. panic_deleverage is its own
+            # knob and still applies below.
+            allow = not reasons
+            stake_scale = risk_scale
+            forbidden = set()
+            if not reasons:
+                reasons.append("survivor playbook disabled by config")
         if self.panic_deleverage and regime.stress > 0.5:
             stake_scale *= max(0.3, 1.0 - regime.stress)
         stake_scale = clamp(stake_scale, 0.0, 1.5)
@@ -238,8 +277,12 @@ class Survivor:
             allow=allow,
             posture=posture,
             stake_scale=stake_scale,
-            max_expiry_seconds=table["max_expiry"],
-            min_confidence=table["min_confidence"],
+            # A disabled playbook must not keep constraining the trade through
+            # the back door: the engine clamps the expiry to max_expiry_seconds
+            # and reads min_confidence off this decision.
+            max_expiry_seconds=(table["max_expiry"] if self.enabled
+                                else _PLAYBOOK_OFF_MAX_EXPIRY),
+            min_confidence=(table["min_confidence"] if self.enabled else 0.0),
             reasons=reasons or [f"{posture} clearance"],
             forbidden_families=forbidden,
             slippage_bps=expected_slippage_bps,

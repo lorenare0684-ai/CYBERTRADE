@@ -518,3 +518,98 @@ class TestTheDeadConfigKnobsActuallyDoSomething(unittest.TestCase):
             if posture != "LOCKDOWN":
                 self.assertEqual(off["weights"], {})
                 self.assertTrue(on["weights"])
+
+
+class TestSurvivorEnabledActuallyEnables(unittest.TestCase):
+    """survivor.enabled was stored on self.enabled and echoed into the
+    snapshot, then never read. survivor.enabled=false therefore vetoed exactly
+    as hard as true -- the flag lied, and it lied about a risk control."""
+
+    def _reading(self, regime=MarketRegime.CRISIS, stress=1.0):
+        r = RegimeReading()
+        r.regime = regime
+        r.stress = stress
+        return r
+
+    def _sig(self, side=Side.CALL):
+        return Signal(asset="EURUSD", side=side, confidence=0.9,
+                      strategy="rsi_stretch", timeframe_seconds=60)
+
+    def test_the_flag_changes_the_verdict(self):
+        on = Survivor(enabled=True).evaluate(self._sig(), self._reading(),
+                                             strategy_family="meanrev")
+        off = Survivor(enabled=False).evaluate(self._sig(), self._reading(),
+                                               strategy_family="meanrev")
+        self.assertFalse(on.allow)
+        self.assertTrue(off.allow)
+
+    def test_a_disabled_playbook_reports_no_caps(self):
+        """The engine clamps the expiry to decision.max_expiry_seconds and
+        reads min_confidence off the decision, so a disabled playbook that
+        still reported the posture table would constrain through the back
+        door."""
+        d = Survivor(enabled=False).evaluate(self._sig(),
+                                             self._reading(MarketRegime.LOW_VOL,
+                                                           0.0),
+                                             strategy_family="meanrev")
+        self.assertEqual(d.min_confidence, 0.0)
+        self.assertEqual(d.forbidden_families, set())
+        self.assertGreaterEqual(d.max_expiry_seconds, 60)
+
+    def test_says_why_it_allowed_the_trade(self):
+        d = Survivor(enabled=False).evaluate(self._sig(),
+                                             self._reading(MarketRegime.LOW_VOL,
+                                                           0.0),
+                                             strategy_family="meanrev")
+        self.assertIn("playbook disabled", " ".join(d.reasons))
+
+    def test_manual_lockdown_survives_the_switch(self):
+        """The emergency stop is not playbook tuning. Disabling the playbook
+        must not disable the one control an operator reaches for in a panic."""
+        s = Survivor(enabled=False)
+        s.engage_lockdown("operator hit the button")
+        d = s.evaluate(self._sig(), self._reading(MarketRegime.LOW_VOL, 0.0),
+                       strategy_family="meanrev")
+        self.assertFalse(d.allow)
+        self.assertIn("manual lockdown", d.reasons)
+
+    def test_news_blackout_survives_the_switch(self):
+        s = Survivor(enabled=False)
+        s.flag_news()
+        d = s.evaluate(self._sig(), self._reading(MarketRegime.LOW_VOL, 0.0),
+                       strategy_family="meanrev")
+        self.assertFalse(d.allow)
+        self.assertIn("news blackout", d.reasons)
+
+    def test_panic_deleverage_is_its_own_knob(self):
+        """Turning the playbook off does not silently turn off the separate
+        panic_deleverage flag."""
+        stressed = self._reading(MarketRegime.LOW_VOL, 0.9)
+        on = Survivor(enabled=False, panic_deleverage=True).evaluate(
+            self._sig(), stressed, strategy_family="meanrev")
+        off = Survivor(enabled=False, panic_deleverage=False).evaluate(
+            self._sig(), stressed, strategy_family="meanrev")
+        self.assertLess(on.stake_scale, off.stake_scale)
+
+    def test_a_disabled_playbook_still_scales_by_risk_scale(self):
+        d = Survivor(enabled=False).evaluate(self._sig(),
+                                             self._reading(MarketRegime.LOW_VOL,
+                                                           0.0),
+                                             strategy_family="meanrev",
+                                             risk_scale=0.5)
+        self.assertAlmostEqual(d.stake_scale, 0.5, places=6)
+
+    def test_the_engine_passes_the_config_flag_through(self):
+        from cybertrade.bot.engine import TradingEngine
+        from cybertrade.config import AppConfig
+        from tests.venue_stubs import VenueFeed, VenueStub
+
+        cfg = AppConfig()
+        cfg.survivor.enabled = False
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=60),
+                            broker=VenueStub())
+        self.assertFalse(eng.survivor.enabled)
+        cfg.survivor.enabled = True
+        eng = TradingEngine(cfg, feed=VenueFeed(assets=["EURUSD"], n=60),
+                            broker=VenueStub())
+        self.assertTrue(eng.survivor.enabled)

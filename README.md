@@ -170,6 +170,21 @@ ensemble mode), `survivor` (defense matrix), `broker` (`mode` is `quotex` and
 nothing else; `demo_account` is your purse — `null` until you choose),
 `display` (theme: `neon_abyss` / `magenta_hell` / `ghost_cyan`).
 
+Every switch below actually takes effect — they were audited for it:
+
+| knob | what it does |
+| --- | --- |
+| `survivor.enabled` | `false` opens the defensive playbook: the posture vetoes, liquidity/spread/slippage limits, expiry and confidence caps and the trend filter all stop applying, and the terminal logs a `CRITICAL` line saying so. **Manual lockdown and news blackout still apply** — an emergency stop is not playbook tuning. |
+| `survivor.trend_filter` | in `BULL_TREND` a put is vetoed; in `BEAR_TREND` a long is vetoed. |
+| `survivor.regime_rotation` | gates the posture → strategy-family weighting table. |
+| `risk.crisis_stake_scale` | multiplies the stake whenever the tape reads defensive. |
+| `risk.edge_gate` | `off` \| `scale` \| `hard` — what happens when the calibrated edge is below `risk.min_edge`. Negative EV is vetoed in all three modes. |
+| `strategy.enabled` / `.disabled` | the member list. `enabled: ["ensemble_all_weather"]` is the "run them all" sentinel. |
+| `strategy.trade_on_weak` | drops the confidence floor into the `WEAK` band. Off by default. |
+| `strategy.max_signals_per_candle` | `0` = no cap (the default). Set it to blend only the strongest N votes per candle. |
+| `broker.request_timeout` | the deadline on every venue request. |
+| `display.{scanlines,glow,animate,show_grid}` | the renderer honours all four; turn them off to save frames. |
+
 ## Phase 32 — the watchdog (crash recovery without risk amnesia)
 
 A process restart used to forget paper contracts and reset the risk-day
